@@ -1,0 +1,22 @@
+[Unit]
+Description=NGFW selective HTTP/TLS request gate
+After=ngfw-engine.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ngfw
+Group=ngfw
+EnvironmentFile=-/etc/ngfw/ngfw.env
+WorkingDirectory=/var/lib/ngfw
+ExecStart=/usr/local/lib/ngfw/ngfw-proxy
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ngfw /var/log/ngfw
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

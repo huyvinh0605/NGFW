@@ -1,0 +1,27 @@
+[Unit]
+Description=NGFW forwarding and decision engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=ngfw
+EnvironmentFile=-/etc/ngfw/ngfw.env
+WorkingDirectory=/var/lib/ngfw
+ExecStart=/usr/local/lib/ngfw/ngfw-engine
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=ngfw
+RuntimeDirectoryMode=0750
+UMask=0007
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ngfw /var/log/ngfw /etc/sysctl.d /run/ngfw /proc/sys/net
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+state/
+.tools/
+.gopath/
+dist/
+node_modules/
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+*.log
+*.sqlite*
+ml/models/
+__pycache__/
+"Th?c m?c/"

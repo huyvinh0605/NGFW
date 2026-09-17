@@ -1,0 +1,24 @@
+[Unit]
+Description=NGFW management API
+After=network-online.target ngfw-engine.service
+Wants=network-online.target ngfw-engine.service
+
+[Service]
+Type=simple
+User=ngfw
+Group=ngfw
+EnvironmentFile=-/etc/ngfw/ngfw.env
+WorkingDirectory=/var/lib/ngfw
+ExecStart=/usr/local/lib/ngfw/ngfw-api
+Restart=on-failure
+RestartSec=2
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/ngfw
+ReadWritePaths=/var/lib/ngfw/management /var/log/ngfw
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

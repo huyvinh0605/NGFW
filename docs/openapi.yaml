@@ -1,0 +1,258 @@
+openapi: 3.0.3
+info:
+  title: NGFW Management API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080/api/v1
+paths:
+  /health:
+    get:
+      summary: Component health
+      responses:
+        '200': {description: Health envelope}
+  /auth/login:
+    post:
+      summary: Login and receive a bearer token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [username, password], properties: {username: {type: string}, password: {type: string, format: password}}}
+      responses:
+        '200': {description: Authenticated user}
+  /config:
+    get:
+      summary: Running and candidate configuration
+      responses: {'200': {description: Configuration envelope}}
+  /config/candidate:
+    put:
+      security: [{bearerAuth: []}]
+      summary: Replace the candidate configuration
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/Config'}}
+      responses: {'200': {description: Candidate accepted}, '400': {description: Validation failure}}
+  /policies/validate:
+    post:
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Candidate valid}}
+  /policies/commit:
+    post:
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object, required: [expected_version], properties: {expected_version: {type: integer, format: int64}, author: {type: string}, comment: {type: string}}}}
+      responses: {'200': {description: New running version}, '409': {description: Conflict or activation failure}}
+  /policies/rollback:
+    post:
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Rolled back configuration and applied it through ngfw-engine}, '409': {description: Rollback activation failure}, '503': {description: Privileged engine unavailable}}
+  /sessions:
+    get:
+      parameters:
+        - {name: source_ip, in: query, schema: {type: string}}
+        - {name: destination_ip, in: query, schema: {type: string}}
+        - {name: protocol, in: query, schema: {type: string, description: tcp, udp, icmp or protocol number}}
+        - {name: source_zone, in: query, schema: {type: string}}
+        - {name: destination_zone, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string, enum: [NEW, ESTABLISHED, CLOSING, CLOSED]}}
+        - {name: decision, in: query, schema: {type: string, enum: [ALLOW, DROP, REJECT]}}
+        - {name: tuple_view, in: query, schema: {type: string, enum: [original, translated, any]}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+      responses:
+        '200':
+          description: Paginated active sessions including original/reply/NAT tuples
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: {type: boolean}
+                  data:
+                    type: object
+                    properties:
+                      items: {type: array, items: {$ref: '#/components/schemas/RuntimeSession'}}
+                      page: {type: integer}
+                      page_size: {type: integer}
+                      total: {type: integer}
+                      has_more: {type: boolean}
+                      store_revision: {type: integer, format: int64}
+                      snapshot_time: {type: string, format: date-time}
+  /sessions/{id}:
+    get:
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200':
+          description: Session and unified security context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: {type: boolean}
+                  data:
+                    type: object
+                    properties:
+                      session: {$ref: '#/components/schemas/RuntimeSession'}
+    delete:
+      security: [{bearerAuth: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Session terminated}}
+  /events:
+    get:
+      parameters:
+        - {name: after, in: query, schema: {type: integer, format: int64}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 200}}
+      responses: {'200': {description: Bounded runtime event page; gap_from signals dropped history}}
+  /events/{id}:
+    get:
+      parameters: [{name: id, in: path, required: true, schema: {type: string, description: Runtime event sequence}}]
+      responses: {'200': {description: Runtime event}, '404': {description: Event was evicted}}
+  /blocks:
+    get: {responses: {'200': {description: Active temporary blocks}}}
+    post:
+      security: [{bearerAuth: []}]
+      responses: {'201': {description: Temporary block created}}
+  /stats/system:
+    get: {responses: {'200': {description: System and queue counters}}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  schemas:
+    SessionTuple:
+      type: object
+      required: [family, src_ip, dst_ip, protocol]
+      properties:
+        family: {type: string, enum: [ipv4, ipv6]}
+        src_ip: {type: string}
+        src_port: {type: integer, minimum: 0, maximum: 65535}
+        dst_ip: {type: string}
+        dst_port: {type: integer, minimum: 0, maximum: 65535}
+        protocol: {type: integer, minimum: 1, maximum: 255}
+        icmp_type: {type: integer, minimum: 0, maximum: 255}
+        icmp_code: {type: integer, minimum: 0, maximum: 255}
+        icmp_id: {type: integer, minimum: 0, maximum: 65535}
+    SessionNAT:
+      type: object
+      properties:
+        original_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        reply_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        translated_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        pre_nat_source: {type: string}
+        pre_nat_destination: {type: string}
+        post_nat_source: {type: string}
+        post_nat_destination: {type: string}
+        snat: {type: boolean}
+        dnat: {type: boolean}
+        source_translation_method: {type: string}
+        matched_rule_id: {type: string}
+        evidence_generation: {type: integer, format: int64}
+    RuntimeSession:
+      type: object
+      required: [session_id, original_tuple, state, cache_state, quality]
+      properties:
+        session_id: {type: string}
+        identity: {type: object}
+        original_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        reply_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        translated_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        nat: {$ref: '#/components/schemas/SessionNAT'}
+        ip_family: {type: string, enum: [ipv4, ipv6]}
+        protocol: {type: integer, minimum: 1, maximum: 255}
+        source_zone: {type: string}
+        destination_zone: {type: string}
+        state: {type: string, enum: [NEW, ESTABLISHED, CLOSING, CLOSED]}
+        created_at: {type: string, format: date-time}
+        last_seen: {type: string, format: date-time}
+        last_observed_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, nullable: true}
+        closed_at: {type: string, format: date-time, nullable: true}
+        packets_original: {type: integer, format: int64}
+        bytes_original: {type: integer, format: int64}
+        packets_reply: {type: integer, format: int64}
+        bytes_reply: {type: integer, format: int64}
+        matched_policy_id: {type: string}
+        policy_generation: {type: integer, format: int64}
+        decision: {type: string, enum: [ALLOW, DROP, REJECT]}
+        decision_generation: {type: integer, format: int64}
+        decision_reason: {type: string}
+        cache_state: {type: string, enum: [NOT_EVALUATED, CACHED, INVALIDATED]}
+        invalidated_at: {type: string, format: date-time, nullable: true}
+        invalidation_reason: {type: string}
+        kernel_epoch: {type: integer, minimum: 0, maximum: 4095}
+        kernel_mark: {type: integer, format: int64}
+        kernel_cache_verified: {type: boolean}
+        effective_decision: {type: string, enum: [ALLOW, DROP, REJECT]}
+        revoked: {type: boolean}
+        revision: {type: integer, format: int64}
+        quality: {type: object}
+    Config:
+      type: object
+      required: [interfaces, zones, routes, nat_rules, policies, security_profiles]
+      properties:
+        interfaces: {type: array, items: {$ref: '#/components/schemas/Interface'}}
+        zones: {type: array, items: {type: object}}
+        routes: {type: array, items: {$ref: '#/components/schemas/Route'}}
+        nat_rules: {type: array, items: {$ref: '#/components/schemas/NATRule'}}
+        policies: {type: array, items: {$ref: '#/components/schemas/FirewallPolicy'}}
+        security_profiles: {type: array, items: {type: object}}
+    Interface:
+      type: object
+      required: [id, system_name, mode, ipv4_addresses, ipv6_addresses, admin_state]
+      properties:
+        id: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$'}
+        name: {type: string}
+        system_name: {type: string, minLength: 1, maxLength: 15, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,14}$'}
+        zone_id: {type: string}
+        mode: {type: string, enum: [L3, VLAN_PARENT, VLAN_SUBINTERFACE, MANAGEMENT]}
+        parent_interface_id: {type: string, description: Required only for VLAN_SUBINTERFACE}
+        vlan_id: {type: integer, minimum: 1, maximum: 4094, description: Required only for VLAN_SUBINTERFACE}
+        ipv4_addresses: {type: array, items: {type: string, description: IPv4 CIDR prefix}}
+        ipv6_addresses: {type: array, items: {type: string, description: IPv6 CIDR prefix}}
+        mtu: {type: integer, minimum: 576, maximum: 65535}
+        admin_state: {type: boolean}
+    Route:
+      type: object
+      required: [id, destination_cidr, enabled]
+      properties:
+        id: {type: string}
+        destination_cidr: {type: string}
+        gateway: {type: string}
+        interface_id: {type: string, description: Required when gateway is empty}
+        metric: {type: integer, minimum: 0}
+        enabled: {type: boolean}
+        description: {type: string}
+    NATRule:
+      type: object
+      required: [id, type, source_zone, destination_zone, enabled, priority]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        type: {type: string, enum: [SNAT, MASQUERADE, DNAT]}
+        source_zone: {type: string}
+        destination_zone: {type: string}
+        source_network: {type: string, description: IPv4 CIDR}
+        destination_network: {type: string, description: IPv4 CIDR}
+        protocol: {type: string, enum: [tcp, udp, icmp]}
+        original_port: {type: integer, minimum: 0, maximum: 65535}
+        translated_address: {type: string, description: Required for SNAT and DNAT}
+        translated_port: {type: integer, minimum: 0, maximum: 65535}
+        enabled: {type: boolean}
+        priority: {type: integer, minimum: 0}
+    FirewallPolicy:
+      type: object
+      required: [id, priority, action, enabled]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        priority: {type: integer, minimum: 0}
+        source_zones: {type: array, items: {type: string}}
+        destination_zones: {type: array, items: {type: string}}
+        source_addresses: {type: array, items: {type: string, description: IPv4 address or CIDR}}
+        destination_addresses: {type: array, items: {type: string, description: IPv4 address or CIDR}}
+        services: {type: array, items: {type: string, example: 'tcp:443'}}
+        action: {type: string, enum: [ALLOW, DROP, REJECT]}
+        enabled: {type: boolean}

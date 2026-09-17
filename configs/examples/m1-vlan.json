@@ -1,0 +1,61 @@
+{
+  "interfaces": [
+    {
+      "id": "wan0",
+      "name": "WAN",
+      "system_name": "eth0",
+      "zone_id": "wan",
+      "mode": "L3",
+      "ipv4_addresses": ["192.0.2.2/24"],
+      "ipv6_addresses": [],
+      "mtu": 1500,
+      "admin_state": true
+    },
+    {
+      "id": "lan-trunk",
+      "name": "LAN trunk",
+      "system_name": "eth1",
+      "mode": "VLAN_PARENT",
+      "ipv4_addresses": [],
+      "ipv6_addresses": [],
+      "mtu": 1500,
+      "admin_state": true
+    },
+    {
+      "id": "lan-vlan10",
+      "name": "LAN VLAN 10",
+      "system_name": "eth1.10",
+      "zone_id": "lan",
+      "mode": "VLAN_SUBINTERFACE",
+      "parent_interface_id": "lan-trunk",
+      "vlan_id": 10,
+      "ipv4_addresses": ["192.168.10.1/24"],
+      "ipv6_addresses": [],
+      "mtu": 1500,
+      "admin_state": true
+    }
+  ],
+  "zones": [
+    {"id": "wan", "name": "WAN"},
+    {"id": "lan", "name": "LAN"}
+  ],
+  "routes": [
+    {"id": "default-wan", "destination_cidr": "0.0.0.0/0", "gateway": "192.0.2.1", "interface_id": "wan0", "metric": 100, "enabled": true}
+  ],
+  "nat_rules": [
+    {"id": "lan-masquerade", "name": "LAN outbound", "type": "MASQUERADE", "source_zone": "lan", "destination_zone": "wan", "source_network": "192.168.10.0/24", "enabled": true, "priority": 100}
+  ],
+  "policies": [
+    {"id": "allow-lan-out", "name": "LAN outbound", "priority": 10, "source_zones": ["lan"], "destination_zones": ["wan"], "services": ["tcp:80", "tcp:443", "udp:53"], "action": "ALLOW", "enabled": true}
+  ],
+  "security_profiles": [],
+  "max_sessions": 50000,
+  "max_events_queue": 10000,
+  "max_http_body_inspection": 65536,
+  "max_http_header_size": 32768,
+  "max_url_length": 8192,
+  "max_ml_input_length": 65536,
+  "ml_timeout_millis": 200,
+  "request_inspection_timeout_millis": 2000,
+  "default_deny": true
+}
