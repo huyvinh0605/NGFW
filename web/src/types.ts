@@ -47,6 +47,19 @@ export type Session = {
   fast_path_eligible: boolean;
   fast_path_reason?: string;
   invalidated: boolean;
+  /** Runtime M2 tuple data. Legacy API responses may omit these fields. */
+  original_tuple?: FlowTuple;
+  reply_tuple?: FlowTuple;
+  translated_tuple?: FlowTuple;
+};
+
+export type FlowTuple = {
+  src_ip: string;
+  dst_ip: string;
+  src_port: number;
+  dst_port: number;
+  protocol: string;
+  namespace?: string;
 };
 
 export type SecurityContext = {

@@ -111,6 +111,7 @@ code, pre, .mono { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, mon
 .panel-heading.padded { padding: 17px 18px 0; }
 .panel-heading h2 { font-size: 13px; font-weight: 650; }
 .panel-heading p { color: var(--muted); font-size: 10px; margin-top: 4px; }
+.panel-heading-actions { display: flex; align-items: center; gap: 7px; }
 .badge { min-height: 20px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; color: #92a6b9; background: rgba(255, 255, 255, .025); font-size: 8px; font-weight: 700; letter-spacing: .035em; white-space: nowrap; }
 .badge-low, .badge-ok, .badge-healthy { color: #72dfb4; border-color: rgba(79, 218, 164, .2); background: rgba(79, 218, 164, .07); }
 .badge-info, .badge-blue { color: #78b7fa; border-color: rgba(90, 168, 255, .2); background: rgba(90, 168, 255, .07); }
@@ -271,7 +272,7 @@ label small { color: #5d7489; font-size: 8px; font-weight: 400; }
 .config-state > div { display: flex; flex-direction: column; }
 .config-state strong { font-size: 10px; }
 .config-state small { color: #6d8397; font-size: 8px; margin-top: 3px; }
-.config-version { width: 38px; height: 38px; display: grid; place-items: center; color: var(--cyan); border: 1px solid rgba(54, 214, 197, .2); border-radius: 9px; background: rgba(54, 214, 197, .07); font-family: "Cascadia Mono", Consolas, monospace; font-size: 9px; }
+.config-version { min-width: 55px; height: 40px; display: grid; place-items: center; color: var(--cyan); border: 1px solid rgba(54, 214, 197, .2); border-radius: 9px; background: rgba(54, 214, 197, .07); font-family: "Cascadia Mono", Consolas, monospace; font-size: 8px; line-height: 1.35; text-align: center; }
 .config-bar.dirty .config-version { color: var(--amber); border-color: rgba(241, 186, 92, .23); background: rgba(241, 186, 92, .08); }
 .commit-controls { display: flex; justify-content: flex-end; align-items: center; gap: 7px; }
 .commit-controls input { width: 190px; height: 34px; }
@@ -324,8 +325,17 @@ label small { color: #5d7489; font-size: 8px; font-weight: 400; }
 
 .config-layout { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 16px; align-items: start; }
 .config-aside { display: flex; flex-direction: column; gap: 16px; }
+.configuration-context { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 26px; }
+.back-link { padding: 0; color: var(--cyan); border: 0; background: transparent; font-size: 9px; font-weight: 600; }
+.back-link:hover { color: #a7f4eb; }
+.breadcrumb { display: flex; align-items: center; gap: 5px; color: #60788d; font-size: 8px; }
+.breadcrumb strong { color: #93a8b9; font-size: inherit; }
+.advanced-editor-note { display: flex; align-items: center; gap: 10px; padding: 10px 13px; color: #78d9cc; border: 1px solid rgba(54, 214, 197, .14); border-radius: 9px; background: rgba(54, 214, 197, .035); }
+.advanced-editor-note > div { display: flex; flex-direction: column; gap: 3px; }
+.advanced-editor-note strong { font-size: 9px; }
+.advanced-editor-note span { color: #6f879a; font-size: 8px; }
 .editor-panel { min-width: 0; }
-.editor-actions { display: flex; gap: 6px; }
+.editor-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .code-editor { width: 100%; min-height: 650px; resize: vertical; border-color: #1b3349; border-radius: 8px; color: #b9d1de; background: #07131f; font-family: "Cascadia Mono", Consolas, monospace; font-size: 9px; line-height: 1.68; tab-size: 2; }
 .inline-error { display: flex; align-items: center; gap: 7px; padding: 9px 11px; margin-bottom: 9px; color: #ff9cab; border: 1px solid rgba(251, 108, 131, .2); border-radius: 7px; background: rgba(251, 108, 131, .07); font-size: 9px; }
 .change-list { display: flex; flex-direction: column; }
@@ -501,6 +511,8 @@ fieldset > small { display: block; color: #5a7186; font-size: 7px; margin-top: 8
   .commit-controls { flex-wrap: wrap; justify-content: flex-start; }
   .commit-controls input { flex-basis: 100%; }
   .config-aside { grid-template-columns: 1fr; }
+  .configuration-context { align-items: flex-start; flex-direction: column; }
+  .panel-heading-actions { flex-wrap: wrap; justify-content: flex-end; }
   .form-row, .form-row.two { grid-template-columns: 1fr; }
   .limit-grid { grid-template-columns: repeat(2, 1fr); }
   .code-editor { min-height: 500px; }
@@ -525,6 +537,7 @@ fieldset > small { display: block; color: #5a7186; font-size: 7px; margin-top: 8
   .form-panel, .panel { padding: 14px; }
   .table-panel { padding: 0; }
   .panel-heading.padded { padding: 14px 14px 0; }
+  .panel-heading-actions { width: 100%; justify-content: flex-start; }
   .limit-grid { grid-template-columns: 1fr 1fr; }
   .toast { right: 12px; bottom: 12px; left: 12px; max-width: none; }
 }

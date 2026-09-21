@@ -19,6 +19,8 @@ export class APIError extends Error {
 }
 
 const TOKEN_KEY = "ngfw.console.token";
+export const DEFAULT_READ_TIMEOUT_MS = 8_000;
+export const DEFAULT_WRITE_TIMEOUT_MS = 95_000;
 
 export function storedToken(): string {
   return window.localStorage.getItem(TOKEN_KEY) ?? "";
@@ -29,32 +31,63 @@ export function persistToken(token: string): void {
   else window.localStorage.removeItem(TOKEN_KEY);
 }
 
-export async function api<T>(path: string, init: RequestInit = {}, token = storedToken()): Promise<T> {
+export async function api<T>(path: string, init: RequestInit = {}, token = storedToken(), timeoutMs?: number): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body != null && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  let response: Response;
-  try {
-    response = await fetch(path, { ...init, headers });
-  } catch {
-    throw new APIError(0, "NETWORK_ERROR", "Không kết nối được tới NGFW API");
+  const method = (init.method ?? "GET").toUpperCase();
+  // Runtime-backed reads can wait on a bounded engine IPC query. Do not let
+  // one stalled upstream request hold the dashboard forever; callers can
+  // override this for a known longer operation.
+  const timeout = timeoutMs ?? (method === "GET" ? DEFAULT_READ_TIMEOUT_MS : DEFAULT_WRITE_TIMEOUT_MS);
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: number | undefined;
+  let removeAbortListener: (() => void) | undefined;
+  if (timeout > 0) {
+    timer = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeout);
+  }
+  if (init.signal) {
+    const abort = () => controller.abort();
+    if (init.signal.aborted) abort();
+    else {
+      init.signal.addEventListener("abort", abort, { once: true });
+      removeAbortListener = () => init.signal?.removeEventListener("abort", abort);
+    }
   }
 
-  const raw = await response.text();
+  let response: Response;
+  let raw: string;
+  try {
+    response = await fetch(path, { ...init, headers, signal: controller.signal });
+    raw = await response.text();
+  } catch (error) {
+    if (timer !== undefined) window.clearTimeout(timer);
+    removeAbortListener?.();
+    if (timedOut) throw new APIError(0, "TIMEOUT", `Request ${path} timed out`);
+    if (init.signal?.aborted) throw new APIError(0, "ABORTED", "Request was cancelled");
+    throw new APIError(0, "NETWORK_ERROR", "Could not connect to NGFW API", error instanceof Error ? [error.message] : []);
+  }
+
+  if (timer !== undefined) window.clearTimeout(timer);
+  removeAbortListener?.();
   let payload: APIEnvelope<T> | undefined;
   try {
     payload = raw ? (JSON.parse(raw) as APIEnvelope<T>) : undefined;
   } catch {
-    throw new APIError(response.status, "INVALID_RESPONSE", "API trả về dữ liệu không hợp lệ");
+    throw new APIError(response.status, "INVALID_RESPONSE", "API returned an invalid response");
   }
 
   if (!response.ok || !payload?.success) {
     throw new APIError(
       response.status,
       payload?.error?.code ?? "REQUEST_FAILED",
-      payload?.error?.message ?? `Yêu cầu thất bại (${response.status})`,
+      payload?.error?.message ?? `Request failed (${response.status})`,
       payload?.error?.details ?? [],
     );
   }
@@ -67,4 +100,3 @@ export function errorMessage(error: unknown): string {
   }
   return error instanceof Error ? error.message : String(error);
 }
-

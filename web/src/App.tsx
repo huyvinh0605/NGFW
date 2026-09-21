@@ -1,5 +1,25 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage, persistToken, storedToken } from "./api";
+import {
+  pushConsoleNavigation,
+  readConsoleNavigation,
+  replaceConsoleNavigation,
+  subscribeConsoleNavigation,
+} from "./navigation";
+import {
+  normalizeAuditPage,
+  normalizeBlocks,
+  normalizeConfigExport,
+  normalizeEvent,
+  normalizeEventPage,
+  normalizeHealth,
+  normalizeMLStatus,
+  normalizeReputation,
+  normalizeSessionDetail,
+  normalizeSessionPage,
+  normalizeStats,
+} from "./runtimeData";
+import { closeSocketAfterOpen } from "./wsLifecycle";
 import type {
   AuditEntry,
   ConfigExport,
@@ -82,8 +102,18 @@ const pageMeta: Record<Page, { title: string; subtitle: string }> = {
   threats: { title: "Mối đe dọa", subtitle: "Sự kiện detector, chặn tạm thời và reputation" },
   policy: { title: "Chính sách bảo mật", subtitle: "Thứ tự first-match và profile áp dụng cho traffic" },
   network: { title: "Hạ tầng mạng", subtitle: "Interface, zone, route và NAT trong candidate hiện tại" },
-  configuration: { title: "Quản lý cấu hình", subtitle: "Candidate, kiểm tra, commit và rollback có phiên bản" },
+  configuration: { title: "Cấu hình JSON nâng cao", subtitle: "Biên tập toàn bộ Candidate trong cùng workflow cấu hình" },
   system: { title: "Trạng thái hệ thống", subtitle: "Sức khỏe thành phần và giới hạn vận hành" },
+};
+
+const pageShortLabel: Record<Page, string> = {
+  overview: "Tổng quan",
+  sessions: "Sessions",
+  threats: "Mối đe dọa",
+  policy: "Chính sách",
+  network: "Mạng",
+  configuration: "Cấu hình JSON",
+  system: "Hệ thống",
 };
 
 function cx(...names: Array<string | false | null | undefined>) { return names.filter(Boolean).join(" "); }
@@ -95,7 +125,9 @@ function formatDate(value?: string) {
 }
 function relativeTime(value?: string) {
   if (!value) return "chưa có";
-  const seconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return "chưa có";
+  const seconds = Math.round((timestamp - Date.now()) / 1000);
   if (Math.abs(seconds) < 60) return "vừa xong";
   const formatter = new Intl.RelativeTimeFormat("vi", { numeric: "auto" });
   if (Math.abs(seconds) < 3600) return formatter.format(Math.round(seconds / 60), "minute");
@@ -110,7 +142,10 @@ function formatBytes(value: number | undefined) {
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 function riskClass(score: number) { return score >= 80 ? "critical" : score >= 60 ? "high" : score >= 30 ? "medium" : "low"; }
-function severityClass(severity: string) { return severity.toLowerCase(); }
+function severityClass(severity: unknown) {
+  const normalized = typeof severity === "string" ? severity.trim().toLowerCase() : "";
+  return ["info", "low", "medium", "high", "critical"].includes(normalized) ? normalized : "info";
+}
 function objectChanged(a: unknown, b: unknown) { return JSON.stringify(a) !== JSON.stringify(b); }
 
 function Button({ children, icon, variant = "secondary", busy, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: IconName; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
@@ -139,7 +174,9 @@ type LiveData = {
 const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null };
 
 export default function App() {
-  const [page, setPage] = useState<Page>("overview");
+  const initialNavigation = useRef(readConsoleNavigation(window.location.hash, window.history.state)).current;
+  const [page, setPage] = useState<Page>(initialNavigation.page);
+  const [pageOrigin, setPageOrigin] = useState<Page | undefined>(initialNavigation.from);
   const [menuOpen, setMenuOpen] = useState(false);
   const [live, setLive] = useState<LiveData>(emptyLive);
   const [config, setConfig] = useState<ConfigExport | null>(null);
@@ -151,6 +188,14 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [accessOpen, setAccessOpen] = useState(false);
   const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string } | null>(null);
+  const liveLoading = useRef(false);
+  const configLoading = useRef(false);
+  const liveError = useRef("");
+  const configError = useRef("");
+
+  const refreshConnectionError = useCallback(() => {
+    setConnectionError(liveError.current || configError.current);
+  }, []);
 
   const notify = useCallback((tone: "success" | "error" | "info", message: string) => setToast({ tone, message }), []);
   useEffect(() => {
@@ -160,60 +205,115 @@ export default function App() {
   }, [toast]);
 
   const loadLive = useCallback(async (quiet = false) => {
+    if (liveLoading.current) return;
+    liveLoading.current = true;
     if (!quiet) setRefreshing(true);
     try {
-      const [health, sessionPage, eventPage, blocks, stats, ml, reputation, auditPage] = await Promise.all([
-        api<Health>("/api/v1/health"),
-        api<{ items: Session[] }>("/api/v1/sessions"),
-        api<{ items: SecurityEvent[] }>("/api/v1/events"),
-        api<TemporaryBlock[]>("/api/v1/blocks"),
-        api<Stats>("/api/v1/stats/system"),
-        api<MLStatus>("/api/v1/ml/status"),
-        api<ReputationEntry[]>("/api/v1/reputation"),
-        api<{ items: AuditEntry[] }>("/api/v1/audit?limit=250"),
+      const endpointLabels = ["health", "sessions", "events", "blocks", "stats", "ML", "reputation", "audit"];
+      // These resources have independent failure modes (notably the runtime
+      // IPC-backed sessions/config paths), so keep healthy panels rendering
+      // when one endpoint is unavailable.
+      const results = await Promise.allSettled([
+        api<unknown>("/api/v1/health"),
+        api<unknown>("/api/v1/sessions"),
+        api<unknown>("/api/v1/events"),
+        api<unknown>("/api/v1/blocks"),
+        api<unknown>("/api/v1/stats/system"),
+        api<unknown>("/api/v1/ml/status"),
+        api<unknown>("/api/v1/reputation"),
+        api<unknown>("/api/v1/audit?limit=250"),
       ]);
-      setLive({ health, sessions: sessionPage.items ?? [], events: eventPage.items ?? [], blocks, stats, ml, reputation, audit: auditPage.items ?? [] });
-      setLastUpdated(new Date().toISOString());
-      setConnectionError("");
-    } catch (error) {
-      setConnectionError(errorMessage(error));
+      const read = <T,>(index: number, previous: T, normalize: (value: unknown) => T | null): T => {
+        const result = results[index];
+        if (result.status !== "fulfilled") return previous;
+        try {
+          const value = normalize(result.value);
+          return value === null ? previous : value;
+        } catch {
+          // A malformed response must not take down the whole dashboard.
+          return previous;
+        }
+      };
+      setLive((current) => ({
+        health: read(0, current.health, normalizeHealth),
+        sessions: read(1, current.sessions, (value) => normalizeSessionPage(value)),
+        events: read(2, current.events, (value) => normalizeEventPage(value)),
+        blocks: read(3, current.blocks, (value) => normalizeBlocks(value)),
+        stats: read(4, current.stats, (value) => normalizeStats(value)),
+        ml: read(5, current.ml, normalizeMLStatus),
+        reputation: read(6, current.reputation, (value) => normalizeReputation(value)),
+        audit: read(7, current.audit, (value) => normalizeAuditPage(value)),
+      }));
+      const failures = results.flatMap((result, index) => result.status === "rejected" ? [`${endpointLabels[index]}: ${errorMessage(result.reason)}`] : []);
+      liveError.current = failures.length ? `Một số nguồn dữ liệu tạm thời không khả dụng (${failures.join("; ")})` : "";
+      if (results.some((result) => result.status === "fulfilled")) setLastUpdated(new Date().toISOString());
+      refreshConnectionError();
     } finally {
+      liveLoading.current = false;
       setInitialLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [refreshConnectionError]);
 
   const loadConfig = useCallback(async () => {
+    if (configLoading.current) return;
+    configLoading.current = true;
     try {
-      setConfig(await api<ConfigExport>("/api/v1/config"));
+      const normalized = normalizeConfigExport(await api<unknown>("/api/v1/config"));
+      if (!normalized) throw new Error("API trả về cấu hình không hợp lệ");
+      setConfig(normalized);
+      configError.current = "";
+      refreshConnectionError();
     } catch (error) {
-      setConnectionError(errorMessage(error));
+      configError.current = errorMessage(error);
+      refreshConnectionError();
+    } finally {
+      configLoading.current = false;
     }
-  }, []);
+  }, [refreshConnectionError]);
 
   useEffect(() => {
-    void loadLive();
-    void loadConfig();
+    const initialTimer = window.setTimeout(() => {
+      void loadLive();
+      void loadConfig();
+    }, 0);
     const timer = window.setInterval(() => void loadLive(true), 5000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(timer);
+    };
   }, [loadConfig, loadLive]);
+
+  useEffect(() => {
+    if (!window.location.hash) replaceConsoleNavigation(window, initialNavigation);
+    return subscribeConsoleNavigation(window, (entry) => {
+      setPage(entry.page);
+      setPageOrigin(entry.from);
+      setMenuOpen(false);
+    });
+  }, [initialNavigation]);
 
   useEffect(() => {
     let stopped = false;
     const sockets = new Set<WebSocket>();
     const timers = new Set<number>();
+    const startTimers = new Set<number>();
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     const connect = <T,>(path: string, receive: (data: T) => void) => {
       const open = () => {
         if (stopped) return;
         const socket = new WebSocket(`${scheme}://${window.location.host}${path}`);
         sockets.add(socket);
+        socket.onopen = () => {
+          if (stopped) closeSocketAfterOpen(socket);
+        };
         socket.onmessage = (message) => {
           try {
-            const envelope = JSON.parse(String(message.data)) as { success: boolean; data: T };
-            if (envelope.success) receive(envelope.data);
+            const envelope = JSON.parse(String(message.data)) as { success?: unknown; data?: T };
+            if (envelope && envelope.success === true) receive(envelope.data as T);
           } catch { /* polling remains the fallback for malformed frames */ }
         };
+        socket.onerror = () => { /* onclose schedules a bounded reconnect */ };
         socket.onclose = () => {
           sockets.delete(socket);
           if (!stopped) {
@@ -222,14 +322,30 @@ export default function App() {
           }
         };
       };
-      open();
+      // React StrictMode mounts, cleans up, and mounts effects again in dev.
+      // Deferring the first dial lets cleanup cancel it before a CONNECTING
+      // socket exists, avoiding a false handshake error in the Vite proxy.
+      const timer = window.setTimeout(() => { startTimers.delete(timer); open(); }, 0);
+      startTimers.add(timer);
     };
-    connect<Stats>("/ws/stats", (stats) => setLive((current) => ({ ...current, stats })));
-    connect<SecurityEvent>("/ws/events", (event) => setLive((current) => ({ ...current, events: [event, ...current.events.filter((item) => item.event_id !== event.event_id)].slice(0, 10000) })));
+    connect<unknown>("/ws/stats", (stats) => {
+      try {
+        const normalized = normalizeStats(stats);
+        setLive((current) => ({ ...current, stats: normalized }));
+      } catch { /* polling remains the fallback for malformed frames */ }
+    });
+    connect<unknown>("/ws/events", (value) => {
+      try {
+        const event = normalizeEvent(value);
+        if (!event) return;
+        setLive((current) => ({ ...current, events: [event, ...current.events.filter((item) => item.event_id !== event.event_id)].slice(0, 10000) }));
+      } catch { /* polling remains the fallback for malformed frames */ }
+    });
     return () => {
       stopped = true;
+      startTimers.forEach((timer) => window.clearTimeout(timer));
       timers.forEach((timer) => window.clearTimeout(timer));
-      sockets.forEach((socket) => socket.close());
+      sockets.forEach((socket) => closeSocketAfterOpen(socket));
     };
   }, []);
 
@@ -414,9 +530,23 @@ export default function App() {
   const hasCandidateChanges = !!config && objectChanged(config.running, config.candidate);
   const criticalEvents = live.events.filter((event) => event.severity === "CRITICAL" || event.severity === "HIGH").length;
 
-  function navigate(next: Page) {
+  function navigate(next: Page, origin?: Page) {
+    if (next === page) {
+      setMenuOpen(false);
+      return;
+    }
+    const entry = pushConsoleNavigation(window, next, next === "configuration" ? (origin ?? page) : undefined);
     setPage(next);
+    setPageOrigin(entry.from);
     setMenuOpen(false);
+  }
+
+  function navigateBack(origin: Page) {
+    if (pageOrigin === origin) {
+      window.history.back();
+      return;
+    }
+    navigate(origin);
   }
 
   return <div className="app-shell">
@@ -461,9 +591,24 @@ export default function App() {
           {page === "overview" && <OverviewPage live={live} config={config} lastUpdated={lastUpdated} onNavigate={navigate}/>} 
           {page === "sessions" && <SessionsPage sessions={live.sessions} onTerminate={terminateSession} onNeedAccess={() => setAccessOpen(true)}/>} 
           {page === "threats" && <ThreatsPage events={live.events} blocks={live.blocks} reputation={live.reputation} audit={live.audit} onAddBlock={addBlock} onDeleteBlock={deleteBlock} onAddReputation={addReputation} onDeleteReputation={deleteReputation}/>} 
-          {page === "policy" && <PolicyPage config={config} onSave={savePolicies} onValidate={validateCandidate} onCommit={commitCandidate} onRollback={rollback}/>} 
+          {page === "policy" && <PolicyPage
+            config={config}
+            onSave={savePolicies}
+            onValidate={validateCandidate}
+            onCommit={commitCandidate}
+            onRollback={rollback}
+            onOpenAdvanced={() => navigate("configuration", "policy")}
+          />}
           {page === "network" && <NetworkPage config={config} onNavigate={navigate}/>} 
-          {page === "configuration" && <ConfigurationPage config={config} onSave={saveCandidate} onValidate={validateCandidate} onCommit={commitCandidate} onRollback={rollback}/>} 
+          {page === "configuration" && <ConfigurationPage
+            config={config}
+            originPage={pageOrigin}
+            onBack={(origin) => navigateBack(origin)}
+            onSave={saveCandidate}
+            onValidate={validateCandidate}
+            onCommit={commitCandidate}
+            onRollback={rollback}
+          />}
           {page === "system" && <SystemPage live={live} config={config} token={token} user={user} onAccess={() => setAccessOpen(true)} onSignOut={signOut}/>} 
         </>}
       </main>
@@ -555,7 +700,11 @@ function SessionsPage({ sessions, onTerminate, onNeedAccess }: { sessions: Sessi
 
   async function openDetail(id: string) {
     setDetailLoading(true);
-    try { setSelected(await api<SessionDetail>(`/api/v1/sessions/${encodeURIComponent(id)}`)); }
+    try {
+      const detail = normalizeSessionDetail(await api<unknown>(`/api/v1/sessions/${encodeURIComponent(id)}`));
+      if (!detail) throw new Error("API trả về chi tiết session không hợp lệ");
+      setSelected(detail);
+    }
     catch { setSelected(null); }
     finally { setDetailLoading(false); }
   }
@@ -671,7 +820,7 @@ function EventDrawer({ event, onClose, onBlock }: { event: SecurityEvent; onClos
   return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng" onClick={onClose}/><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">SECURITY EVENT</span><h2>{event.category}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="drawer-body"><div className="event-hero"><Badge tone={severityClass(event.severity)}>{event.severity}</Badge><strong>{Math.round(event.confidence * 100)}% confidence</strong><span>{formatDate(event.timestamp)}</span></div><DetailSection title="Nguồn phát hiện"><DetailPair label="Detector" value={event.detector}/><DetailPair label="Signature" value={event.signature_id || "—"}/><DetailPair label="Application" value={event.application || "—"}/><DetailPair label="Recommended" value={event.recommended_action || "OBSERVE"}/></DetailSection><DetailSection title="Traffic"><DetailPair label="Source" value={event.source_ip || "Unavailable"}/><DetailPair label="Destination" value={event.destination_ip || "Unavailable"}/><DetailPair label="Session" value={event.session_id || "Uncorrelated"}/></DetailSection>{event.evidence && <DetailSection title="Evidence"><pre className="evidence">{event.evidence}</pre></DetailSection>}{event.metadata && <DetailSection title="Metadata"><pre className="json-preview">{JSON.stringify(event.metadata, null, 2)}</pre></DetailSection>}</div>{event.source_ip && <div className="drawer-footer"><Button variant="danger" icon="shield" onClick={() => void onBlock()}>Chặn source trong 1 giờ</Button></div>}</aside></div>;
 }
 
-function PolicyPage({ config, onSave, onValidate, onCommit, onRollback }: { config: ConfigExport | null; onSave: (policies: SecurityPolicy[]) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean> }) {
+export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, onOpenAdvanced }: { config: ConfigExport | null; onSave: (policies: SecurityPolicy[]) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean>; onOpenAdvanced: () => void }) {
   const [editing, setEditing] = useState<SecurityPolicy | null>(null);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState("");
@@ -702,7 +851,7 @@ function PolicyPage({ config, onSave, onValidate, onCommit, onRollback }: { conf
   return <div className="page-stack">
     <ConfigStatusBar config={config} dirty={dirty} comment={comment} onComment={setComment} busy={busy} onValidate={async () => { setBusy("validate"); await onValidate(); setBusy(""); }} onCommit={async () => { setBusy("commit"); const ok = await onCommit(comment); setBusy(""); if (ok) setComment(""); }} onRollback={async () => { setBusy("rollback"); await onRollback(); setBusy(""); }}/>
     <section className="panel table-panel">
-      <div className="panel-heading padded"><div><h2>Security policy rules</h2><p>Ưu tiên số nhỏ được đánh giá trước; default {config?.candidate.default_deny ? "deny" : "allow"}</p></div><Button variant="primary" icon="plus" onClick={() => setEditing(defaultPolicy)}>Thêm policy</Button></div>
+      <div className="panel-heading padded"><div><h2>Security policy rules</h2><p>Ưu tiên số nhỏ được đánh giá trước; default {config?.candidate.default_deny ? "deny" : "allow"}</p></div><div className="panel-heading-actions"><Button variant="ghost" icon="configuration" title="Mở trình soạn thảo nâng cao cho cùng Candidate hiện tại" onClick={onOpenAdvanced}>Mở JSON nâng cao</Button><Button variant="primary" icon="plus" onClick={() => setEditing(defaultPolicy)}>Thêm policy</Button></div></div>
       <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service / App</th><th>Profile</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small>{policy.applications?.join(", ") || "all applications"}</small></td><td>{policy.security_profile_id ? <Badge tone="blue">{policy.security_profile_id}</Badge> : <span className="muted">None</span>}</td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{policy.scope || "SESSION"}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>)}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
     </section>
     <section className="profile-grid">{config?.candidate.security_profiles.map((profile) => <article className="profile-card" key={profile.id}><div className="profile-top"><span className="profile-icon"><Icon name="shield"/></span><div><h3>{profile.name}</h3><small className="mono">{profile.id}</small></div><Badge tone={profile.inspection_required ? "blue" : "neutral"}>{profile.inspection_required ? "Required" : "Best effort"}</Badge></div><div className="profile-risk"><span>Block threshold</span><strong>{profile.minimum_block_risk}</strong><div><i style={{ width: `${profile.minimum_block_risk}%` }}/></div></div><div className="capability-list">{[["IPS", profile.ids_ips_enabled], ["DPI", profile.dpi_enabled], ["DNS", profile.dns_security_enabled], ["URL", profile.url_filtering_enabled], ["TI", profile.threat_intel_enabled], ["ML", profile.ml_detection_enabled]].map(([name, enabled]) => <span className={cx(enabled && "enabled")} key={String(name)}>{name}</span>)}</div><div className="profile-foot"><span>TLS</span><strong>{profile.tls_mode}</strong><span>Failure</span><strong>{profile.inspection_failure_action || "ALLOW"}</strong></div></article>)}</section>
@@ -710,8 +859,8 @@ function PolicyPage({ config, onSave, onValidate, onCommit, onRollback }: { conf
   </div>;
 }
 
-function ConfigStatusBar({ config, dirty, comment, onComment, busy, onValidate, onCommit, onRollback }: { config: ConfigExport | null; dirty: boolean; comment: string; onComment: (value: string) => void; busy: string; onValidate: () => Promise<void>; onCommit: () => Promise<void>; onRollback: () => Promise<void> }) {
-  return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version">v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate có thay đổi chưa áp dụng" : "Running và candidate đang đồng bộ"}</strong><small>{config?.candidate_valid ? "Validation hiện tại: hợp lệ" : "Candidate cần được kiểm tra"}{config?.version.author ? ` · commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={!dirty || !config?.candidate_valid} onClick={() => void onCommit()}>Commit</Button></div></section>;
+export function ConfigStatusBar({ config, dirty, comment, onComment, busy, onValidate, onCommit, onRollback }: { config: ConfigExport | null; dirty: boolean; comment: string; onComment: (value: string) => void; busy: string; onValidate: () => Promise<void>; onCommit: () => Promise<void>; onRollback: () => Promise<void> }) {
+  return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version" aria-label={`Running version ${config?.version.version ?? 0}`}>Running<br/>v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate changed — chưa Commit" : "Candidate synced với Running"}</strong><small>{config?.candidate_valid ? "Validation: hợp lệ" : "Validation: cần kiểm tra"}{config?.version.author ? ` · Running commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} title="Chỉ kiểm tra Candidate; không áp dụng dataplane" onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} title="Khôi phục previous known-good theo backend và áp dụng lại dataplane" onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={!dirty || !config?.candidate_valid} title="Kích hoạt Candidate thành Running và áp dụng dataplane" onClick={() => void onCommit()}>Commit</Button></div></section>;
 }
 
 function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: string[]; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
@@ -732,7 +881,7 @@ function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value
     <div className="form-row two"><label>Services <small>Phân cách bằng dấu phẩy</small><input value={draft.services?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, services: csv(event.target.value) })} placeholder="tcp:80, tcp:443"/></label><label>Applications <small>Để trống = any</small><input value={draft.applications?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, applications: csv(event.target.value) })} placeholder="http, tls"/></label></div>
     <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option><option>RATE_LIMIT</option><option>RESET_SESSION</option><option>TEMP_BLOCK</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>PACKET</option><option>REQUEST</option><option>SESSION</option><option>SOURCE_INDICATOR</option></select></label><label>Security profile<select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label></div>
     <div className="form-row"><label>Minimum risk<input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk<input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
-  </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào candidate</Button></div></form></div>;
+  </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
 }
 
 function NetworkPage({ config, onNavigate }: { config: ConfigExport | null; onNavigate: (page: Page) => void }) {
@@ -748,7 +897,7 @@ function NetworkPage({ config, onNavigate }: { config: ConfigExport | null; onNa
   </div>;
 }
 
-function ConfigurationPage({ config, onSave, onValidate, onCommit, onRollback }: { config: ConfigExport | null; onSave: (candidate: NGFWConfig) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean> }) {
+export function ConfigurationPage({ config, originPage, onBack, onSave, onValidate, onCommit, onRollback }: { config: ConfigExport | null; originPage?: Page; onBack: (origin: Page) => void; onSave: (candidate: NGFWConfig) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean> }) {
   const [editor, setEditor] = useState("");
   const [editorDirty, setEditorDirty] = useState(false);
   const [parseError, setParseError] = useState("");
@@ -775,14 +924,35 @@ function ConfigurationPage({ config, onSave, onValidate, onCommit, onRollback }:
     }
   }
   function formatEditor() {
-    try { setEditor(JSON.stringify(JSON.parse(editor), null, 2)); setParseError(""); }
+    try {
+      const formatted = JSON.stringify(JSON.parse(editor), null, 2);
+      setEditor(formatted);
+      setEditorDirty(formatted !== (config ? JSON.stringify(config.candidate, null, 2) : ""));
+      setParseError("");
+    }
     catch (error) { setParseError(error instanceof Error ? error.message : "JSON không hợp lệ"); }
+  }
+  function loadRunningIntoEditor() {
+    if (!config) return;
+    if (editorDirty || dirty) {
+      const warning = dirty
+        ? "Candidate hiện có thay đổi chưa commit. Nạp Running sẽ ghi đè các thay đổi này trong trình soạn thảo (Candidate backend chỉ thay đổi nếu sau đó bạn bấm Lưu vào Candidate). Tiếp tục?"
+        : "Trình soạn thảo có thay đổi chưa lưu. Nạp Running sẽ ghi đè nội dung đang chỉnh. Tiếp tục?";
+      if (!window.confirm(warning)) return;
+    }
+    const runningText = JSON.stringify(config.running, null, 2);
+    const candidateText = JSON.stringify(config.candidate, null, 2);
+    setEditor(runningText);
+    setEditorDirty(runningText !== candidateText);
+    setParseError("");
   }
 
   return <div className="page-stack">
+    {originPage && <div className="configuration-context"><button type="button" className="back-link" onClick={() => onBack(originPage)}>← Quay lại {pageShortLabel[originPage]}</button><nav className="breadcrumb" aria-label="Breadcrumb"><span>{pageShortLabel[originPage]}</span><Icon name="chevron" size={12}/><strong>Cấu hình JSON</strong></nav></div>}
+    <section className="advanced-editor-note"><Icon name="configuration" size={17}/><div><strong>Advanced Configuration Editor</strong><span>Trang Chính sách và trình soạn thảo này dùng chung một Candidate backend và cùng quy trình Commit.</span></div></section>
     <ConfigStatusBar config={config} dirty={dirty} comment={comment} onComment={setComment} busy={busy} onValidate={async () => { setBusy("validate"); await onValidate(); setBusy(""); }} onCommit={async () => { setBusy("commit"); const ok = await onCommit(comment); setBusy(""); if (ok) setComment(""); }} onRollback={async () => { setBusy("rollback"); await onRollback(); setBusy(""); }}/>
     <div className="config-layout">
-      <section className="panel editor-panel"><div className="panel-heading"><div><h2>Candidate JSON</h2><p>Biên tập toàn bộ model cấu hình; backend kiểm tra mọi tham chiếu</p></div><div className="editor-actions"><Button variant="ghost" onClick={() => { if (config) { setEditor(JSON.stringify(config.running, null, 2)); setEditorDirty(true); setParseError(""); } }}>Nạp running</Button><Button variant="ghost" onClick={formatEditor}>Format</Button><Button variant="primary" icon="check" busy={busy === "save"} disabled={!editorDirty} onClick={() => void saveEditor()}>Lưu candidate</Button></div></div>{parseError && <div className="inline-error"><Icon name="warning" size={15}/>{parseError}</div>}<textarea className="code-editor" spellCheck={false} value={editor} onChange={(event) => { setEditor(event.target.value); setEditorDirty(true); setParseError(""); }} aria-label="Candidate configuration JSON"/></section>
+      <section className="panel editor-panel"><div className="panel-heading"><div><h2>Candidate JSON</h2><p>Trình soạn thảo → Lưu vào Candidate → Validate → Commit</p></div><div className="editor-actions"><Badge tone={editorDirty ? "medium" : "low"}>{editorDirty ? "Editor chưa lưu" : "Editor đồng bộ Candidate"}</Badge><Button variant="ghost" disabled={!config} title="Chỉ thay nội dung trình soạn thảo, không áp dụng cấu hình." onClick={loadRunningIntoEditor}>Nạp Running vào trình soạn thảo</Button><Button variant="ghost" title="Định dạng JSON trong trình soạn thảo" onClick={formatEditor}>Format</Button><Button variant="primary" icon="check" busy={busy === "save"} disabled={!editorDirty} title="Chỉ cập nhật Candidate backend; chưa Commit hoặc áp dụng dataplane" onClick={() => void saveEditor()}>Lưu vào Candidate</Button></div></div>{parseError && <div className="inline-error"><Icon name="warning" size={15}/>{parseError}</div>}<textarea className="code-editor" spellCheck={false} value={editor} onChange={(event) => { const value = event.target.value; setEditor(value); setEditorDirty(value !== (config ? JSON.stringify(config.candidate, null, 2) : "")); setParseError(""); }} aria-label="Candidate configuration JSON"/></section>
       <aside className="config-aside">
         <section className="panel"><div className="panel-heading"><div><h2>Thay đổi</h2><p>So với running v{config?.version.version ?? 0}</p></div></div>{changedSections.length ? <div className="change-list">{changedSections.map((name) => <div key={name}><span className="change-dot"/><strong>{name}</strong><Badge tone="medium">Changed</Badge></div>)}</div> : <EmptyState icon="check" title="Không có thay đổi" description="Candidate đang giống running configuration."/>}</section>
         <section className="panel limits"><div className="panel-heading"><div><h2>Resource limits</h2><p>Giá trị candidate</p></div></div><DetailPair label="Active sessions" value={formatNumber(config?.candidate.max_sessions)}/><DetailPair label="Event queue" value={formatNumber(config?.candidate.max_events_queue)}/><DetailPair label="HTTP body" value={formatBytes(config?.candidate.max_http_body_inspection)}/><DetailPair label="HTTP headers" value={formatBytes(config?.candidate.max_http_header_size)}/><DetailPair label="ML timeout" value={`${config?.candidate.ml_timeout_millis ?? 0} ms`}/><DetailPair label="Inspection deadline" value={`${config?.candidate.request_inspection_timeout_millis ?? 0} ms`}/></section>
