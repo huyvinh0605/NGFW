@@ -228,3 +228,117 @@ func TestM2RuntimeEvaluatesDNATPolicyOnPostTranslationTuple(t *testing.T) {
 	}
 	_ = runtime.Stop()
 }
+
+func TestM2RuntimeAutomaticallyEvaluatesObservedForwardSession(t *testing.T) {
+	source := conntrack.NewFakeSource(10)
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: true, Policies: []domain.SecurityPolicy{{
+		ID: "allow-web", Priority: 1, Services: []string{"tcp:443"}, Action: domain.DecisionAllow, Enabled: true,
+	}}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(source, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	if err := source.Emit(conntrack.Event{Kind: conntrack.EventNew, Record: runtimeRecord(70)}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items := runtime.Store.List()
+		if len(items) == 1 && items[0].CacheState == domain.CacheCached {
+			if items[0].Decision != domain.DecisionAllow || items[0].MatchedPolicyID != "allow-web" || items[0].DecisionReason == "" {
+				t.Fatalf("automatic decision=%+v", items[0])
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("observed session was not evaluated: %+v", runtime.Store.List())
+}
+
+func TestM2RuntimeMarksLoopbackDecisionUnavailable(t *testing.T) {
+	source := conntrack.NewFakeSource(10)
+	config := domain.Config{
+		DefaultDeny: true,
+		Interfaces:  []domain.Interface{{ID: "wan-if", ZoneID: "wan", IPv4Addresses: []string{"192.0.2.2/24"}}},
+		Routes:      []domain.Route{{ID: "default", DestinationCIDR: "0.0.0.0/0", InterfaceID: "wan-if", Enabled: true}},
+	}
+	program, err := connectivity.Compile(config, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(source, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	original := domain.Tuple{Family: domain.FamilyIPv4, SrcIP: netip.MustParseAddr("127.0.0.1"), SrcPort: 41000, DstIP: netip.MustParseAddr("127.0.0.1"), DstPort: 8080, Protocol: 6}
+	reply := original.Reverse()
+	record := conntrack.Record{Identity: domain.ConntrackIdentity{BootID: "boot", NetworkNS: "init", Family: domain.FamilyIPv4, ID: 71, KernelStart: 71, Original: original}, OriginalTuple: original, ReplyTuple: &reply, Presence: conntrack.Presence{OriginalTuple: true, ReplyTuple: true, ID: true}}
+	if err := source.Emit(conntrack.Event{Kind: conntrack.EventNew, Record: record}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items := runtime.Store.List()
+		if len(items) == 1 && items[0].DecisionReason != "" {
+			got := items[0]
+			if got.SourceZone != connectivity.ZoneLocal || got.DestinationZone != connectivity.ZoneLocal || got.Decision != "" || got.CacheState != domain.CacheNotEvaluated || !strings.Contains(got.DecisionReason, "outside") {
+				t.Fatalf("loopback session=%+v", got)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("loopback session not classified: %+v", runtime.Store.List())
+}
+
+func TestM2RuntimePeriodicResyncRefreshesMissingCounters(t *testing.T) {
+	source := conntrack.NewFakeSource(10)
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(source, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	runtime.resyncInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	record := runtimeRecord(72)
+	record.Presence.Counters = false
+	if err := source.Emit(conntrack.Event{Kind: conntrack.EventNew, Record: record}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(runtime.Store.List()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	record.Presence.Counters = true
+	record.PacketsOriginal, record.BytesOriginal = 9, 900
+	record.PacketsReply, record.BytesReply = 7, 700
+	source.SetSnapshot(record)
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items := runtime.Store.List()
+		if len(items) == 1 && items[0].BytesOriginal == 900 && items[0].BytesReply == 700 {
+			for _, missing := range items[0].Quality.MissingFields {
+				if missing == "counters" {
+					t.Fatalf("counter availability was not refreshed: %+v", items[0])
+				}
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("periodic resync did not refresh counters: %+v", runtime.Store.List())
+}

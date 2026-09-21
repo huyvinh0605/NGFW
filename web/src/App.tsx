@@ -19,7 +19,7 @@ import {
   normalizeSessionPage,
   normalizeStats,
 } from "./runtimeData";
-import { closeSocketAfterOpen } from "./wsLifecycle";
+import { closeSocketAfterOpen, reconnectDelay } from "./wsLifecycle";
 import type {
   AuditEntry,
   ConfigExport,
@@ -89,7 +89,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 const navItems: Array<{ page: Page; label: string; icon: IconName }> = [
   { page: "overview", label: "Tổng quan", icon: "overview" },
   { page: "sessions", label: "Sessions", icon: "sessions" },
-  { page: "threats", label: "Mối đe dọa", icon: "threats" },
+  { page: "threats", label: "Sự kiện & kiểm soát", icon: "threats" },
   { page: "policy", label: "Chính sách", icon: "policy" },
   { page: "network", label: "Mạng", icon: "network" },
   { page: "configuration", label: "Cấu hình", icon: "configuration" },
@@ -97,9 +97,9 @@ const navItems: Array<{ page: Page; label: string; icon: IconName }> = [
 ];
 
 const pageMeta: Record<Page, { title: string; subtitle: string }> = {
-  overview: { title: "Tổng quan bảo mật", subtitle: "Trạng thái bảo vệ và lưu lượng theo thời gian thực" },
-  sessions: { title: "Sessions", subtitle: "Theo dõi quyết định, rủi ro và ngữ cảnh kết nối" },
-  threats: { title: "Mối đe dọa", subtitle: "Sự kiện detector, chặn tạm thời và reputation" },
+  overview: { title: "Tổng quan runtime", subtitle: "Trạng thái M1/M2 và session theo thời gian thực" },
+  sessions: { title: "Sessions", subtitle: "Theo dõi tuple, zone và quyết định L3/L4" },
+  threats: { title: "Sự kiện & kiểm soát", subtitle: "Sự kiện runtime/policy, chặn tạm thời và dữ liệu quản trị" },
   policy: { title: "Chính sách bảo mật", subtitle: "Thứ tự first-match và profile áp dụng cho traffic" },
   network: { title: "Hạ tầng mạng", subtitle: "Interface, zone, route và NAT trong candidate hiện tại" },
   configuration: { title: "Cấu hình JSON nâng cao", subtitle: "Biên tập toàn bộ Candidate trong cùng workflow cấu hình" },
@@ -109,7 +109,7 @@ const pageMeta: Record<Page, { title: string; subtitle: string }> = {
 const pageShortLabel: Record<Page, string> = {
   overview: "Tổng quan",
   sessions: "Sessions",
-  threats: "Mối đe dọa",
+  threats: "Sự kiện & kiểm soát",
   policy: "Chính sách",
   network: "Mạng",
   configuration: "Cấu hình JSON",
@@ -298,13 +298,23 @@ export default function App() {
     const sockets = new Set<WebSocket>();
     const timers = new Set<number>();
     const startTimers = new Set<number>();
+    const current = new Map<string, WebSocket>();
+    const attempts = new Map<string, number>();
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     const connect = <T,>(path: string, receive: (data: T) => void) => {
       const open = () => {
         if (stopped) return;
+        const active = current.get(path);
+        if (active && (active.readyState === WebSocket.CONNECTING || active.readyState === WebSocket.OPEN)) return;
         const socket = new WebSocket(`${scheme}://${window.location.host}${path}`);
         sockets.add(socket);
+        current.set(path, socket);
         socket.onopen = () => {
+          if (current.get(path) !== socket) {
+            closeSocketAfterOpen(socket, "superseded connection");
+            return;
+          }
+          attempts.set(path, 0);
           if (stopped) closeSocketAfterOpen(socket);
         };
         socket.onmessage = (message) => {
@@ -316,8 +326,12 @@ export default function App() {
         socket.onerror = () => { /* onclose schedules a bounded reconnect */ };
         socket.onclose = () => {
           sockets.delete(socket);
+          if (current.get(path) !== socket) return;
+          current.delete(path);
           if (!stopped) {
-            const timer = window.setTimeout(() => { timers.delete(timer); open(); }, 2500);
+            const attempt = attempts.get(path) ?? 0;
+            attempts.set(path, attempt + 1);
+            const timer = window.setTimeout(() => { timers.delete(timer); open(); }, reconnectDelay(attempt));
             timers.add(timer);
           }
         };
@@ -346,6 +360,7 @@ export default function App() {
       startTimers.forEach((timer) => window.clearTimeout(timer));
       timers.forEach((timer) => window.clearTimeout(timer));
       sockets.forEach((socket) => closeSocketAfterOpen(socket));
+      current.clear();
     };
   }, []);
 
@@ -579,7 +594,7 @@ export default function App() {
         </div>
         <div className="top-actions">
           {hasCandidateChanges && <button className="pending-config" onClick={() => navigate("configuration")}><span/> Candidate chưa commit</button>}
-          <span className={cx("health-pill", live.health?.status ?? "unknown")}><i/>{live.health?.status === "healthy" ? "Đang bảo vệ" : live.health?.status === "degraded" ? "Suy giảm" : "Đang kết nối"}</span>
+          <span className={cx("health-pill", live.health?.status ?? "unknown")}><i/>{live.health?.status === "healthy" ? "Runtime healthy" : live.health?.status === "degraded" ? "Runtime suy giảm" : "Đang kết nối"}</span>
           <Button variant="ghost" icon="refresh" busy={refreshing} onClick={() => { void loadLive(); void loadConfig(); }}>Làm mới</Button>
         </div>
       </header>
@@ -620,43 +635,41 @@ export default function App() {
 }
 
 function OverviewPage({ live, config, lastUpdated, onNavigate }: { live: LiveData; config: ConfigExport | null; lastUpdated?: string; onNavigate: (page: Page) => void }) {
-  const highRisk = live.sessions.filter((session) => session.risk_score >= 60).length;
   const allowed = live.sessions.filter((session) => session.decision === "ALLOW").length;
+  const unavailableDecisions = live.sessions.filter((session) => session.decision_status !== "EVALUATED").length;
   const healthyComponents = live.health ? Object.values(live.health.components).filter((item) => item.status === "ok" || item.status === "healthy").length : 0;
   const componentCount = live.health ? Object.keys(live.health.components).length : 0;
   const recentEvents = [...live.events].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 5);
-  const apps = Object.entries(live.stats?.applications ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const maxApp = Math.max(1, ...apps.map(([, count]) => count));
 
   return <div className="page-stack">
     <section className="hero-panel">
       <div className="hero-copy">
-        <div className="hero-kicker"><span className={cx("pulse", live.health?.status === "healthy" && "active")}/>{live.health?.status === "healthy" ? "Protection pipeline active" : "Protection pipeline needs attention"}</div>
-        <h2>{live.health?.status === "healthy" ? "Hệ thống đang bảo vệ lưu lượng" : "Một số thành phần đang suy giảm"}</h2>
-        <p>Traffic được liên kết với session, chấm điểm rủi ro và áp dụng policy phiên bản <strong>v{config?.version.version ?? 0}</strong>.</p>
-        <div className="pipeline" aria-label="Luồng xử lý bảo mật">
+        <div className="hero-kicker"><span className={cx("pulse", live.health?.status === "healthy" && "active")}/>{live.health?.status === "healthy" ? "M1/M2 runtime active" : "M1/M2 runtime needs attention"}</div>
+        <h2>{live.health?.status === "healthy" ? "Firewall và session runtime đang hoạt động" : "Một số thành phần runtime đang suy giảm"}</h2>
+        <p>Traffic được Linux dataplane xử lý, liên kết với conntrack session và đối chiếu policy L3/L4 phiên bản <strong>v{config?.version.version ?? 0}</strong>.</p>
+        <div className="pipeline" aria-label="Luồng xử lý M2">
           {[
-            ["Traffic", "network"], ["Session", "sessions"], ["Context", "overview"], ["Detectors", "threats"], ["Risk", "warning"], ["Policy", "policy"], ["Enforce", "shield"],
+            ["Traffic", "network"], ["Conntrack", "sessions"], ["Session", "overview"], ["L3/L4 Policy", "policy"], ["Linux", "shield"],
           ].map(([label, icon], index, all) => <div className="pipeline-step" key={label}><span><Icon name={icon as IconName} size={15}/></span><small>{label}</small>{index < all.length - 1 && <i/>}</div>)}
         </div>
       </div>
       <div className="hero-score">
-        <div className={cx("protection-ring", live.health?.status === "healthy" ? "good" : "warn")}><strong>{componentCount ? Math.round((healthyComponents / componentCount) * 100) : 0}<small>%</small></strong><span>Protection</span></div>
+        <div className={cx("protection-ring", live.health?.status === "healthy" ? "good" : "warn")}><strong>{live.health?.status === "healthy" ? "OK" : live.health?.status === "degraded" ? "!" : "—"}</strong><span>Runtime health</span></div>
         <p>Cập nhật {relativeTime(lastUpdated)}</p>
       </div>
     </section>
 
     <section className="metric-grid">
       <MetricCard label="Sessions hoạt động" value={formatNumber(live.stats?.active_sessions ?? live.sessions.length)} detail={`${allowed} được phép`} icon="sessions" tone="blue" onClick={() => onNavigate("sessions")}/>
-      <MetricCard label="Rủi ro cao" value={formatNumber(highRisk)} detail={highRisk ? "Cần xem xét" : "Không có cảnh báo"} icon="warning" tone={highRisk ? "red" : "green"} onClick={() => onNavigate("sessions")}/>
-      <MetricCard label="Security events" value={formatNumber(live.events.length)} detail={`${live.events.filter((event) => event.severity === "CRITICAL").length} critical`} icon="threats" tone="amber" onClick={() => onNavigate("threats")}/>
+      <MetricCard label="Decision chưa sẵn sàng" value={formatNumber(unavailableDecisions)} detail="Unavailable hoặc invalidated" icon="warning" tone={unavailableDecisions ? "amber" : "green"} onClick={() => onNavigate("sessions")}/>
+      <MetricCard label="Runtime / policy events" value={formatNumber(live.events.length)} detail={`${live.events.filter((event) => event.event_class === "security").length} security`} icon="threats" tone="amber" onClick={() => onNavigate("threats")}/>
       <MetricCard label="Temporary blocks" value={formatNumber(live.blocks.length)} detail={`${formatNumber(live.stats?.event_queue_dropped)} event bị bỏ`} icon="shield" tone="purple" onClick={() => onNavigate("threats")}/>
     </section>
 
     <div className="overview-grid">
       <section className="panel span-2">
-        <div className="panel-heading"><div><h2>Sự kiện gần đây</h2><p>Tín hiệu mới nhất từ các detector</p></div><button className="text-button" onClick={() => onNavigate("threats")}>Xem tất cả <Icon name="chevron" size={14}/></button></div>
-        {recentEvents.length ? <div className="event-list">{recentEvents.map((event) => <div className="event-row" key={event.event_id}><span className={cx("severity-mark", severityClass(event.severity))}/><div><strong>{event.category || event.signature_id || "Security signal"}</strong><p>{event.detector} · {event.source_ip || "unknown"} → {event.destination_ip || "unknown"}</p></div><Badge tone={severityClass(event.severity)}>{event.severity}</Badge><time>{relativeTime(event.timestamp)}</time></div>)}</div> : <EmptyState icon="check" title="Chưa có sự kiện bảo mật" description="Detector events sẽ xuất hiện tại đây khi có traffic được phân tích."/>}
+        <div className="panel-heading"><div><h2>Sự kiện runtime gần đây</h2><p>Lifecycle session và thay đổi quyết định policy</p></div><button className="text-button" onClick={() => onNavigate("threats")}>Xem tất cả <Icon name="chevron" size={14}/></button></div>
+        {recentEvents.length ? <div className="event-list">{recentEvents.map((event) => <div className="event-row" key={event.event_id}><span className={cx("severity-mark", severityClass(event.severity))}/><div><strong>{event.category || event.signature_id || "Runtime event"}</strong><p>{event.event_class} · {event.detector} · session {event.session_id || "unavailable"}</p></div><Badge tone="blue">{event.event_class}</Badge><time>{relativeTime(event.timestamp)}</time></div>)}</div> : <EmptyState icon="check" title="Chưa có sự kiện runtime" description="Session lifecycle và policy events sẽ xuất hiện khi conntrack có traffic."/>}
       </section>
 
       <section className="panel">
@@ -665,8 +678,8 @@ function OverviewPage({ live, config, lastUpdated, onNavigate }: { live: LiveDat
       </section>
 
       <section className="panel span-2">
-        <div className="panel-heading"><div><h2>Ứng dụng trong session</h2><p>Phân bố nhận diện hiện tại</p></div></div>
-        {apps.length ? <div className="bar-list">{apps.map(([name, count]) => <div className="bar-row" key={name}><span>{name || "unknown"}</span><div><i style={{ width: `${Math.max(3, (count / maxApp) * 100)}%` }}/></div><strong>{count}</strong></div>)}</div> : <EmptyState icon="sessions" title="Chưa có traffic" description="Ứng dụng sẽ được thống kê khi session đi qua engine."/>}
+        <div className="panel-heading"><div><h2>Nhận diện ứng dụng</h2><p>Trạng thái milestone hiện tại</p></div></div>
+        <EmptyState icon="sessions" title="App-ID chưa khả dụng trong M2" description="DPI và nhận diện ứng dụng thuộc milestone M3; giao diện không suy diễn ứng dụng từ port."/>
       </section>
 
       <section className="panel posture-card">
@@ -687,16 +700,14 @@ function MetricCard({ label, value, detail, icon, tone, onClick }: { label: stri
 function SessionsPage({ sessions, onTerminate, onNeedAccess }: { sessions: Session[]; onTerminate: (id: string) => Promise<boolean>; onNeedAccess: () => void }) {
   const [query, setQuery] = useState("");
   const [decision, setDecision] = useState("ALL");
-  const [risk, setRisk] = useState("ALL");
   const [selected, setSelected] = useState<SessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [terminating, setTerminating] = useState("");
 
   const filtered = useMemo(() => sessions.filter((session) => {
     const haystack = `${session.client_ip} ${session.server_ip} ${session.application} ${session.policy_id} ${session.id}`.toLowerCase();
-    const matchesRisk = risk === "ALL" || (risk === "HIGH" ? session.risk_score >= 60 : session.risk_score < 60);
-    return haystack.includes(query.toLowerCase()) && (decision === "ALL" || session.decision === decision) && matchesRisk;
-  }), [decision, query, risk, sessions]);
+    return haystack.includes(query.toLowerCase()) && (decision === "ALL" || session.decision === decision);
+  }), [decision, query, sessions]);
 
   async function openDetail(id: string) {
     setDetailLoading(true);
@@ -719,13 +730,13 @@ function SessionsPage({ sessions, onTerminate, onNeedAccess }: { sessions: Sessi
   return <div className="page-stack">
     <section className="toolbar panel compact">
       <div className="search-box"><Icon name="search" size={16}/><input aria-label="Tìm session" placeholder="Tìm IP, ứng dụng, policy hoặc session ID…" value={query} onChange={(event) => setQuery(event.target.value)}/>{query && <button aria-label="Xóa tìm kiếm" onClick={() => setQuery("")}><Icon name="close" size={13}/></button>}</div>
-      <div className="filter-group"><select aria-label="Lọc decision" value={decision} onChange={(event) => setDecision(event.target.value)}><option value="ALL">Mọi decision</option><option>ALLOW</option><option>DROP</option><option>REJECT</option><option>RATE_LIMIT</option><option>RESET_SESSION</option><option>TEMP_BLOCK</option></select><select aria-label="Lọc rủi ro" value={risk} onChange={(event) => setRisk(event.target.value)}><option value="ALL">Mọi mức rủi ro</option><option value="HIGH">Risk ≥ 60</option><option value="LOW">Risk &lt; 60</option></select></div>
+      <div className="filter-group"><select aria-label="Lọc decision" value={decision} onChange={(event) => setDecision(event.target.value)}><option value="ALL">Mọi decision</option><option>ALLOW</option><option>DROP</option><option>REJECT</option><option>RATE_LIMIT</option><option>RESET_SESSION</option><option>TEMP_BLOCK</option></select></div>
       <span className="result-count">{filtered.length}/{sessions.length} sessions</span>
     </section>
 
     <section className="panel table-panel">
       <div className="table-scroll"><table><thead><tr><th>Client</th><th>Server</th><th>App / Protocol</th><th>Zones</th><th>Risk</th><th>Decision</th><th>Path</th><th/></tr></thead><tbody>
-        {filtered.map((session) => <tr className="clickable-row" key={session.id} onClick={() => void openDetail(session.id)}><td><strong className="mono">{session.client_ip}</strong><small>:{session.client_port}</small></td><td><strong className="mono">{session.server_ip}</strong><small>:{session.server_port}</small></td><td><strong>{session.application || "Unknown"}</strong><small>{session.protocol?.toUpperCase()} · {session.tcp_state || "active"}</small></td><td><span className="zone-route"><Badge>{session.source_zone || "?"}</Badge><span>→</span><Badge>{session.destination_zone || "?"}</Badge></span></td><td><span className={cx("risk-value", riskClass(session.risk_score))}>{session.risk_score}</span></td><td><Badge tone={session.decision === "ALLOW" ? "low" : "critical"}>{session.decision || "PENDING"}</Badge></td><td><span className={cx("path-label", session.fast_path_eligible ? "fast" : "inspect")}><i/>{session.fast_path_eligible ? "Fast" : "Inspect"}</span></td><td><button className="icon-button danger-hover" title="Kết thúc session" disabled={terminating === session.id} onClick={(event) => { event.stopPropagation(); void terminate(session.id); }}>{terminating === session.id ? <span className="spinner"/> : <Icon name="close" size={15}/>}</button></td></tr>)}
+        {filtered.map((session) => <tr className="clickable-row" key={session.id} onClick={() => void openDetail(session.id)}><td><strong className="mono">{session.client_ip}</strong><small>:{session.client_port}</small></td><td><strong className="mono">{session.server_ip}</strong><small>:{session.server_port}</small></td><td><strong>{session.application_available ? session.application : "Unavailable (M2)"}</strong><small>{session.protocol?.toUpperCase()} · {session.tcp_state || "active"}</small></td><td><span className="zone-route"><Badge>{session.source_zone || "unknown"}</Badge><span>→</span><Badge>{session.destination_zone || "unknown"}</Badge></span></td><td><span className={cx("risk-value", session.risk_available && riskClass(session.risk_score))}>{session.risk_available ? session.risk_score : "Unavailable"}</span></td><td><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge></td><td><span className={cx("path-label", session.path_classification === "FAST" ? "fast" : session.path_classification === "INSPECT" ? "inspect" : "unavailable")} title={session.fast_path_reason}><i/>{session.path_classification === "UNAVAILABLE" ? "Unavailable" : session.path_classification === "FAST" ? "Fast" : "Inspect"}</span></td><td><button className="icon-button danger-hover" title="Kết thúc session" disabled={terminating === session.id} onClick={(event) => { event.stopPropagation(); void terminate(session.id); }}>{terminating === session.id ? <span className="spinner"/> : <Icon name="close" size={15}/>}</button></td></tr>)}
         {!filtered.length && <tr><td colSpan={8}><EmptyState icon="sessions" title={sessions.length ? "Không tìm thấy session" : "Chưa có session hoạt động"} description={sessions.length ? "Thử thay đổi bộ lọc hoặc từ khóa tìm kiếm." : "Session sẽ xuất hiện khi engine nhận được traffic."}/></td></tr>}
       </tbody></table></div>
     </section>
@@ -738,9 +749,9 @@ function SessionDrawer({ detail, loading, onClose, onTerminate }: { detail: Sess
   const context = detail?.security_context;
   return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng chi tiết" onClick={onClose}/><aside className="drawer" aria-label="Chi tiết session"><div className="drawer-header"><div><span className="eyebrow">SESSION DETAIL</span><h2>{session?.application || "Đang tải…"}</h2></div><button className="icon-button" aria-label="Đóng" onClick={onClose}><Icon name="close"/></button></div>
     {loading || !session || !context ? <div className="drawer-loading"><span className="spinner large"/></div> : <div className="drawer-body">
-      <div className="risk-summary"><div className={cx("risk-orb", riskClass(session.risk_score))}><strong>{session.risk_score}</strong><span>RISK</span></div><div><Badge tone={session.decision === "ALLOW" ? "low" : "critical"}>{session.decision}</Badge><h3>{context.risk.level || "Unknown risk"}</h3><p>{context.policy.reason || session.policy_id || "Chưa khớp policy"}</p></div></div>
+      <div className="risk-summary"><div className={cx("risk-orb", session.risk_available && riskClass(session.risk_score))}><strong>{session.risk_available ? session.risk_score : "—"}</strong><span>RISK</span></div><div><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge><h3>{session.risk_available ? context.risk.level || "Unknown risk" : "Risk engine chưa có trong M2"}</h3><p>{context.policy.reason || session.decision_reason || session.policy_id || "Decision chưa khả dụng"}</p></div></div>
       <DetailSection title="Kết nối"><DetailPair label="Client" value={`${session.client_ip}:${session.client_port}`}/><DetailPair label="Server" value={`${session.server_ip}:${session.server_port}`}/><DetailPair label="Zone" value={`${session.source_zone} → ${session.destination_zone}`}/><DetailPair label="Protocol" value={`${session.protocol?.toUpperCase()} · ${session.tcp_state || "—"}`}/><DetailPair label="Bắt đầu" value={formatDate(session.start_time)}/><DetailPair label="Lần cuối" value={relativeTime(session.last_seen)}/></DetailSection>
-      <DetailSection title="Lưu lượng"><div className="traffic-pair"><div><span>↑ Upload</span><strong>{formatBytes(session.bytes_up)}</strong><small>{formatNumber(session.packets_up)} packets</small></div><div><span>↓ Download</span><strong>{formatBytes(session.bytes_down)}</strong><small>{formatNumber(session.packets_down)} packets</small></div></div></DetailSection>
+      <DetailSection title="Lưu lượng">{session.counters_available ? <div className="traffic-pair"><div><span>↑ Original</span><strong>{formatBytes(session.bytes_up)}</strong><small>{formatNumber(session.packets_up)} packets</small></div><div><span>↓ Reply</span><strong>{formatBytes(session.bytes_down)}</strong><small>{formatNumber(session.packets_down)} packets</small></div></div> : <p className="muted">Unavailable: conntrack chưa cung cấp counters cho session này.</p>}</DetailSection>
       <DetailSection title="Security context"><DetailPair label="Policy" value={context.policy.matched_policy_id || session.policy_id || "default"}/><DetailPair label="Scope" value={context.policy.scope || "SESSION"}/><DetailPair label="ML" value={context.ml.available ? `${context.ml.predicted_class || "BENIGN"} · ${Math.round(context.ml.confidence * 100)}%` : "Unavailable"}/><DetailPair label="TLS" value={String(context.tls.available ? context.tls.tls_version || "Observed" : "Unavailable")}/><DetailPair label="Signals" value={String(context.signals?.length ?? 0)}/></DetailSection>
       {!!context.risk.contributions?.length && <DetailSection title="Risk contributions"><div className="contribution-list">{context.risk.contributions.map((item, index) => <div key={`${item.source}-${index}`}><span>{item.source}</span><div><i style={{ width: `${Math.min(100, item.value * 2.5)}%` }}/></div><strong>+{item.value}</strong><small>{item.reason}</small></div>)}</div></DetailSection>}
     </div>}
@@ -764,15 +775,16 @@ function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBl
 }) {
   const [tab, setTab] = useState<ThreatTab>("events");
   const [severity, setSeverity] = useState("ALL");
+  const [eventClass, setEventClass] = useState("ALL");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<SecurityEvent | null>(null);
   const [blockForm, setBlockForm] = useState({ indicator: "", reason: "Manual block", minutes: 15 });
   const [repForm, setRepForm] = useState({ indicator: "", indicator_type: "IP", reputation_score: 80, category: "malicious" });
   const [saving, setSaving] = useState(false);
   const orderedEvents = useMemo(() => [...events].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).filter((event) => {
-    const text = `${event.category} ${event.detector} ${event.source_ip} ${event.destination_ip} ${event.signature_id}`.toLowerCase();
-    return (severity === "ALL" || event.severity === severity) && text.includes(query.toLowerCase());
-  }), [events, query, severity]);
+    const text = `${event.event_class} ${event.category} ${event.detector} ${event.session_id} ${event.source_ip} ${event.destination_ip} ${event.signature_id}`.toLowerCase();
+    return (severity === "ALL" || event.severity === severity) && (eventClass === "ALL" || event.event_class === eventClass) && text.includes(query.toLowerCase());
+  }), [eventClass, events, query, severity]);
 
   async function submitBlock(event: FormEvent) {
     event.preventDefault();
@@ -796,8 +808,8 @@ function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBl
     <section className="subnav panel compact"><button className={cx(tab === "events" && "active")} onClick={() => setTab("events")}>Events <Badge>{events.length}</Badge></button><button className={cx(tab === "blocks" && "active")} onClick={() => setTab("blocks")}>Temporary blocks <Badge>{blocks.length}</Badge></button><button className={cx(tab === "reputation" && "active")} onClick={() => setTab("reputation")}>Reputation <Badge>{reputation.length}</Badge></button><button className={cx(tab === "audit" && "active")} onClick={() => setTab("audit")}>Audit log <Badge>{audit.length}</Badge></button></section>
 
     {tab === "events" && <>
-      <section className="toolbar panel compact"><div className="search-box"><Icon name="search" size={16}/><input placeholder="Tìm detector, IP, category…" value={query} onChange={(event) => setQuery(event.target.value)}/></div><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="ALL">Mọi severity</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select><span className="result-count">{orderedEvents.length} events</span></section>
-      <section className="panel table-panel"><div className="table-scroll"><table><thead><tr><th>Thời gian</th><th>Severity</th><th>Phát hiện</th><th>Nguồn</th><th>Đích</th><th>Confidence</th><th>Action</th></tr></thead><tbody>{orderedEvents.map((event) => <tr className="clickable-row" key={event.event_id} onClick={() => setSelected(event)}><td><time>{relativeTime(event.timestamp)}</time><small>{formatDate(event.timestamp)}</small></td><td><Badge tone={severityClass(event.severity)}>{event.severity}</Badge></td><td><strong>{event.category || "Unknown"}</strong><small>{event.detector}{event.signature_id ? ` · ${event.signature_id}` : ""}</small></td><td className="mono">{event.source_ip || "—"}</td><td className="mono">{event.destination_ip || "—"}</td><td>{Math.round(event.confidence * 100)}%</td><td><Badge>{event.recommended_action || "OBSERVE"}</Badge></td></tr>)}{!orderedEvents.length && <tr><td colSpan={7}><EmptyState icon="check" title="Không có event phù hợp" description="Hệ thống chưa ghi nhận tín hiệu theo bộ lọc hiện tại."/></td></tr>}</tbody></table></div></section>
+      <section className="toolbar panel compact"><div className="search-box"><Icon name="search" size={16}/><input placeholder="Tìm loại event, session, detector hoặc IP…" value={query} onChange={(event) => setQuery(event.target.value)}/></div><select aria-label="Lọc loại event" value={eventClass} onChange={(event) => setEventClass(event.target.value)}><option value="ALL">Mọi loại event</option><option value="runtime">Runtime</option><option value="policy">Policy</option><option value="security">Security</option></select><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="ALL">Mọi severity</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select><span className="result-count">{orderedEvents.length} events</span></section>
+      <section className="panel table-panel"><div className="table-scroll"><table><thead><tr><th>Thời gian</th><th>Loại</th><th>Sự kiện</th><th>Session</th><th>Severity</th><th>Chi tiết</th></tr></thead><tbody>{orderedEvents.map((event) => <tr className="clickable-row" key={event.event_id} onClick={() => setSelected(event)}><td><time>{relativeTime(event.timestamp)}</time><small>{formatDate(event.timestamp)}</small></td><td><Badge tone={event.event_class === "security" ? "critical" : event.event_class === "policy" ? "medium" : "blue"}>{event.event_class}</Badge></td><td><strong>{event.category || "Unknown"}</strong><small>{event.detector}{event.signature_id ? ` · ${event.signature_id}` : ""}</small></td><td className="mono">{event.session_id || "—"}</td><td><Badge tone={severityClass(event.severity)}>{event.severity}</Badge></td><td>{event.evidence || "—"}</td></tr>)}{!orderedEvents.length && <tr><td colSpan={6}><EmptyState icon="check" title="Không có event phù hợp" description="Hệ thống chưa ghi nhận sự kiện theo bộ lọc hiện tại."/></td></tr>}</tbody></table></div></section>
     </>}
 
     {tab === "blocks" && <div className="split-grid">
@@ -806,7 +818,7 @@ function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBl
     </div>}
 
     {tab === "reputation" && <div className="split-grid">
-      <section className="panel form-panel"><div className="panel-heading"><div><h2>Reputation indicator</h2><p>Đưa nguồn cục bộ vào risk pipeline</p></div></div><form onSubmit={submitReputation}><label>Indicator<input required placeholder="bad.example hoặc 203.0.113.42" value={repForm.indicator} onChange={(event) => setRepForm({ ...repForm, indicator: event.target.value })}/></label><div className="form-row"><label>Loại<select value={repForm.indicator_type} onChange={(event) => setRepForm({ ...repForm, indicator_type: event.target.value })}><option>IP</option><option>DOMAIN</option><option>URL</option><option>HASH</option></select></label><label>Risk score<input type="number" min="0" max="100" value={repForm.reputation_score} onChange={(event) => setRepForm({ ...repForm, reputation_score: Number(event.target.value) })}/></label></div><label>Category<input value={repForm.category} onChange={(event) => setRepForm({ ...repForm, category: event.target.value })}/></label><Button type="submit" variant="primary" icon="plus" busy={saving}>Lưu indicator</Button></form></section>
+      <section className="panel form-panel"><div className="panel-heading"><div><h2>Reputation registry</h2><p>Chỉ lưu dữ liệu quản trị; M2 chưa dùng registry này để chấm risk hoặc enforce</p></div></div><form onSubmit={submitReputation}><label>Indicator<input required placeholder="bad.example hoặc 203.0.113.42" value={repForm.indicator} onChange={(event) => setRepForm({ ...repForm, indicator: event.target.value })}/></label><div className="form-row"><label>Loại<select value={repForm.indicator_type} onChange={(event) => setRepForm({ ...repForm, indicator_type: event.target.value })}><option>IP</option><option>DOMAIN</option><option>URL</option><option>HASH</option></select></label><label>Điểm tham chiếu<input type="number" min="0" max="100" value={repForm.reputation_score} onChange={(event) => setRepForm({ ...repForm, reputation_score: Number(event.target.value) })}/></label></div><label>Category<input value={repForm.category} onChange={(event) => setRepForm({ ...repForm, category: event.target.value })}/></label><Button type="submit" variant="primary" icon="plus" busy={saving}>Lưu indicator</Button></form></section>
       <section className="panel"><div className="panel-heading"><div><h2>Local reputation</h2><p>{reputation.length} indicator đã đăng ký</p></div></div>{reputation.length ? <div className="block-list">{reputation.map((entry) => <div className="block-row" key={entry.indicator}><span className={cx("score-box", riskClass(entry.reputation_score))}>{entry.reputation_score}</span><div><strong className="mono">{entry.indicator}</strong><p>{entry.indicator_type} · {entry.category || "uncategorized"}</p><small>{entry.source || "local"} · {entry.enabled ? "enabled" : "disabled"}</small></div><Button variant="ghost" icon="trash" onClick={() => void onDeleteReputation(entry.indicator)}>Xóa</Button></div>)}</div> : <EmptyState icon="threats" title="Chưa có reputation indicator" description="Thêm IP, domain hoặc URL để detector sử dụng."/>}</section>
     </div>}
 
@@ -817,7 +829,7 @@ function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBl
 }
 
 function EventDrawer({ event, onClose, onBlock }: { event: SecurityEvent; onClose: () => void; onBlock: () => Promise<void> }) {
-  return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng" onClick={onClose}/><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">SECURITY EVENT</span><h2>{event.category}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="drawer-body"><div className="event-hero"><Badge tone={severityClass(event.severity)}>{event.severity}</Badge><strong>{Math.round(event.confidence * 100)}% confidence</strong><span>{formatDate(event.timestamp)}</span></div><DetailSection title="Nguồn phát hiện"><DetailPair label="Detector" value={event.detector}/><DetailPair label="Signature" value={event.signature_id || "—"}/><DetailPair label="Application" value={event.application || "—"}/><DetailPair label="Recommended" value={event.recommended_action || "OBSERVE"}/></DetailSection><DetailSection title="Traffic"><DetailPair label="Source" value={event.source_ip || "Unavailable"}/><DetailPair label="Destination" value={event.destination_ip || "Unavailable"}/><DetailPair label="Session" value={event.session_id || "Uncorrelated"}/></DetailSection>{event.evidence && <DetailSection title="Evidence"><pre className="evidence">{event.evidence}</pre></DetailSection>}{event.metadata && <DetailSection title="Metadata"><pre className="json-preview">{JSON.stringify(event.metadata, null, 2)}</pre></DetailSection>}</div>{event.source_ip && <div className="drawer-footer"><Button variant="danger" icon="shield" onClick={() => void onBlock()}>Chặn source trong 1 giờ</Button></div>}</aside></div>;
+  return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng" onClick={onClose}/><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">{event.event_class.toUpperCase()} EVENT</span><h2>{event.category}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="drawer-body"><div className="event-hero"><Badge tone={event.event_class === "security" ? severityClass(event.severity) : "blue"}>{event.event_class}</Badge>{event.event_class === "security" && <strong>{Math.round(event.confidence * 100)}% confidence</strong>}<span>{formatDate(event.timestamp)}</span></div><DetailSection title="Nguồn sự kiện"><DetailPair label="Class" value={event.event_class}/><DetailPair label="Producer" value={event.detector}/><DetailPair label="Signature" value={event.signature_id || "Unavailable"}/><DetailPair label="Recommended" value={event.recommended_action || "Unavailable"}/></DetailSection><DetailSection title="Liên kết"><DetailPair label="Source" value={event.source_ip || "Unavailable"}/><DetailPair label="Destination" value={event.destination_ip || "Unavailable"}/><DetailPair label="Session" value={event.session_id || "Unavailable"}/></DetailSection>{event.evidence && <DetailSection title="Chi tiết"><pre className="evidence">{event.evidence}</pre></DetailSection>}{event.metadata && <DetailSection title="Metadata"><pre className="json-preview">{JSON.stringify(event.metadata, null, 2)}</pre></DetailSection>}</div>{event.event_class === "security" && event.source_ip && <div className="drawer-footer"><Button variant="danger" icon="shield" onClick={() => void onBlock()}>Chặn source trong 1 giờ</Button></div>}</aside></div>;
 }
 
 export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, onOpenAdvanced }: { config: ConfigExport | null; onSave: (policies: SecurityPolicy[]) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean>; onOpenAdvanced: () => void }) {
@@ -852,9 +864,9 @@ export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, o
     <ConfigStatusBar config={config} dirty={dirty} comment={comment} onComment={setComment} busy={busy} onValidate={async () => { setBusy("validate"); await onValidate(); setBusy(""); }} onCommit={async () => { setBusy("commit"); const ok = await onCommit(comment); setBusy(""); if (ok) setComment(""); }} onRollback={async () => { setBusy("rollback"); await onRollback(); setBusy(""); }}/>
     <section className="panel table-panel">
       <div className="panel-heading padded"><div><h2>Security policy rules</h2><p>Ưu tiên số nhỏ được đánh giá trước; default {config?.candidate.default_deny ? "deny" : "allow"}</p></div><div className="panel-heading-actions"><Button variant="ghost" icon="configuration" title="Mở trình soạn thảo nâng cao cho cùng Candidate hiện tại" onClick={onOpenAdvanced}>Mở JSON nâng cao</Button><Button variant="primary" icon="plus" onClick={() => setEditing(defaultPolicy)}>Thêm policy</Button></div></div>
-      <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service / App</th><th>Profile</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small>{policy.applications?.join(", ") || "all applications"}</small></td><td>{policy.security_profile_id ? <Badge tone="blue">{policy.security_profile_id}</Badge> : <span className="muted">None</span>}</td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{policy.scope || "SESSION"}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>)}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service L3/L4</th><th>Tương thích M2</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => { const scope = (policy.scope || "SESSION").toUpperCase(); const compatible = scope === "SESSION" && !policy.applications?.length && !policy.security_profile_id && policy.minimum_risk == null && policy.maximum_risk == null && ["ALLOW", "DROP", "REJECT"].includes(policy.action.toUpperCase()); return <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small>Ví dụ: tcp:80, udp:53</small></td><td><Badge tone={compatible ? "low" : "critical"}>{compatible ? "Compatible" : "Validate sẽ từ chối"}</Badge></td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{scope}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>; })}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
     </section>
-    <section className="profile-grid">{config?.candidate.security_profiles.map((profile) => <article className="profile-card" key={profile.id}><div className="profile-top"><span className="profile-icon"><Icon name="shield"/></span><div><h3>{profile.name}</h3><small className="mono">{profile.id}</small></div><Badge tone={profile.inspection_required ? "blue" : "neutral"}>{profile.inspection_required ? "Required" : "Best effort"}</Badge></div><div className="profile-risk"><span>Block threshold</span><strong>{profile.minimum_block_risk}</strong><div><i style={{ width: `${profile.minimum_block_risk}%` }}/></div></div><div className="capability-list">{[["IPS", profile.ids_ips_enabled], ["DPI", profile.dpi_enabled], ["DNS", profile.dns_security_enabled], ["URL", profile.url_filtering_enabled], ["TI", profile.threat_intel_enabled], ["ML", profile.ml_detection_enabled]].map(([name, enabled]) => <span className={cx(enabled && "enabled")} key={String(name)}>{name}</span>)}</div><div className="profile-foot"><span>TLS</span><strong>{profile.tls_mode}</strong><span>Failure</span><strong>{profile.inspection_failure_action || "ALLOW"}</strong></div></article>)}</section>
+    <section className="panel"><div className="panel-heading"><div><h2>Security profiles</h2><p>{config?.candidate.security_profiles.length ?? 0} định nghĩa được lưu cho milestone sau; M2 không chạy DPI, IDS, ML, TLS inspection hoặc risk engine.</p></div><Badge tone="medium">Unavailable in M2</Badge></div></section>
     {editing && <PolicyEditor value={editing} zones={config?.candidate.zones.map((zone) => zone.id) ?? []} profiles={config?.candidate.security_profiles.map((profile) => profile.id) ?? []} busy={busy === "save"} onClose={() => setEditing(null)} onSave={savePolicy}/>} 
   </div>;
 }
@@ -878,9 +890,9 @@ function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value
   return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal policy-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CANDIDATE POLICY</span><h2>{isNew ? "Thêm policy" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body">
     <div className="form-row"><label>ID<input required disabled={!isNew} pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input required type="number" min="0" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: Number(event.target.value) })}/></label></div>
     <div className="form-row two"><fieldset><legend>Source zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.source_zones?.includes(zone) ?? false} onChange={() => toggleZone("source_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset><fieldset><legend>Destination zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.destination_zones?.includes(zone) ?? false} onChange={() => toggleZone("destination_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset></div>
-    <div className="form-row two"><label>Services <small>Phân cách bằng dấu phẩy</small><input value={draft.services?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, services: csv(event.target.value) })} placeholder="tcp:80, tcp:443"/></label><label>Applications <small>Để trống = any</small><input value={draft.applications?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, applications: csv(event.target.value) })} placeholder="http, tls"/></label></div>
-    <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option><option>RATE_LIMIT</option><option>RESET_SESSION</option><option>TEMP_BLOCK</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>PACKET</option><option>REQUEST</option><option>SESSION</option><option>SOURCE_INDICATOR</option></select></label><label>Security profile<select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label></div>
-    <div className="form-row"><label>Minimum risk<input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk<input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
+    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input value={draft.services?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, services: csv(event.target.value) })} placeholder="tcp:80, tcp:443"/></label><label>Applications <small>M3+; phải để trống để tương thích M2</small><input value={draft.applications?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, applications: csv(event.target.value) })} placeholder="Không khả dụng trong M2"/></label></div>
+    <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>SESSION</option></select><small>M2 chỉ hỗ trợ SESSION scope.</small></label><label>Security profile <small>M3+; phải để trống trong M2</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label></div>
+    <div className="form-row"><label>Minimum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
   </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
 }
 
@@ -955,7 +967,7 @@ export function ConfigurationPage({ config, originPage, onBack, onSave, onValida
       <section className="panel editor-panel"><div className="panel-heading"><div><h2>Candidate JSON</h2><p>Trình soạn thảo → Lưu vào Candidate → Validate → Commit</p></div><div className="editor-actions"><Badge tone={editorDirty ? "medium" : "low"}>{editorDirty ? "Editor chưa lưu" : "Editor đồng bộ Candidate"}</Badge><Button variant="ghost" disabled={!config} title="Chỉ thay nội dung trình soạn thảo, không áp dụng cấu hình." onClick={loadRunningIntoEditor}>Nạp Running vào trình soạn thảo</Button><Button variant="ghost" title="Định dạng JSON trong trình soạn thảo" onClick={formatEditor}>Format</Button><Button variant="primary" icon="check" busy={busy === "save"} disabled={!editorDirty} title="Chỉ cập nhật Candidate backend; chưa Commit hoặc áp dụng dataplane" onClick={() => void saveEditor()}>Lưu vào Candidate</Button></div></div>{parseError && <div className="inline-error"><Icon name="warning" size={15}/>{parseError}</div>}<textarea className="code-editor" spellCheck={false} value={editor} onChange={(event) => { const value = event.target.value; setEditor(value); setEditorDirty(value !== (config ? JSON.stringify(config.candidate, null, 2) : "")); setParseError(""); }} aria-label="Candidate configuration JSON"/></section>
       <aside className="config-aside">
         <section className="panel"><div className="panel-heading"><div><h2>Thay đổi</h2><p>So với running v{config?.version.version ?? 0}</p></div></div>{changedSections.length ? <div className="change-list">{changedSections.map((name) => <div key={name}><span className="change-dot"/><strong>{name}</strong><Badge tone="medium">Changed</Badge></div>)}</div> : <EmptyState icon="check" title="Không có thay đổi" description="Candidate đang giống running configuration."/>}</section>
-        <section className="panel limits"><div className="panel-heading"><div><h2>Resource limits</h2><p>Giá trị candidate</p></div></div><DetailPair label="Active sessions" value={formatNumber(config?.candidate.max_sessions)}/><DetailPair label="Event queue" value={formatNumber(config?.candidate.max_events_queue)}/><DetailPair label="HTTP body" value={formatBytes(config?.candidate.max_http_body_inspection)}/><DetailPair label="HTTP headers" value={formatBytes(config?.candidate.max_http_header_size)}/><DetailPair label="ML timeout" value={`${config?.candidate.ml_timeout_millis ?? 0} ms`}/><DetailPair label="Inspection deadline" value={`${config?.candidate.request_inspection_timeout_millis ?? 0} ms`}/></section>
+        <section className="panel limits"><div className="panel-heading"><div><h2>Resource limits</h2><p>Giá trị candidate; HTTP/ML/inspection là reserved M3+</p></div></div><DetailPair label="Active sessions" value={formatNumber(config?.candidate.max_sessions)}/><DetailPair label="Event queue" value={formatNumber(config?.candidate.max_events_queue)}/><DetailPair label="HTTP body (M3+)" value={formatBytes(config?.candidate.max_http_body_inspection)}/><DetailPair label="HTTP headers (M3+)" value={formatBytes(config?.candidate.max_http_header_size)}/><DetailPair label="ML timeout (M3+)" value={`${config?.candidate.ml_timeout_millis ?? 0} ms`}/><DetailPair label="Inspection deadline (M3+)" value={`${config?.candidate.request_inspection_timeout_millis ?? 0} ms`}/></section>
         <section className="panel version-card"><span className="eyebrow">LAST KNOWN GOOD</span><strong>Version {config?.version.version ?? 0}</strong><p>{config?.version.comment || "Chưa có commit được lưu"}</p><small>{formatDate(config?.version.timestamp)}</small>{config?.version.checksum && <code title={config.version.checksum}>{config.version.checksum.slice(0, 14)}…</code>}</section>
       </aside>
     </div>

@@ -122,7 +122,8 @@ Thanh bên có hai nhóm.
 
 - **Tổng quan** – xem sức khỏe và các chỉ số chính.
 - **Sessions** – xem connection/flow và quyết định.
-- **Mối đe dọa** – event, block, reputation và audit.
+- **Sự kiện & kiểm soát** – runtime/policy/security event, block, reputation
+  registry và audit.
 
 **QUẢN TRỊ**
 
@@ -131,15 +132,15 @@ Thanh bên có hai nhóm.
 - **Cấu hình** – chỉnh toàn bộ candidate JSON.
 - **Hệ thống** – health chi tiết, limits, quyền và user.
 
-Số cạnh **Mối đe dọa** là số event `HIGH` hoặc `CRITICAL` đang có trong dữ
-liệu console. Dấu chấm cạnh **Cấu hình** nghĩa là candidate khác running.
+Số cạnh **Sự kiện & kiểm soát** là số event `HIGH` hoặc `CRITICAL` đang có trong
+dữ liệu console. Dấu chấm cạnh **Cấu hình** nghĩa là candidate khác running.
 
 ### 4.2. Thanh trên cùng
 
 - **Tiêu đề và phụ đề**: cho biết màn hình hiện tại và mục đích của màn hình.
 - **Candidate chưa commit**: có thay đổi chưa áp dụng.
-- **Đang bảo vệ**: health tổng thể là `healthy`.
-- **Suy giảm**: health không còn hoàn toàn healthy.
+- **Runtime healthy**: API và engine báo runtime M1/M2 healthy.
+- **Runtime suy giảm**: session runtime không còn healthy đầy đủ.
 - **Đang kết nối**: chưa nhận được health hợp lệ.
 - **Làm mới**: tải lại live data và config; vòng xoay nghĩa là request đang chạy.
 
@@ -169,27 +170,26 @@ khi session hoặc running config tạm thời không đọc được.
 
 ### 5.1. Risk score
 
-Risk score nằm trong khoảng 0–100:
+Risk Engine thuộc milestone M3+ và **chưa khả dụng trong M2**. Vì vậy Sessions
+hiển thị `Unavailable`, không coi field thiếu là risk `0`. Thang 0–100 dưới đây
+chỉ là quy ước cho dữ liệu thật khi Risk Engine được triển khai:
 
 | Khoảng | Nhãn/màu giao diện | Cách hiểu vận hành |
 |---:|---|---|
 | 0–29 | `LOW` | Chưa có dấu hiệu đáng kể theo dữ liệu hiện có. |
 | 30–59 | `MEDIUM` | Có tín hiệu cần theo dõi. |
-| 60–79 | `HIGH` | Cần xem xét; được tính vào thẻ **Rủi ro cao**. |
+| 60–79 | `HIGH` | Cần xem xét khi Risk Engine M3+ cung cấp dữ liệu. |
 | 80–100 | `CRITICAL` | Ưu tiên điều tra và kiểm tra action/policy. |
 
-Thẻ **Rủi ro cao** dùng ngưỡng `>= 60`, nên có thể bao gồm cả risk màu high và
-critical.
-
-Risk không tự đồng nghĩa với block. Quyết định cuối cùng còn phụ thuộc policy,
-profile, scope và trạng thái enforcement.
+M2 không có thẻ hoặc bộ lọc risk. Không dùng số mặc định để kết luận session an
+toàn hay nguy hiểm.
 
 ### 5.2. Event severity
 
-Severity là mức của một security event: `INFO`, `LOW`, `MEDIUM`, `HIGH`,
-`CRITICAL`. Severity khác risk score của session. Một session có thể có risk
-cao dù event gần nhất không critical, hoặc có event critical nhưng chưa gắn
-được session.
+Mỗi event có `event_class`: `runtime`, `policy` hoặc `security`. Session
+open/update/close là runtime telemetry, còn invalidate/decision change là policy
+event; hai loại này không phải threat detection. Chỉ security event thật mới có
+ý nghĩa threat severity/confidence.
 
 Confidence được hiển thị dưới dạng phần trăm:
 
@@ -207,41 +207,37 @@ bản ghi không làm sập trang; đây không phải là bằng chứng event 
 - `packets` là số packet, không phải số request HTTP.
 - RX/TX của interface là counter mà API cung cấp; không phải throughput tức
   thời nếu UI không hiển thị cửa sổ thời gian.
+- Nếu conntrack không cung cấp counter, UI hiển thị `Unavailable`; `0 B` chỉ
+  được hiển thị khi backend xác nhận counter có mặt và giá trị đo được bằng 0.
 
 ## 6. Màn hình Tổng quan
 
 Màn hình Tổng quan là nơi kiểm tra nhanh, không thay thế điều tra chi tiết.
 
-### 6.1. Protection pipeline
+### 6.1. Luồng M1/M2
 
 Chuỗi trên hero panel gồm:
 
 ```text
-Traffic → Session → Context → Detectors → Risk → Policy → Enforce
+Traffic → Conntrack → Session → L3/L4 Policy → Linux
 ```
 
-Đây là sơ đồ luồng xử lý thống nhất của NGFW:
+Đây là phần đã có trong M1/M2:
 
 - **Traffic**: packet/connection đi vào dataplane.
-- **Session**: hai chiều được gom vào một flow/session.
-- **Context**: zone, tuple, application và metadata.
-- **Detectors**: tín hiệu từ các detector đã được backend cung cấp.
-- **Risk**: tổng hợp risk score và contribution.
-- **Policy**: chọn policy/action theo priority.
-- **Enforce**: apply decision vào runtime/kernel.
+- **Conntrack/Session**: hai chiều và NAT alias được gom vào một session.
+- **L3/L4 Policy**: chọn ALLOW/DROP/REJECT theo priority, zone, address và
+  service.
+- **Linux**: nftables/routing/NAT thực thi running configuration.
 
-### 6.2. Vòng Protection
+DPI, App-ID, IDS/IPS, ML, TLS inspection và Risk Engine chưa thuộc M2.
 
-Vòng tròn hiển thị phần trăm component health:
+### 6.2. Vòng Runtime health
 
-```text
-Protection % = round(số component có status ok/healthy
-                    ÷ tổng số component × 100)
-```
-
-Nếu chưa có health, giá trị là `0%`. `100%` nghĩa tất cả component được API báo
-`ok` hoặc `healthy` tại lần tải đó; không phải cam kết mọi traffic đã được kiểm
-tra đầy đủ.
+Vòng tròn hiển thị `OK`, `!` hoặc `—` theo health tổng hợp. Đây là sức khỏe
+runtime, không phải phần trăm traffic được bảo vệ. `management_mode=engine` là
+mô tả ownership; API chuẩn hóa component dataplane thành status health riêng và
+ghi rõ kernel health chưa được đo độc lập.
 
 Dòng **Cập nhật …** là thời điểm live data được cập nhật gần nhất.
 
@@ -257,32 +253,32 @@ Dòng **Cập nhật …** là thời điểm live data được cập nhật g�
 Số `ALLOW` trong dòng phụ có thể không bằng tổng active session nếu danh sách
 đang tải bị giới hạn hoặc runtime chưa trả decision.
 
-#### Rủi ro cao
+#### Decision chưa sẵn sàng
 
-- Giá trị chính: số session đang tải có `risk_score >= 60`.
-- Dòng phụ: `Cần xem xét` khi khác 0, `Không có cảnh báo` khi bằng 0.
-- Bấm thẻ để mở Sessions và lọc thủ công `Risk ≥ 60`.
+- Giá trị chính: số session có decision `Unavailable` hoặc `Invalidated`.
+- `Unavailable` nghĩa backend chưa có verdict áp dụng được; `Invalidated` nghĩa
+  cache cũ đã bị thu hồi và chưa có quyết định mới.
 
-#### Security events
+#### Runtime / policy events
 
 - Giá trị chính: số event trong cửa sổ dữ liệu hiện tại.
-- Dòng phụ: số event có severity chính xác là `CRITICAL`.
-- Bấm thẻ để mở **Mối đe dọa → Events**.
+- Dòng phụ: số event thật sự có class `security`.
+- Bấm thẻ để mở **Sự kiện & kiểm soát → Events**.
 
 #### Temporary blocks
 
 - Giá trị chính: số block còn trong danh sách active.
 - Dòng phụ: số event đã bị event queue bỏ (`event_queue_dropped`).
-- Bấm thẻ để mở **Mối đe dọa → Temporary blocks**.
+- Bấm thẻ để mở **Sự kiện & kiểm soát → Temporary blocks**.
 
 Event queue loss lớn nghĩa là telemetry/event có thể thiếu; không suy luận rằng
 không có event nguy hiểm.
 
 ### 6.4. Sự kiện gần đây
 
-Hiển thị tối đa năm event mới nhất, sắp theo timestamp giảm dần. Mỗi dòng gồm
-category/signature, detector, source → destination, severity và thời gian tương
-đối. Bấm **Xem tất cả** để mở danh sách Events.
+Hiển thị tối đa năm event runtime/policy mới nhất, sắp theo timestamp giảm dần.
+Mỗi dòng ghi class, producer, session ID và thời gian. Lifecycle bình thường
+không được gọi là cảnh báo bảo mật.
 
 ### 6.5. Panel Thành phần
 
@@ -300,15 +296,14 @@ Status thường gặp:
 - `down`: component không hoạt động;
 - `unknown`/trống: chưa có dữ liệu đáng tin.
 
-Panel đếm `ok` và `healthy` là đang hoạt động. Component `degraded` không được
-đếm vào tử số Protection.
+Panel đếm `ok` và `healthy` là đang hoạt động; luôn đọc message để biết phạm vi
+được đo.
 
 ### 6.6. Ứng dụng trong session
 
-Hiển thị tối đa năm application có số session lớn nhất. Thanh dài hơn chỉ biểu
-thị tỷ lệ tương đối trong năm application đang hiển thị; con số bên phải là
-số session. `Unknown` hoặc panel trống nghĩa engine chưa nhận diện application,
-không nghĩa traffic bị block.
+Panel hiển thị rõ **App-ID chưa khả dụng trong M2**. `Unavailable (M2)` không
+nghĩa traffic bị block và không được suy diễn application từ port. App-ID/DPI
+thuộc M3+.
 
 ### 6.7. Policy posture
 
@@ -340,11 +335,6 @@ Bộ lọc **Decision** gồm:
 - `RESET_SESSION`: yêu cầu kết thúc/reset theo khả năng enforcement;
 - `TEMP_BLOCK`: chặn source tạm thời.
 
-Bộ lọc **Risk**:
-
-- `Risk ≥ 60`: high và critical;
-- `Risk < 60`: low và medium.
-
 Bộ đếm `X/Y sessions` là `số dòng khớp / số dòng đã tải`, không nhất thiết là
 tổng session trong toàn appliance.
 
@@ -354,11 +344,11 @@ tổng session trong toàn appliance.
 |---|---|
 | Client | client/source IP và source port. |
 | Server | server/destination IP và destination port. |
-| App / Protocol | application, protocol và TCP state; `Unknown` là chưa nhận diện. |
+| App / Protocol | M2 hiển thị `Unavailable (M2)` cho application; protocol và TCP state vẫn lấy từ conntrack. |
 | Zones | source zone → destination zone. |
-| Risk | điểm 0–100, dùng quy ước màu ở trên. |
-| Decision | action hiệu lực hoặc `PENDING` khi chưa có decision hợp lệ. |
-| Path | `Fast` nếu cache/mark đủ điều kiện; `Inspect` nếu còn qua slow path. |
+| Risk | `Unavailable` trong M2 vì Risk Engine chưa được triển khai. |
+| Decision | action đã evaluate, `INVALIDATED`, hoặc `UNAVAILABLE`; UI không đổi giá trị thiếu thành ALLOW. |
+| Path | `Fast` chỉ khi backend xác minh provenance kernel mark; nếu chưa xác minh thì `Unavailable`, không mặc định thành `Inspect`. |
 | `×` | yêu cầu kết thúc/revoke session, cần quyền ghi. |
 
 ### 7.3. Session detail drawer
@@ -367,9 +357,9 @@ Bấm một dòng để mở drawer. Drawer gồm các nhóm:
 
 #### Risk summary
 
-- vòng risk: điểm số session;
+- vòng risk: `—` trong M2;
 - badge decision;
-- risk level từ security context;
+- trạng thái Risk Engine chưa khả dụng;
 - policy reason hoặc policy ID đã match.
 
 #### Kết nối
@@ -382,16 +372,17 @@ Bấm một dòng để mở drawer. Drawer gồm các nhóm:
 
 #### Lưu lượng
 
-- **Upload**: bytes và packets theo hướng original/client;
-- **Download**: bytes và packets theo hướng reply/server.
+- **Original**: bytes và packets theo original direction;
+- **Reply**: bytes và packets theo reply direction.
 
-Đây là counters của flow, không phải tốc độ. Muốn tính throughput cần lấy nhiều
-mẫu theo thời gian.
+Đây là counters của flow, không phải tốc độ. Nếu conntrack event chưa có
+counters, UI ghi `Unavailable`. Runtime thực hiện bounded resync định kỳ để lấy
+counter từ kernel dump; giá trị `0` chỉ có nghĩa measured zero khi field có mặt.
 
 #### Security context
 
 - **Policy**: matched policy ID;
-- **Scope**: packet/request/session/source indicator;
+- **Scope**: `SESSION` trong M2;
 - **ML**: predicted class và confidence nếu ML available;
 - **TLS**: TLS version/metadata nếu quan sát được;
 - **Signals**: số security signal gắn với context.
@@ -401,11 +392,8 @@ có thể trả original, reply và translated tuple; drawer hiện ưu tiên cl
 được map từ original tuple. Muốn kiểm tra đầy đủ NAT alias/reply tuple, xem
 response session qua API.
 
-#### Risk contributions
-
-Mỗi thanh contribution gồm source, giá trị cộng thêm và reason. Độ dài thanh là
-cách trực quan hóa, không phải phần trăm risk. `confidence` của contribution dùng
-để giải thích độ tin cậy của nguồn.
+Risk contributions chỉ xuất hiện khi backend tương lai cung cấp dữ liệu thật;
+M2 không tạo contribution giả.
 
 ### 7.4. Kết thúc session
 
@@ -417,7 +405,7 @@ Thao tác gửi revoke/drop guard tới engine. Nó không phải chỉnh candid
 không nên được dùng thay cho thay đổi policy lâu dài. Nếu API/engine lỗi, session
 không được coi là đã terminate.
 
-## 8. Màn hình Mối đe dọa
+## 8. Màn hình Sự kiện & kiểm soát
 
 Badge trên bốn tab là số bản ghi console đang có trong từng nhóm.
 
@@ -425,7 +413,8 @@ Badge trên bốn tab là số bản ghi console đang có trong từng nhóm.
 
 #### Bộ lọc
 
-- ô tìm kiếm: detector, IP, category hoặc signature ID;
+- ô tìm kiếm: class, session, producer/detector, IP, category hoặc signature ID;
+- class: `runtime`, `policy`, `security`;
 - severity: `ALL`, `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`;
 - số ở cuối toolbar: số event khớp filter.
 
@@ -434,21 +423,21 @@ Badge trên bốn tab là số bản ghi console đang có trong từng nhóm.
 | Cột | Ý nghĩa |
 |---|---|
 | Thời gian | thời gian tương đối và đầy đủ. |
-| Severity | mức nghiêm trọng của event, không phải risk score session. |
-| Phát hiện | category, detector và signature ID. |
-| Nguồn/Đích | source và destination IP nếu có. |
-| Confidence | độ tự tin của detector, hiển thị phần trăm. |
-| Action | recommended action; nếu thiếu hiển thị `OBSERVE`. |
+| Loại | `runtime`, `policy` hoặc `security`. |
+| Sự kiện | kind/category, producer và signature nếu có. |
+| Session | session ID liên quan. |
+| Severity | có ý nghĩa threat severity đối với class `security`; lifecycle thường là `INFO`. |
+| Chi tiết | reason/evidence nếu backend cung cấp. |
 
 Bấm event để mở drawer.
 
 #### Event drawer
 
-- **Nguồn phát hiện**: detector, signature, application, recommended action;
-- **Traffic**: source, destination và session ID;
+- **Nguồn sự kiện**: class, producer, signature và recommended action nếu có;
+- **Liên kết**: source, destination và session ID;
 - **Evidence**: bằng chứng dạng text nếu backend cung cấp;
 - **Metadata**: object JSON nếu backend cung cấp;
-- **Chặn source trong 1 giờ**: tạo temporary block cho source IP.
+- **Chặn source trong 1 giờ** chỉ xuất hiện cho class `security` có source IP.
 
 `Uncorrelated` hoặc session trống nghĩa event chưa ghép được với session. Không
 được gán event cho session khác chỉ vì hai IP trùng nhau.
@@ -481,8 +470,8 @@ reputation indicator và khác với policy candidate.
 Danh sách hiển thị score, indicator, type, category, source và trạng thái
 `enabled/disabled`. Nút **Xóa** xóa indicator.
 
-Reputation là tín hiệu cho risk pipeline khi thành phần đó hỗ trợ sử dụng; nó
-không phải temporary block và không bảo đảm chặn traffic ngay lập tức.
+Trong M2 đây chỉ là registry quản trị. Nó chưa nối vào Risk Engine hoặc
+enforcement, không phải temporary block và không chặn traffic.
 
 ### 8.4. Tab Audit log
 
@@ -531,8 +520,8 @@ không lưu, validate hay commit. Khi mở từ đây, trang JSON có nút
 | Thứ tự | priority; số nhỏ được đánh giá trước. |
 | Policy | tên hiển thị và ID duy nhất. |
 | Source → Destination | zone nguồn và zone đích; `any` khi không chọn. |
-| Service / App | service và application matcher. |
-| Profile | security profile gắn với rule hoặc `None`. |
+| Service L3/L4 | service bắt buộc có protocol, ví dụ `tcp:80`, `udp:53`. |
+| Tương thích M2 | `Compatible` hoặc cảnh báo Validate sẽ từ chối field M3+. |
 | Action | quyết định khi rule match. |
 | Scope | phạm vi áp dụng của decision. |
 | Trạng thái | công tắc enabled/disabled. |
@@ -551,11 +540,12 @@ Các trường trong modal:
 - **Source zones**: chọn một hoặc nhiều zone; bỏ chọn nghĩa là any;
 - **Destination zones**: tương tự source zones;
 - **Services**: danh sách cách nhau bởi dấu phẩy, ví dụ `tcp:80, tcp:443`;
-- **Applications**: danh sách application; để trống là any;
+  chỉ nhập `80` là sai cú pháp;
+- **Applications**: M3+, phải để trống để policy tương thích M2;
 - **Action**: action khi tất cả matcher của rule phù hợp;
-- **Scope**: phạm vi mà action được áp dụng;
-- **Security profile**: profile candidate đã khai báo;
-- **Minimum risk/Maximum risk**: giới hạn risk cho rule nếu dùng;
+- **Scope**: M2 chỉ hỗ trợ `SESSION`;
+- **Security profile**: M3+, phải để trống trong policy M2;
+- **Minimum risk/Maximum risk**: M3+, phải để trống trong policy M2;
 - **Policy được bật**: enable/disable;
 - **Log khi bắt đầu/kết thúc**: tạo log tại các mốc session.
 
@@ -571,33 +561,23 @@ bắt buộc một packet vừa có port 80 vừa port 443. Các nhóm matcher k
 | `ALLOW` | cho phép theo scope của rule. |
 | `DROP` | bỏ traffic im lặng theo enforcement. |
 | `REJECT` | từ chối có phản hồi phù hợp action. |
-| `RATE_LIMIT` | áp tham số giới hạn nếu policy/backend cấu hình. |
-| `RESET_SESSION` | yêu cầu kết thúc/reset session theo khả năng engine. |
-| `TEMP_BLOCK` | tạo/chọn chặn tạm thời cho source indicator theo backend. |
+| `RATE_LIMIT` | chưa hỗ trợ trong policy M2; dùng sẽ bị validation từ chối. |
+| `RESET_SESSION` | chưa hỗ trợ trong policy M2; revoke session là API runtime riêng. |
+| `TEMP_BLOCK` | chưa hỗ trợ như policy action M2; temporary block là API runtime riêng. |
 
 | Scope | Đối tượng bị tác động |
 |---|---|
-| `PACKET` | packet phù hợp. |
-| `REQUEST` | request/đơn vị kiểm tra tương ứng. |
 | `SESSION` | toàn connection/session. |
-| `SOURCE_INDICATOR` | các flow gắn với source indicator. |
 
-M2 chủ yếu thực thi connectivity L3/L4; các scope inspection chỉ có ý nghĩa đầy
-đủ khi thành phần tương ứng đã được triển khai.
+`PACKET`, `REQUEST` và `SOURCE_INDICATOR` thuộc phạm vi sau M2. Endpoint
+**Validate** chạy cả validation cấu trúc lẫn `CompileM2`, nên phải báo lỗi trước
+Commit nếu candidate dùng các scope hoặc matcher chưa hỗ trợ.
 
 ### 9.5. Security profile cards
 
-Mỗi card hiển thị:
-
-- tên và ID profile;
-- `Required` nếu inspection_required, hoặc `Best effort`;
-- **Block threshold**: minimum block risk 0–100;
-- capability badges: `IPS`, `DPI`, `DNS`, `URL`, `TI`, `ML`;
-- **TLS**: TLS mode;
-- **Failure**: inspection failure action.
-
-Badge capability phản ánh flag trong candidate. Nó không tự chứng minh detector
-production đang chạy; hãy kiểm tra health và acceptance của thành phần đó.
+Trang chỉ hiển thị số định nghĩa profile được lưu và badge
+`Unavailable in M2`. Các profile dành cho milestone sau; gắn profile vào policy
+M2 sẽ làm Validate thất bại.
 
 ### 9.6. Quy trình commit policy
 
@@ -846,27 +826,26 @@ tại, hãy đăng nhập lại để kiểm tra token/session.
 
 ## 13. Quy trình sử dụng thường gặp
 
-### 13.1. Kiểm tra appliance có đang bảo vệ
+### 13.1. Kiểm tra runtime M1/M2
 
 1. Mở **Tổng quan**.
-2. Kiểm tra nhãn **Đang bảo vệ**.
-3. Kiểm tra Protection % và panel Thành phần.
+2. Kiểm tra nhãn **Runtime healthy**.
+3. Kiểm tra vòng **Runtime health** và đọc message từng thành phần.
 4. Kiểm tra `Management API ONLINE` ở **Hệ thống**.
 5. Nếu có `Suy giảm`, đọc message component thay vì chỉ nhìn phần trăm.
 
-### 13.2. Điều tra session rủi ro cao
+### 13.2. Điều tra session và decision
 
-1. Bấm thẻ **Rủi ro cao**.
-2. Chọn filter `Risk ≥ 60`.
-3. Tìm IP, application hoặc policy.
-4. Mở Session detail.
-5. Kiểm tra zone, tuple, decision, policy reason, counters và risk contributions.
-6. Mở Events để tìm tín hiệu liên quan.
-7. Nếu cần chặn ngay, tạo Temporary block và ghi lý do.
+1. Mở **Sessions** hoặc bấm thẻ **Decision chưa sẵn sàng**.
+2. Tìm IP, protocol, policy hoặc session ID.
+3. Mở Session detail.
+4. Kiểm tra zone, tuple, decision reason và trạng thái counters.
+5. Mở Events để xem lifecycle/invalidation liên quan.
+6. Nếu cần chặn ngay, tạo Temporary block và ghi lý do.
 
 ### 13.3. Chặn một source trong thời gian ngắn
 
-1. Vào **Mối đe dọa → Temporary blocks**.
+1. Vào **Sự kiện & kiểm soát → Temporary blocks**.
 2. Nhập indicator và lý do.
 3. Chọn 5 phút/15 phút/1 giờ/24 giờ.
 4. Bấm **Áp dụng block**.
@@ -895,7 +874,7 @@ tại, hãy đăng nhập lại để kiểm tra token/session.
 
 ### 13.6. Kiểm tra thay đổi của người khác
 
-1. Vào **Mối đe dọa → Audit log**.
+1. Vào **Sự kiện & kiểm soát → Audit log**.
 2. Tìm action `COMMIT`, `ROLLBACK`, `UPDATE`, `REVOKE`, `CREATE` hoặc `DELETE`.
 3. Đối chiếu actor/role, resource ID, message và thời gian.
 
@@ -909,8 +888,8 @@ thống kiểm tra service. Nút refresh chỉ thử lại request, không sửa
 ### `Suy giảm`
 
 Ít nhất một component health không healthy hoặc một nguồn live data lỗi. Mở
-Hệ thống để đọc message. Không dùng riêng Protection % để quyết định traffic
-đã an toàn.
+Hệ thống để đọc message. Runtime health không chứng minh DPI/IDS/ML đang chạy;
+các thành phần đó chưa thuộc M2.
 
 ### `Candidate chưa commit`
 
@@ -919,9 +898,9 @@ thành công.
 
 ### `Validation: hợp lệ` nhưng Commit không thành công
 
-Validation chỉ kiểm tra candidate tại thời điểm đó. Commit còn phụ thuộc version
-conflict, engine IPC, interface/route/nft apply và khả năng rollback. Đọc toast,
-refresh config và xem Audit log.
+Validation kiểm tra cấu trúc và khả năng tương thích runtime M2 tại thời điểm đó.
+Commit vẫn còn phụ thuộc version conflict, engine IPC, interface/route/nft apply
+và khả năng rollback. Đọc toast, refresh config và xem Audit log.
 
 ### `Cần đăng nhập hoặc API token`
 
@@ -959,13 +938,14 @@ WebSocket lỗi không tự động đồng nghĩa policy hoặc session bị m�
 - UI chỉ hiển thị endpoint và field đã được backend cung cấp.
 - `Unavailable` nghĩa không quan sát được; không được đổi thành `ALLOW`, `CLEAN`
   hoặc `0` khi phân tích sự cố.
-- Risk score và severity là hai khái niệm khác nhau.
-- Protection % là tỷ lệ component health, không phải tỷ lệ packet được kiểm tra.
+- Risk score chưa khả dụng trong M2; severity chỉ là threat severity cho
+  `event_class=security`.
+- Runtime health không phải tỷ lệ packet được kiểm tra.
 - Sessions hoạt động và `ALLOW` trên Overview có thể lấy từ các nguồn/cửa sổ dữ
   liệu khác nhau; không cộng/trừ chúng như cùng một mẫu thống kê.
 - Filter trong Sessions/Events áp dụng trên dữ liệu đã tải vào browser.
-- Profile có badge IPS/DPI/DNS/URL/TI/ML dựa trên candidate flag; badge không tự
-  chứng minh detector production đã được nghiệm thu.
+- DPI/App-ID/IDS/IPS/ML/TLS inspection/Risk Engine chưa được triển khai trong
+  M2; `Unavailable` là trạng thái đúng.
 - Network page hiển thị candidate; chỉ running sau commit mới là cấu hình đang
   áp dụng.
 - Temporary block là enforcement tạm thời; reputation là tín hiệu, không phải

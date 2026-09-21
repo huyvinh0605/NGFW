@@ -16,32 +16,35 @@ import (
 )
 
 type Runtime struct {
-	Store         *session.RuntimeStore
-	Source        conntrack.Source
-	Events        *RuntimeEventRing
-	mu            sync.RWMutex
-	program       connectivity.Program
-	generation    uint64
-	started       bool
-	degraded      bool
-	lastError     string
-	blocks        map[string]domain.TemporaryBlock
-	revoked       map[string]domain.RuntimeSession
-	maxRevoked    int
-	queue         chan conntrack.Event
-	dumpMu        sync.Mutex
-	applyMu       sync.Mutex
-	resyncing     bool
-	runCtx        context.Context
-	queueDrops    atomic.Uint64
-	trackingDrops atomic.Uint64
-	created       atomic.Uint64
-	updated       atomic.Uint64
-	closed        atomic.Uint64
-	resyncs       atomic.Uint64
-	cancel        context.CancelFunc
-	guards        GuardEnforcer
+	Store          *session.RuntimeStore
+	Source         conntrack.Source
+	Events         *RuntimeEventRing
+	mu             sync.RWMutex
+	program        connectivity.Program
+	generation     uint64
+	started        bool
+	degraded       bool
+	lastError      string
+	blocks         map[string]domain.TemporaryBlock
+	revoked        map[string]domain.RuntimeSession
+	maxRevoked     int
+	queue          chan conntrack.Event
+	dumpMu         sync.Mutex
+	applyMu        sync.Mutex
+	resyncing      bool
+	runCtx         context.Context
+	queueDrops     atomic.Uint64
+	trackingDrops  atomic.Uint64
+	created        atomic.Uint64
+	updated        atomic.Uint64
+	closed         atomic.Uint64
+	resyncs        atomic.Uint64
+	cancel         context.CancelFunc
+	guards         GuardEnforcer
+	resyncInterval time.Duration
 }
+
+const defaultRuntimeResyncInterval = 30 * time.Second
 
 type GuardEnforcer interface {
 	AddSourceBlock(context.Context, string, time.Time) error
@@ -60,7 +63,7 @@ func NewRuntime(source conntrack.Source, program connectivity.Program, generatio
 	if queueSize <= 0 {
 		queueSize = session.DefaultRuntimeLimits().MaxEventQueue
 	}
-	return &Runtime{Store: store, Source: source, Events: NewRuntimeEventRing(queueSize), program: program, generation: generation, blocks: map[string]domain.TemporaryBlock{}, revoked: map[string]domain.RuntimeSession{}, maxRevoked: 10000, queue: make(chan conntrack.Event, queueSize)}
+	return &Runtime{Store: store, Source: source, Events: NewRuntimeEventRing(queueSize), program: program, generation: generation, blocks: map[string]domain.TemporaryBlock{}, revoked: map[string]domain.RuntimeSession{}, maxRevoked: 10000, queue: make(chan conntrack.Event, queueSize), resyncInterval: defaultRuntimeResyncInterval}
 }
 
 type runtimeSink struct{ r *Runtime }
@@ -126,7 +129,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.dumpMu.Lock()
 	dumpResult, dumpErr := r.Source.Dump(runCtx, limits, func(record conntrack.Record) error {
 		seen = append(seen, record.Identity)
-		r.applyRecord(record, time.Now().UTC(), conntrack.EventNew)
+		r.applyRecord(record, time.Now().UTC(), conntrack.EventNew, true)
 		return nil
 	})
 	r.dumpMu.Unlock()
@@ -141,11 +144,42 @@ func (r *Runtime) Start(ctx context.Context) error {
 		// forwarding dependency; later events can still populate new flows and
 		// a loss report will schedule another bounded resync.
 		go r.consume(runCtx)
+		go r.periodicResync(runCtx)
 		return nil
 	}
 	r.reconcileMissing(seen, dumpStarted, time.Now().UTC(), "conntrack resync no longer contains flow")
 	go r.consume(runCtx)
+	go r.periodicResync(runCtx)
 	return nil
+}
+
+// periodicResync refreshes fields which netlink UPDATE notifications are
+// allowed to omit, especially packet/byte counters. The bounded kernel dump
+// is advisory runtime telemetry and never becomes a forwarding dependency.
+func (r *Runtime) periodicResync(ctx context.Context) {
+	interval := r.resyncInterval
+	if interval <= 0 {
+		interval = defaultRuntimeResyncInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.mu.Lock()
+			if !r.started || r.resyncing || r.Source == nil {
+				r.mu.Unlock()
+				continue
+			}
+			r.resyncing = true
+			source := r.Source
+			parent := r.runCtx
+			r.mu.Unlock()
+			go r.resync(source, parent)
+		}
+	}
 }
 
 func (r *Runtime) resync(source conntrack.Source, parent context.Context) {
@@ -166,7 +200,7 @@ func (r *Runtime) resync(source conntrack.Source, parent context.Context) {
 	r.dumpMu.Lock()
 	result, err := source.Dump(ctx, r.dumpLimits(), func(record conntrack.Record) error {
 		seen = append(seen, record.Identity)
-		r.applyRecord(record, time.Now().UTC(), conntrack.EventUpdate)
+		r.applyRecord(record, time.Now().UTC(), conntrack.EventUpdate, false)
 		return nil
 	})
 	r.dumpMu.Unlock()
@@ -228,7 +262,7 @@ func (r *Runtime) applyEvent(ev conntrack.Event) {
 	// LastObservedAt is a local cutover marker, not a kernel timestamp. An
 	// event replayed after a dump must survive the missing-session sweep even
 	// when its source-provided Received field is delayed or synthetic.
-	r.applyRecord(ev.Record, time.Now().UTC(), ev.Kind)
+	r.applyRecord(ev.Record, time.Now().UTC(), ev.Kind, true)
 }
 
 func (r *Runtime) ReleaseExpiredSession(session domain.RuntimeSession) error {
@@ -265,7 +299,7 @@ func eventTime(value time.Time) time.Time {
 	return value.UTC()
 }
 
-func (r *Runtime) applyRecord(record conntrack.Record, now time.Time, kind conntrack.EventKind) {
+func (r *Runtime) applyRecord(record conntrack.Record, now time.Time, kind conntrack.EventKind, publishUpdate bool) {
 	v, created, err := r.Store.Apply(record, now)
 	if err != nil {
 		if errors.Is(err, session.ErrStaleEvent) {
@@ -290,9 +324,29 @@ func (r *Runtime) applyRecord(record conntrack.Record, now time.Time, kind connt
 	if created {
 		r.created.Add(1)
 		r.publish(domain.RuntimeEvent{Kind: domain.EventSessionCreated, SessionID: v.SessionID, Revision: v.Revision})
-	} else {
+	} else if publishUpdate {
 		r.updated.Add(1)
 		r.publish(domain.RuntimeEvent{Kind: domain.EventSessionUpdated, SessionID: v.SessionID, Revision: v.Revision, Reason: string(kind)})
+	}
+	r.evaluateObserved(v)
+}
+
+// evaluateObserved records the connectivity decision associated with a
+// kernel-observed session. Local INPUT/OUTPUT traffic is tracked for
+// diagnostics but is outside the forward policy path, so it must remain
+// explicitly unavailable instead of receiving the default forward verdict.
+func (r *Runtime) evaluateObserved(value domain.RuntimeSession) {
+	if value.SourceZone == connectivity.ZoneLocal || value.DestinationZone == connectivity.ZoneLocal {
+		generation := r.CurrentGeneration()
+		updated, err := r.Store.MarkEvaluationUnavailable(value.SessionID, generation, "local traffic is outside the M2 forward-policy path")
+		if err == nil && updated.Revision != value.Revision {
+			r.publish(domain.RuntimeEvent{Kind: domain.EventDecisionChanged, SessionID: value.SessionID, Generation: generation, Revision: updated.Revision, Reason: updated.DecisionReason})
+		}
+		return
+	}
+	if _, err := r.Evaluate(value.SessionID); err != nil && !errors.Is(err, session.ErrSessionMissing) && !errors.Is(err, session.ErrStaleDecision) {
+		r.trackingDrops.Add(1)
+		r.setDegraded(err)
 	}
 }
 
@@ -326,12 +380,18 @@ func (r *Runtime) Activate(program connectivity.Program, generation uint64, reas
 	r.generation = generation
 	r.mu.Unlock()
 	for _, current := range r.Store.List() {
+		if current.Revoked {
+			continue
+		}
 		sourceZone, destinationZone := inferSessionZones(program, current)
 		if enriched, enrichErr := r.Store.SetZones(current.SessionID, sourceZone, destinationZone); enrichErr == nil {
 			current = enriched
 		}
 		if v, err := r.Store.Invalidate(current.SessionID, generation, reason, time.Now().UTC()); err == nil {
 			r.publish(domain.RuntimeEvent{Kind: domain.EventSessionInvalidated, SessionID: current.SessionID, Generation: generation, Revision: v.Revision, Reason: reason})
+			if current.SourceZone == connectivity.ZoneLocal || current.DestinationZone == connectivity.ZoneLocal {
+				r.evaluateObserved(v)
+			}
 		}
 	}
 	return nil
@@ -350,6 +410,12 @@ func inferSessionZones(program connectivity.Program, value domain.RuntimeSession
 		if inferred := program.InferAddressZone(value.TranslatedTuple.DstIP); inferred != "" {
 			destinationZone = inferred
 		}
+	}
+	if sourceZone == "" {
+		sourceZone = connectivity.ZoneUnknown
+	}
+	if destinationZone == "" {
+		destinationZone = connectivity.ZoneUnknown
 	}
 	return sourceZone, destinationZone
 }
@@ -386,7 +452,11 @@ func (r *Runtime) evaluate(sessionID string, retry int) (domain.PolicyDecision, 
 	r.mu.RUnlock()
 	if blocked {
 		d := domain.PolicyDecision{Action: domain.DecisionDrop, Scope: "SOURCE", ConfigVersion: generation, Reason: "temporary block overrides cached allow"}
-		_, _ = r.Store.SetDecision(sessionID, generation, d.Action, "", d.Reason)
+		updated, err := r.Store.SetDecision(sessionID, generation, d.Action, "", d.Reason)
+		if err != nil {
+			return d, err
+		}
+		r.publish(domain.RuntimeEvent{Kind: domain.EventDecisionChanged, SessionID: sessionID, Generation: generation, Revision: updated.Revision, Reason: d.Reason})
 		return d, nil
 	}
 	if revoked {
@@ -528,7 +598,9 @@ func (r *Runtime) AddTemporaryBlockContext(ctx context.Context, block domain.Tem
 	}
 	for _, current := range r.Store.List() {
 		if strings.EqualFold(current.OriginalTuple.SrcIP.String(), block.Indicator) {
-			_ = r.Invalidate(current.SessionID, "temporary block")
+			if err := r.Invalidate(current.SessionID, "temporary block"); err == nil {
+				r.evaluateObserved(current)
+			}
 		}
 	}
 	return nil
@@ -561,6 +633,7 @@ func (r *Runtime) RemoveTemporaryBlockContext(ctx context.Context, indicator str
 	r.mu.Lock()
 	delete(r.blocks, key)
 	r.mu.Unlock()
+	r.reevaluateSource(key, "temporary block removed")
 	return nil
 }
 func (r *Runtime) SweepBlocks(now time.Time) {
@@ -577,6 +650,23 @@ func (r *Runtime) SweepBlocks(now time.Time) {
 	if guards != nil {
 		for _, indicator := range expired {
 			_ = guards.RemoveSourceBlock(context.Background(), indicator)
+		}
+	}
+	for _, indicator := range expired {
+		r.reevaluateSource(indicator, "temporary block expired")
+	}
+}
+
+func (r *Runtime) reevaluateSource(indicator, reason string) {
+	for _, current := range r.Store.List() {
+		if current.Revoked {
+			continue
+		}
+		if !strings.EqualFold(current.OriginalTuple.SrcIP.String(), indicator) {
+			continue
+		}
+		if err := r.Invalidate(current.SessionID, reason); err == nil {
+			r.evaluateObserved(current)
 		}
 	}
 }

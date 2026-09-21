@@ -27,6 +27,13 @@ func (r *RuntimeEventRing) Publish(ev domain.RuntimeEvent) domain.RuntimeEvent {
 	defer r.mu.Unlock()
 	r.next++
 	ev.Sequence = r.next
+	if ev.Class == "" {
+		if ev.Kind == domain.EventDecisionChanged || ev.Kind == domain.EventSessionInvalidated {
+			ev.Class = domain.EventClassPolicy
+		} else {
+			ev.Class = domain.EventClassRuntime
+		}
+	}
 	if ev.Timestamp.IsZero() {
 		ev.Timestamp = time.Now().UTC()
 	}

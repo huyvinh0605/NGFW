@@ -94,3 +94,24 @@ func TestInferZonesUsesLongestConfiguredRoute(t *testing.T) {
 		t.Fatalf("zones=%q,%q", source, destination)
 	}
 }
+
+func TestInferZonesNeverMapsLoopbackOrGatewayAddressThroughDefaultRoute(t *testing.T) {
+	c := domain.Config{Interfaces: []domain.Interface{
+		{ID: "lan-if", ZoneID: "lan", IPv4Addresses: []string{"192.168.10.1/24"}},
+		{ID: "wan-if", ZoneID: "wan", IPv4Addresses: []string{"192.0.2.2/24"}},
+	}, Routes: []domain.Route{{ID: "default", DestinationCIDR: "0.0.0.0/0", InterfaceID: "wan-if", Enabled: true}}}
+	p, err := Compile(c, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopback := domain.Tuple{Family: domain.FamilyIPv4, SrcIP: netip.MustParseAddr("127.0.0.1"), DstIP: netip.MustParseAddr("127.0.0.1"), Protocol: 6}
+	if source, destination := p.InferZones(loopback); source != ZoneLocal || destination != ZoneLocal {
+		t.Fatalf("loopback zones=%q,%q", source, destination)
+	}
+	if got := p.InferAddressZone(netip.MustParseAddr("192.0.2.2")); got != ZoneLocal {
+		t.Fatalf("gateway address zone=%q", got)
+	}
+	if got := p.InferAddressZone(netip.MustParseAddr("203.0.113.10")); got != "wan" {
+		t.Fatalf("routed internet address zone=%q", got)
+	}
+}

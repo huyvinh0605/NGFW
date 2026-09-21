@@ -17,6 +17,7 @@ import (
 
 	"github.com/kltngfw/ngfw/internal/auth"
 	"github.com/kltngfw/ngfw/internal/config"
+	"github.com/kltngfw/ngfw/internal/connectivity"
 	"github.com/kltngfw/ngfw/internal/domain"
 	"github.com/kltngfw/ngfw/internal/engine"
 	"github.com/kltngfw/ngfw/internal/inspection"
@@ -36,13 +37,17 @@ type API struct {
 	events      []domain.SecurityEvent
 	audit       []domain.AuditEntry
 	blocks      map[string]domain.TemporaryBlock
+	wsMu        sync.Mutex
+	wsConns     map[*websocket.Conn]struct{}
+	wsWG        sync.WaitGroup
+	wsClosing   bool
 }
 
 func NewAPI(e *engine.Engine, c *config.Manager, token string, l *slog.Logger) *API {
 	if l == nil {
 		l = slog.Default()
 	}
-	return &API{Engine: e, Config: c, Token: token, Logger: l, Reputation: inspection.NewReputationStore(100000), blocks: map[string]domain.TemporaryBlock{}}
+	return &API{Engine: e, Config: c, Token: token, Logger: l, Reputation: inspection.NewReputationStore(100000), blocks: map[string]domain.TemporaryBlock{}, wsConns: map[*websocket.Conn]struct{}{}}
 }
 
 // NewRuntimeAPI constructs the production management API. Runtime state is
@@ -53,7 +58,7 @@ func NewRuntimeAPI(runtime RuntimeClient, c *config.Manager, token string, l *sl
 	if l == nil {
 		l = slog.Default()
 	}
-	return &API{Runtime: runtime, Config: c, Token: token, Logger: l, Reputation: inspection.NewReputationStore(100000), blocks: map[string]domain.TemporaryBlock{}}
+	return &API{Runtime: runtime, Config: c, Token: token, Logger: l, Reputation: inspection.NewReputationStore(100000), blocks: map[string]domain.TemporaryBlock{}, wsConns: map[*websocket.Conn]struct{}{}}
 }
 
 func (a *API) Handler() http.Handler {
@@ -286,7 +291,19 @@ func (a *API) health(w http.ResponseWriter, _ *http.Request) {
 			return
 		}
 		status := strings.ToLower(health.Status)
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"status": status, "components": map[string]any{"session_engine": health, "dataplane": map[string]any{"status": "managed-by-engine"}}}})
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+			"status": status,
+			"components": map[string]any{
+				"session_engine": health,
+				"dataplane": map[string]any{
+					"name":            "Linux dataplane",
+					"status":          "healthy",
+					"message":         "ngfw-engine is reachable; kernel dataplane health is not separately measured",
+					"management_mode": "engine",
+					"updated_at":      time.Now().UTC(),
+				},
+			},
+		}})
 		return
 	}
 	components := a.Engine.Health()
@@ -311,7 +328,7 @@ func (a *API) configView(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "ENGINE_UNAVAILABLE", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"running": running, "candidate": a.Config.Candidate(), "version": version, "candidate_valid": len(a.Config.ValidateCandidate()) == 0}})
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"running": running, "candidate": a.Config.Candidate(), "version": version, "candidate_valid": len(a.candidateValidationErrors()) == 0}})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": a.Config.Export()})
@@ -728,12 +745,23 @@ func replaceProfile(v []domain.SecurityProfile, x domain.SecurityProfile) []doma
 	return append(v, x)
 }
 func (a *API) validate(w http.ResponseWriter, _ *http.Request) {
-	errs := a.Config.ValidateCandidate()
+	errs := a.candidateValidationErrors()
 	if len(errs) > 0 {
 		writeJSON(w, 400, map[string]any{"success": false, "error": map[string]any{"code": "INVALID_CONFIG", "message": "candidate invalid", "details": errs}})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "data": map[string]any{"valid": true}})
+}
+
+func (a *API) candidateValidationErrors() []string {
+	errs := a.Config.ValidateCandidate()
+	if len(errs) != 0 {
+		return errs
+	}
+	if _, err := connectivity.CompileM2(a.Config.Candidate(), 1); err != nil {
+		return []string{"M2 runtime compatibility: " + err.Error()}
+	}
+	return nil
 }
 func (a *API) commit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -1237,47 +1265,163 @@ func (a *API) recordAudit(entry domain.AuditEntry) {
 	a.mu.Unlock()
 }
 func (a *API) wsEvents(conn *websocket.Conn) {
+	done, finish, ok := a.beginWebSocket(conn)
+	if !ok {
+		return
+	}
+	defer finish()
 	if a.Runtime != nil {
 		var cursor uint64
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		lastHeartbeat := time.Time{}
 		for {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			page, err := a.Runtime.ReadRuntimeEvents(ctx, cursor, 200)
 			cancel()
 			if err != nil {
-				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				_ = websocket.JSON.Send(conn, map[string]any{"success": false, "error": map[string]string{"code": "ENGINE_UNAVAILABLE", "message": err.Error()}})
+				_ = a.writeWebSocket(conn, map[string]any{"success": false, "error": map[string]string{"code": "ENGINE_UNAVAILABLE", "message": err.Error()}})
 				return
 			}
 			for _, event := range page.Items {
 				cursor = event.Sequence
-				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				if err := websocket.JSON.Send(conn, map[string]any{"success": true, "data": event}); err != nil {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "data": event}); err != nil {
 					return
 				}
 			}
-			<-ticker.C
+			if len(page.Items) == 0 && (lastHeartbeat.IsZero() || time.Since(lastHeartbeat) >= 15*time.Second) {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "heartbeat", "data": nil, "timestamp": time.Now().UTC()}); err != nil {
+					return
+				}
+				lastHeartbeat = time.Now()
+			}
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for event := range a.Engine.Events.Subscribe(ctx) {
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := websocket.JSON.Send(conn, map[string]any{"success": true, "data": event}); err != nil {
+	events := a.Engine.Events.Subscribe(ctx)
+	for {
+		select {
+		case <-done:
 			return
+		case event, open := <-events:
+			if !open {
+				return
+			}
+			if err := a.writeWebSocket(conn, map[string]any{"success": true, "data": event}); err != nil {
+				return
+			}
 		}
 	}
 }
 func (a *API) wsStats(conn *websocket.Conn) {
+	done, finish, ok := a.beginWebSocket(conn)
+	if !ok {
+		return
+	}
+	defer finish()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := websocket.JSON.Send(conn, map[string]any{"success": true, "data": a.statsSnapshot()}); err != nil {
+		if err := a.writeWebSocket(conn, map[string]any{"success": true, "data": a.statsSnapshot()}); err != nil {
 			return
 		}
-		<-ticker.C
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// beginWebSocket owns the lifecycle of one upgraded connection. The reader
+// exists only to observe close frames/EOF; all application writes remain on
+// the handler goroutine, because x/net/websocket does not permit concurrent
+// writers. Clearing inherited HTTP deadlines prevents the API ReadTimeout
+// from terminating otherwise healthy long-lived streams.
+func (a *API) beginWebSocket(conn *websocket.Conn) (<-chan struct{}, func(), bool) {
+	_ = conn.SetDeadline(time.Time{})
+	a.wsMu.Lock()
+	if a.wsClosing {
+		a.wsMu.Unlock()
+		_ = conn.Close()
+		return nil, func() {}, false
+	}
+	if a.wsConns == nil {
+		a.wsConns = map[*websocket.Conn]struct{}{}
+	}
+	a.wsConns[conn] = struct{}{}
+	a.wsWG.Add(1)
+	a.wsMu.Unlock()
+
+	done := make(chan struct{})
+	readerDone := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(done) }) }
+	go func() {
+		defer close(readerDone)
+		var discarded []byte
+		for {
+			if err := websocket.Message.Receive(conn, &discarded); err != nil {
+				stop()
+				return
+			}
+		}
+	}()
+	finish := func() {
+		stop()
+		_ = conn.Close()
+		select {
+		case <-readerDone:
+		case <-time.After(time.Second):
+		}
+		a.wsMu.Lock()
+		delete(a.wsConns, conn)
+		a.wsMu.Unlock()
+		a.wsWG.Done()
+	}
+	return done, finish, true
+}
+
+func (a *API) writeWebSocket(conn *websocket.Conn, payload any) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	return websocket.JSON.Send(conn, payload)
+}
+
+// Shutdown closes hijacked WebSocket connections, which net/http.Server's
+// Shutdown method does not own, and waits for their handlers to release all
+// tickers and reader goroutines.
+func (a *API) Shutdown(ctx context.Context) error {
+	a.wsMu.Lock()
+	a.wsClosing = true
+	connections := make([]*websocket.Conn, 0, len(a.wsConns))
+	for conn := range a.wsConns {
+		connections = append(connections, conn)
+	}
+	a.wsMu.Unlock()
+	for _, conn := range connections {
+		// Expire I/O instead of calling websocket.Close here. Close writes a
+		// control frame and could race the connection's single writer; the
+		// owning handler performs the close after its writer has stopped.
+		_ = conn.SetDeadline(time.Now())
+	}
+	done := make(chan struct{})
+	go func() {
+		a.wsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 func decode(r *http.Request, v any) error {

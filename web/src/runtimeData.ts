@@ -139,6 +139,8 @@ export function normalizeEvent(value: unknown, index = 0): SecurityEvent | null 
   const category = stringValue(record.category) || kind || "Security signal";
   const detector = stringValue(record.detector) || (kind ? "SESSION_ENGINE" : "UNKNOWN");
   const metadata = objectValue(record.metadata);
+  const eventClass = stringValue(record.event_class).toLowerCase()
+    || (kind === "DecisionChanged" || kind === "SessionInvalidated" ? "policy" : kind ? "runtime" : "security");
   const runtimeMetadata = kind ? {
     ...(metadata ?? {}),
     kind,
@@ -153,6 +155,7 @@ export function normalizeEvent(value: unknown, index = 0): SecurityEvent | null 
     flow_id: stringValue(record.flow_id) || undefined,
     session_id: stringValue(record.session_id) || undefined,
     detector,
+    event_class: eventClass,
     category,
     signature_id: stringValue(record.signature_id) || undefined,
     severity: eventSeverity(record.severity),
@@ -220,8 +223,21 @@ export function normalizeSession(value: unknown, index = 0): Session | null {
   const clientPort = boundedNumber(valueAt(record, "client_port"), original?.src_port ?? 0, 0, 65535);
   const serverPort = boundedNumber(valueAt(record, "server_port"), original?.dst_port ?? 0, 0, 65535);
   const cacheState = stringValue(valueAt(record, "cache_state")).toUpperCase();
+  const revoked = booleanValue(valueAt(record, "revoked"));
   const effectiveDecision = decisionValue(valueAt(record, "effective_decision"));
-  const decision = decisionValue(valueAt(record, "decision")) || effectiveDecision;
+  const decision = cacheState === "INVALIDATED" && !revoked ? "" : decisionValue(valueAt(record, "decision")) || effectiveDecision;
+  const quality = objectValue(valueAt(record, "quality"));
+  const missingFields = stringArray(valueAt(quality, "missing_fields"));
+  const hasCounterFields = ["packets_up", "packets_original", "packets_down", "packets_reply", "bytes_up", "bytes_original", "bytes_down", "bytes_reply"]
+    .some((key) => Object.prototype.hasOwnProperty.call(record, key));
+  const countersAvailable = booleanValue(valueAt(record, "counters_available"), hasCounterFields && !missingFields.includes("counters"));
+  const kernelCacheVerified = booleanValue(valueAt(record, "kernel_cache_verified"));
+  const declaredPath = stringValue(valueAt(record, "path_classification")).toUpperCase();
+  const pathClassification: Session["path_classification"] = kernelCacheVerified && declaredPath !== "INSPECT"
+    ? "FAST"
+    : declaredPath === "INSPECT" ? "INSPECT" : "UNAVAILABLE";
+  const riskAvailable = booleanValue(valueAt(record, "risk_available"), Object.prototype.hasOwnProperty.call(record, "risk_score"));
+  const applicationAvailable = booleanValue(valueAt(record, "application_available"), Object.prototype.hasOwnProperty.call(record, "application"));
   const runtimeOriginal = original ? { ...original } : undefined;
   const runtimeReply = reply ? { ...reply } : undefined;
   return {
@@ -240,17 +256,25 @@ export function normalizeSession(value: unknown, index = 0): Session | null {
     packets_down: Math.max(0, numberValue(valueAt(record, "packets_down") ?? valueAt(record, "packets_reply"))),
     bytes_up: Math.max(0, numberValue(valueAt(record, "bytes_up") ?? valueAt(record, "bytes_original"))),
     bytes_down: Math.max(0, numberValue(valueAt(record, "bytes_down") ?? valueAt(record, "bytes_reply"))),
-    application: stringValue(valueAt(record, "application"), "Unknown"),
+    application: stringValue(valueAt(record, "application"), "Unavailable"),
+    application_available: applicationAvailable,
     application_confidence: boundedNumber(valueAt(record, "application_confidence"), 0, 0, 1),
     security_context_id: stringValue(valueAt(record, "security_context_id"), id),
     policy_id: stringValue(valueAt(record, "policy_id")) || stringValue(valueAt(record, "matched_policy_id")),
     policy_version: Math.max(0, numberValue(valueAt(record, "policy_version") ?? valueAt(record, "policy_generation"))),
     decision_version: Math.max(0, numberValue(valueAt(record, "decision_version") ?? valueAt(record, "decision_generation"))),
     risk_score: boundedNumber(valueAt(record, "risk_score"), 0, 0, 100),
+    risk_available: riskAvailable,
     decision,
-    fast_path_eligible: booleanValue(valueAt(record, "fast_path_eligible"), booleanValue(valueAt(record, "kernel_cache_verified"), cacheState === "CACHED")),
-    fast_path_reason: stringValue(valueAt(record, "fast_path_reason")) || (cacheState === "CACHED" ? "cached decision" : undefined),
+    decision_status: decision ? "EVALUATED" : cacheState === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE",
+    decision_reason: stringValue(valueAt(record, "decision_reason")) || stringValue(valueAt(record, "invalidation_reason")) || undefined,
+    cache_state: cacheState || "NOT_EVALUATED",
+    counters_available: countersAvailable,
+    fast_path_eligible: pathClassification === "FAST",
+    path_classification: pathClassification,
+    fast_path_reason: stringValue(valueAt(record, "fast_path_reason")) || (pathClassification === "UNAVAILABLE" ? "Kernel path provenance is not verified" : undefined),
     invalidated: booleanValue(valueAt(record, "invalidated"), cacheState === "INVALIDATED") || cacheState === "INVALIDATED",
+    revoked,
     original_tuple: runtimeOriginal,
     reply_tuple: runtimeReply,
     translated_tuple: tupleValue(valueAt(record, "translated_tuple")) ?? undefined,
@@ -295,7 +319,7 @@ function normalizeSecurityContext(value: unknown, session: Session): SessionDeta
       action: decisionValue(valueAt(policy, "action")) || session.decision || "",
       matched_policy_id: stringValue(valueAt(policy, "matched_policy_id")) || session.policy_id || undefined,
       scope: stringValue(valueAt(policy, "scope")) || undefined,
-      reason: stringValue(valueAt(policy, "reason")) || undefined,
+      reason: stringValue(valueAt(policy, "reason")) || session.decision_reason || undefined,
     },
     signals: Array.isArray(valueAt(record, "signals")) ? valueAt(record, "signals") as SecurityEvent[] : [],
     updated_at: validTimestamp(valueAt(record, "updated_at")) || session.last_seen,

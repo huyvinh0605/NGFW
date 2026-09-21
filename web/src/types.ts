@@ -37,16 +37,24 @@ export type Session = {
   bytes_up: number;
   bytes_down: number;
   application: string;
+  application_available: boolean;
   application_confidence: number;
   security_context_id: string;
   policy_id: string;
   policy_version: number;
   decision_version: number;
   risk_score: number;
+  risk_available: boolean;
   decision: string;
+  decision_status: "EVALUATED" | "INVALIDATED" | "UNAVAILABLE";
+  decision_reason?: string;
+  cache_state: string;
+  counters_available: boolean;
   fast_path_eligible: boolean;
+  path_classification: "FAST" | "INSPECT" | "UNAVAILABLE";
   fast_path_reason?: string;
   invalidated: boolean;
+  revoked: boolean;
   /** Runtime M2 tuple data. Legacy API responses may omit these fields. */
   original_tuple?: FlowTuple;
   reply_tuple?: FlowTuple;
@@ -97,6 +105,7 @@ export type SecurityEvent = {
   flow_id?: string;
   session_id?: string;
   detector: string;
+  event_class: "runtime" | "policy" | "security" | string;
   category: string;
   signature_id?: string;
   severity: "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | string;

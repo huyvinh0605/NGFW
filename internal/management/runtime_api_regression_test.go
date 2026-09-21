@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +148,33 @@ func TestRuntimeAPIWebSocketStatsStaysOpen(t *testing.T) {
 	}
 }
 
+func TestRuntimeAPIWebSocketClearsInheritedHTTPReadDeadline(t *testing.T) {
+	runtime := &runtimeAPIFake{stats: domain.RuntimeStats{ActiveSessions: 5}}
+	server := httptest.NewUnstartedServer(newRuntimeAPIForTest(t, runtime).Handler())
+	server.Config.ReadTimeout = 25 * time.Millisecond
+	server.Start()
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/stats"
+	conn, err := websocket.Dial(wsURL, "", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2500 * time.Millisecond))
+	for index := 0; index < 2; index++ {
+		var message struct {
+			Success bool `json:"success"`
+		}
+		if err := websocket.JSON.Receive(conn, &message); err != nil {
+			t.Fatalf("message %d after HTTP ReadTimeout: %v", index, err)
+		}
+		if !message.Success {
+			t.Fatalf("message %d was unsuccessful", index)
+		}
+	}
+}
+
 func TestRuntimeAPIWebSocketEventsStreamsRuntimeLifecycleEvent(t *testing.T) {
 	runtime := &runtimeAPIFake{events: domain.RuntimeEventPage{Items: []domain.RuntimeEvent{{
 		Sequence:  9,
@@ -177,6 +205,30 @@ func TestRuntimeAPIWebSocketEventsStreamsRuntimeLifecycleEvent(t *testing.T) {
 	}
 	if !message.Success || message.Data.Sequence != 9 || message.Data.Kind != string(domain.EventDecisionChanged) || message.Data.SessionID != "session-9" {
 		t.Fatalf("unexpected runtime events websocket message: %#v", message)
+	}
+}
+
+func TestRuntimeAPIWebSocketEventsSendsHeartbeatWhenIdle(t *testing.T) {
+	runtime := &runtimeAPIFake{}
+	server := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/events"
+	conn, err := websocket.Dial(wsURL, "", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var message struct {
+		Success bool   `json:"success"`
+		Type    string `json:"type"`
+		Data    any    `json:"data"`
+	}
+	if err := websocket.JSON.Receive(conn, &message); err != nil {
+		t.Fatal(err)
+	}
+	if !message.Success || message.Type != "heartbeat" || message.Data != nil {
+		t.Fatalf("heartbeat=%#v", message)
 	}
 }
 
@@ -275,5 +327,169 @@ func TestRuntimeAPIConfigReadAndCandidateSaveDoNotActivateEngine(t *testing.T) {
 	}
 	if runtime.commitCalls != 1 || runtime.version.Version != 8 || runtime.lastCommitted.MaxSessions != candidate.MaxSessions {
 		t.Fatalf("explicit commit did not perform exactly one activation: calls=%d version=%d", runtime.commitCalls, runtime.version.Version)
+	}
+}
+
+func TestRuntimeAPIValidateRejectsM2IncompatibleScopeBeforeCommit(t *testing.T) {
+	running := config.Defaults()
+	runtime := &runtimeAPIFake{running: running, version: domain.ConfigVersion{Version: 3}}
+	manager, err := config.NewManager(t.TempDir(), running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := manager.Candidate()
+	candidate.Policies = []domain.SecurityPolicy{{ID: "packet-rule", Priority: 1, Scope: "PACKET", Action: domain.DecisionAllow, Enabled: true}}
+	if validation := manager.SetCandidate(candidate); len(validation) != 0 {
+		t.Fatalf("syntax validation unexpectedly failed: %v", validation)
+	}
+	api := NewRuntimeAPI(runtime, manager, "test-token", nil)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	configResponse, err := http.Get(server.URL + "/api/v1/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configEnvelope struct {
+		Data struct {
+			CandidateValid bool `json:"candidate_valid"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(configResponse.Body).Decode(&configEnvelope); err != nil {
+		configResponse.Body.Close()
+		t.Fatal(err)
+	}
+	configResponse.Body.Close()
+	if configEnvelope.Data.CandidateValid {
+		t.Fatal("config view advertised an M2-incompatible candidate as valid")
+	}
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/policies/validate", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer test-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("validate status=%d", response.StatusCode)
+	}
+	payload, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "outside M2 session scope") || runtime.commitCalls != 0 || runtime.version.Version != 3 {
+		t.Fatalf("validate payload=%s calls=%d version=%d", payload, runtime.commitCalls, runtime.version.Version)
+	}
+}
+
+func TestRuntimeAPIValidationExplainsServiceSyntax(t *testing.T) {
+	running := config.Defaults()
+	runtime := &runtimeAPIFake{running: running, version: domain.ConfigVersion{Version: 2}}
+	manager, err := config.NewManager(t.TempDir(), running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := manager.Candidate()
+	candidate.Policies = []domain.SecurityPolicy{{ID: "web", Priority: 1, Services: []string{"80"}, Scope: "SESSION", Action: domain.DecisionAllow, Enabled: true}}
+	payload, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewRuntimeAPI(runtime, manager, "test-token", nil)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/v1/config/candidate", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	responsePayload, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(responsePayload), "tcp:80") {
+		t.Fatalf("service validation status=%d payload=%s", response.StatusCode, responsePayload)
+	}
+}
+
+func TestRuntimeAPIHealthUsesCanonicalComponentStatus(t *testing.T) {
+	runtime := &runtimeAPIFake{health: domain.RuntimeHealth{Status: "healthy", UpdatedAt: time.Now().UTC()}}
+	server := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+	defer server.Close()
+	response, err := http.Get(server.URL + "/api/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var envelope struct {
+		Data struct {
+			Components map[string]struct {
+				Status         string `json:"status"`
+				ManagementMode string `json:"management_mode"`
+			} `json:"components"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	dataplane := envelope.Data.Components["dataplane"]
+	if dataplane.Status != "healthy" || dataplane.ManagementMode != "engine" {
+		t.Fatalf("dataplane health=%+v", dataplane)
+	}
+}
+
+func TestRuntimeAPIWebSocketReconnectRepeatedDisconnectAndShutdown(t *testing.T) {
+	runtime := &runtimeAPIFake{stats: domain.RuntimeStats{ActiveSessions: 4}}
+	api := newRuntimeAPIForTest(t, runtime)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/stats"
+
+	for index := 0; index < 12; index++ {
+		conn, err := websocket.Dial(wsURL, "", server.URL)
+		if err != nil {
+			t.Fatalf("dial %d: %v", index, err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		var message map[string]any
+		if err := websocket.JSON.Receive(conn, &message); err != nil {
+			t.Fatalf("receive %d: %v", index, err)
+		}
+		if message["success"] != true {
+			t.Fatalf("message %d=%#v", index, message)
+		}
+		// Closing immediately models both navigation and abrupt transport loss;
+		// the next iteration proves a fresh connection is accepted.
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close %d: %v", index, err)
+		}
+	}
+
+	conn, err := websocket.Dial(wsURL, "", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var first map[string]any
+	if err := websocket.JSON.Receive(conn, &first); err != nil {
+		t.Fatal(err)
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := api.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("websocket shutdown: %v", err)
+	}
+	var afterShutdown map[string]any
+	if err := websocket.JSON.Receive(conn, &afterShutdown); err == nil {
+		t.Fatalf("connection remained readable after API shutdown: %#v", afterShutdown)
 	}
 }

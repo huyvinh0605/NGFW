@@ -273,3 +273,28 @@ func TestRuntimeStoreRejectsStaleDecisionRevision(t *testing.T) {
 		t.Fatalf("stale decision error=%v", err)
 	}
 }
+
+func TestRuntimeStoreUnavailableDecisionAndInvalidationDoNotExposeStaleAllow(t *testing.T) {
+	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 2})
+	v, _, err := s.Apply(testRecord(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkEvaluationUnavailable(v.SessionID, 3, "local traffic is outside the forward path"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(v.SessionID)
+	if got.CacheState != domain.CacheNotEvaluated || got.Decision != "" || got.DecisionReason == "" {
+		t.Fatalf("unavailable evaluation=%+v", got)
+	}
+	if _, err := s.SetDecision(v.SessionID, 3, domain.DecisionAllow, "allow", "matched"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Invalidate(v.SessionID, 4, "policy changed", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.Get(v.SessionID)
+	if got.Decision != "" || got.EffectiveDecision != "" || got.MatchedPolicyID != "" || got.CacheState != domain.CacheInvalidated {
+		t.Fatalf("invalidation exposed stale verdict: %+v", got)
+	}
+}

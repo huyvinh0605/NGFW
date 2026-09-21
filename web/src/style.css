@@ -231,6 +231,7 @@ td time { white-space: nowrap; }
 .path-label i { width: 6px; height: 6px; border-radius: 50%; }
 .path-label.fast i { background: var(--green); }
 .path-label.inspect i { background: var(--blue); }
+.path-label.unavailable i { background: #60758a; }
 .row-actions { display: flex; gap: 2px; }
 .toggle { width: 32px; height: 18px; padding: 2px; border: 0; border-radius: 10px; background: #23364a; transition: .18s ease; }
 .toggle i { width: 14px; height: 14px; display: block; border-radius: 50%; background: #7d91a3; transition: .18s ease; }

@@ -98,7 +98,13 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. The Vite development server proxies `/api` to `http://localhost:8080`.
 
-The console includes the protection overview, live sessions and security context, detector events, temporary blocks, local reputation, management audit, policy editing, network inventory, candidate JSON, validation, commit/rollback, component health and RBAC user administration. Stats and detector events use `/ws/stats` and `/ws/events`; bounded polling remains active as a reconnect fallback.
+The M2 console includes runtime health, live conntrack sessions, L3/L4 decisions,
+runtime/policy events, temporary blocks, the local reputation registry,
+management audit, policy editing, network inventory, candidate JSON,
+validation, commit/rollback and RBAC user administration. Stats and runtime
+events use `/ws/stats` and `/ws/events`; bounded polling remains active as a
+reconnect fallback. App-ID, risk, DPI, IDS/IPS, ML and TLS inspection are shown
+as unavailable because they belong to later milestones.
 
 Monitoring remains available in read-only mode. To use write actions, open **Management access** in the lower-left corner and enter the same token configured in `NGFW_API_TOKEN` (for example `dev-token`), or sign in with the account configured through `NGFW_ADMIN_USER` and `NGFW_ADMIN_PASSWORD`. Account passwords are stored as salted Argon2id hashes, and updates revoke that account's existing bearer sessions.
 
@@ -161,6 +167,15 @@ it does not construct a second session engine or execute dataplane commands.
 Resync closes sessions absent from a complete kernel dump, and engine startup
 clears stale integer conntrack revoke fences while preserving timed source
 blocks in the kernel runtime table.
+
+Observed forward sessions are evaluated automatically against the current M2
+L3/L4 program. Loopback and traffic to/from an appliance address are classified
+as `local` and report the forward-policy decision as unavailable. Unknown
+addresses remain `unknown`; they are never silently mapped to WAN. A bounded
+periodic conntrack dump refreshes counters that UPDATE events omit. The UI only
+labels a session `Fast` when the backend verifies kernel-cache provenance;
+otherwise path, App-ID and risk are shown as unavailable. Runtime lifecycle,
+policy and security events use separate event classes.
 Use `docs/m2-acceptance-matrix.md`, then run
 `sudo /usr/local/lib/ngfw/verify-m2-linux.sh` and the traffic cases in
 `tests/integration/m2/README.md`. Until those VM cases have evidence, M2 is

@@ -16,3 +16,13 @@ func TestRuntimeEventRingIsBoundedAndReportsGap(t *testing.T) {
 		t.Fatalf("items=%d gap=%d next=%d dropped=%d", len(items), gap, next, ring.Dropped())
 	}
 }
+
+func TestRuntimeEventRingClassifiesLifecycleAndPolicyEvents(t *testing.T) {
+	ring := NewRuntimeEventRing(4)
+	lifecycle := ring.Publish(domain.RuntimeEvent{Kind: domain.EventSessionCreated, SessionID: "s1"})
+	policy := ring.Publish(domain.RuntimeEvent{Kind: domain.EventDecisionChanged, SessionID: "s1"})
+	security := ring.Publish(domain.RuntimeEvent{Kind: domain.EventSessionUpdated, Class: domain.EventClassSecurity, SessionID: "s1"})
+	if lifecycle.Class != domain.EventClassRuntime || policy.Class != domain.EventClassPolicy || security.Class != domain.EventClassSecurity {
+		t.Fatalf("classes=%q,%q,%q", lifecycle.Class, policy.Class, security.Class)
+	}
+}

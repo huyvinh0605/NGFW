@@ -30,11 +30,17 @@ type Rule struct {
 }
 
 type Program struct {
-	Rules        []Rule
-	DefaultDeny  bool
-	Generation   uint64
-	zonePrefixes map[string][]netip.Prefix
+	Rules          []Rule
+	DefaultDeny    bool
+	Generation     uint64
+	zonePrefixes   map[string][]netip.Prefix
+	localAddresses map[netip.Addr]struct{}
 }
+
+const (
+	ZoneLocal   = "local"
+	ZoneUnknown = "unknown"
+)
 
 type View struct {
 	SourceIP, DestinationIP     netip.Addr
@@ -78,17 +84,19 @@ func CompileM2(config domain.Config, generation uint64) (Program, error) {
 }
 
 func Compile(config domain.Config, generation uint64) (Program, error) {
-	program := Program{DefaultDeny: config.DefaultDeny, Generation: generation, zonePrefixes: map[string][]netip.Prefix{}}
+	program := Program{DefaultDeny: config.DefaultDeny, Generation: generation, zonePrefixes: map[string][]netip.Prefix{}, localAddresses: map[netip.Addr]struct{}{}}
 	interfacesByID := make(map[string]domain.Interface, len(config.Interfaces))
 	for _, iface := range config.Interfaces {
 		interfacesByID[iface.ID] = iface
-		if strings.TrimSpace(iface.ZoneID) == "" {
-			continue
-		}
 		for _, raw := range append(append([]string{}, iface.IPv4Addresses...), iface.IPv6Addresses...) {
 			prefix, err := parseInterfacePrefix(raw)
 			if err == nil {
-				program.zonePrefixes[iface.ZoneID] = append(program.zonePrefixes[iface.ZoneID], prefix)
+				if address, addressErr := parseInterfaceAddress(raw); addressErr == nil {
+					program.localAddresses[address] = struct{}{}
+				}
+				if strings.TrimSpace(iface.ZoneID) != "" {
+					program.zonePrefixes[iface.ZoneID] = append(program.zonePrefixes[iface.ZoneID], prefix)
+				}
 			}
 		}
 	}
@@ -154,14 +162,19 @@ func parseInterfacePrefix(value string) (netip.Prefix, error) {
 	return netip.PrefixFrom(addr, bits), nil
 }
 
+func parseInterfaceAddress(value string) (netip.Addr, error) {
+	value = strings.TrimSpace(value)
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr(), nil
+	}
+	return netip.ParseAddr(value)
+}
+
 // InferZones maps an observed tuple to the configured interface networks.
 // Conntrack does not expose ingress/egress interface names, so this is an
 // explicit best-effort enrichment. An empty result remains observable and is
 // evaluated according to the policy's zone matcher (usually default deny).
 func (p Program) InferZones(tuple domain.Tuple) (string, string) {
-	if len(p.zonePrefixes) == 0 {
-		return "", ""
-	}
 	return p.InferAddressZone(tuple.SrcIP), p.InferAddressZone(tuple.DstIP)
 }
 
@@ -170,6 +183,15 @@ func (p Program) InferZones(tuple domain.Tuple) (string, string) {
 // session's destination from its post-translation tuple while retaining the
 // pre-NAT source zone.
 func (p Program) InferAddressZone(addr netip.Addr) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	if addr.IsLoopback() {
+		return ZoneLocal
+	}
+	if _, local := p.localAddresses[addr]; local {
+		return ZoneLocal
+	}
 	bestBits := -1
 	bestZone := ""
 	ambiguous := false

@@ -676,6 +676,15 @@ func (s *RuntimeStore) Invalidate(id string, generation uint64, reason string, n
 	now = now.UTC()
 	v.CacheState = domain.CacheInvalidated
 	v.KernelCacheVerified = false
+	v.MatchedPolicyID = ""
+	if v.Revoked {
+		v.Decision = domain.DecisionDrop
+		v.EffectiveDecision = domain.DecisionDrop
+	} else {
+		v.Decision = ""
+		v.EffectiveDecision = ""
+		v.DecisionReason = ""
+	}
 	v.InvalidatedAt = &now
 	v.InvalidationReason = reason
 	v.PolicyGeneration = generation
@@ -695,6 +704,36 @@ func (s *RuntimeStore) SetDecision(id string, generation uint64, action domain.D
 // policy evaluation from overwriting an invalidation, revoke, or destroy.
 func (s *RuntimeStore) SetDecisionIfCurrent(id string, expectedRevision, generation uint64, action domain.Decision, policyID, reason string) (domain.RuntimeSession, error) {
 	return s.setDecision(id, expectedRevision, generation, action, policyID, reason)
+}
+
+// MarkEvaluationUnavailable records why the M2 forward-policy evaluator cannot
+// make an authoritative decision for a tracked conntrack entry. In particular,
+// local INPUT/OUTPUT traffic is visible in conntrack but never traverses the
+// nftables forward chain, so assigning its default forward verdict would be
+// false telemetry.
+func (s *RuntimeStore) MarkEvaluationUnavailable(id string, generation uint64, reason string) (domain.RuntimeSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.byID[id]
+	if !ok {
+		return domain.RuntimeSession{}, ErrSessionMissing
+	}
+	if v.CacheState == domain.CacheNotEvaluated && v.PolicyGeneration == generation && v.Decision == "" && v.EffectiveDecision == "" && v.DecisionReason == reason {
+		return v.Clone(), nil
+	}
+	v.MatchedPolicyID = ""
+	v.PolicyGeneration = generation
+	v.DecisionGeneration++
+	v.Decision = ""
+	v.EffectiveDecision = ""
+	v.DecisionReason = reason
+	v.CacheState = domain.CacheNotEvaluated
+	v.KernelCacheVerified = false
+	v.InvalidatedAt = nil
+	v.InvalidationReason = ""
+	v.Revision++
+	s.revision++
+	return v.Clone(), nil
 }
 
 func (s *RuntimeStore) setDecision(id string, expectedRevision, generation uint64, action domain.Decision, policyID, reason string) (domain.RuntimeSession, error) {

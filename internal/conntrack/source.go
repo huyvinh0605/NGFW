@@ -208,6 +208,15 @@ func (f *FakeSource) Forget(identity domain.ConntrackIdentity) {
 	f.mu.Unlock()
 }
 
+// SetSnapshot updates the fake kernel view without emitting an event. It
+// models fields such as counters that may only become available during a
+// later conntrack dump.
+func (f *FakeSource) SetSnapshot(record Record) {
+	f.mu.Lock()
+	f.records[record.Identity] = record
+	f.mu.Unlock()
+}
+
 func (f *FakeSource) Dump(ctx context.Context, limits DumpLimits, visit func(Record) error) (DumpResult, error) {
 	if visit == nil {
 		return DumpResult{}, errors.New("nil dump visitor")
