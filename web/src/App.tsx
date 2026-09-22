@@ -401,7 +401,7 @@ export default function App() {
     if (!requireAccess()) return false;
     try {
       await api<{ valid: boolean }>("/api/v1/policies/validate", { method: "POST" }, token);
-      notify("success", "Candidate hợp lệ, có thể commit");
+      notify("success", "Candidate hợp lệ. Nếu Candidate khác Running, nút Commit sẽ được bật.");
       await loadConfig();
       return true;
     } catch (error) {
@@ -872,25 +872,46 @@ export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, o
 }
 
 export function ConfigStatusBar({ config, dirty, comment, onComment, busy, onValidate, onCommit, onRollback }: { config: ConfigExport | null; dirty: boolean; comment: string; onComment: (value: string) => void; busy: string; onValidate: () => Promise<void>; onCommit: () => Promise<void>; onRollback: () => Promise<void> }) {
-  return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version" aria-label={`Running version ${config?.version.version ?? 0}`}>Running<br/>v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate changed — chưa Commit" : "Candidate synced với Running"}</strong><small>{config?.candidate_valid ? "Validation: hợp lệ" : "Validation: cần kiểm tra"}{config?.version.author ? ` · Running commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} title="Chỉ kiểm tra Candidate; không áp dụng dataplane" onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} title="Khôi phục previous known-good theo backend và áp dụng lại dataplane" onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={!dirty || !config?.candidate_valid} title="Kích hoạt Candidate thành Running và áp dụng dataplane" onClick={() => void onCommit()}>Commit</Button></div></section>;
+  const commitDisabled = !dirty || !config?.candidate_valid || busy === "commit";
+  const commitTitle = !dirty
+    ? "Candidate đã đồng bộ với Running; không có thay đổi để commit"
+    : !config?.candidate_valid
+      ? "Candidate chưa hợp lệ; hãy sửa lỗi và Validate"
+      : "Kích hoạt Candidate thành Running và áp dụng dataplane";
+  return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version" aria-label={`Running version ${config?.version.version ?? 0}`}>Running<br/>v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate changed — chưa Commit" : "Candidate synced với Running · không có thay đổi để commit"}</strong><small>{config?.candidate_valid ? "Validation: hợp lệ" : "Validation: cần kiểm tra"}{config?.version.author ? ` · Running commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} title="Chỉ kiểm tra Candidate; không áp dụng dataplane" onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} title="Khôi phục previous known-good theo backend và áp dụng lại dataplane" onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={commitDisabled} title={commitTitle} onClick={() => void onCommit()}>Commit</Button></div></section>;
 }
 
-function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: string[]; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
+export function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: string[]; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
   const [draft, setDraft] = useState<SecurityPolicy>(() => ({ ...value, source_zones: [...(value.source_zones ?? [])], destination_zones: [...(value.destination_zones ?? [])], services: [...(value.services ?? [])], applications: [...(value.applications ?? [])] }));
+  const [servicesText, setServicesText] = useState(() => (value.services ?? []).join(", "));
+  const [applicationsText, setApplicationsText] = useState(() => (value.applications ?? []).join(", "));
+  const [priorityText, setPriorityText] = useState(() => String(value.priority ?? ""));
+  const [priorityError, setPriorityError] = useState("");
   const isNew = !value.id;
-  function csv(value: string) { return value.split(",").map((item) => item.trim()).filter(Boolean); }
+  function parseCSV(input: string) { return input.split(",").map((item) => item.trim()).filter(Boolean); }
   function toggleZone(field: "source_zones" | "destination_zones", zone: string) {
     const current = draft[field] ?? [];
     setDraft({ ...draft, [field]: current.includes(zone) ? current.filter((item) => item !== zone) : [...current, zone] });
   }
   function submit(event: FormEvent) {
     event.preventDefault();
-    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim() });
+    const trimmedPriority = priorityText.trim();
+    if (!trimmedPriority) {
+      setPriorityError("Priority bắt buộc phải có giá trị.");
+      return;
+    }
+    const priority = Number(trimmedPriority);
+    if (!Number.isInteger(priority) || priority < 0) {
+      setPriorityError("Priority phải là số nguyên từ 0 trở lên.");
+      return;
+    }
+    setPriorityError("");
+    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services: parseCSV(servicesText), applications: parseCSV(applicationsText) });
   }
   return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal policy-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CANDIDATE POLICY</span><h2>{isNew ? "Thêm policy" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body">
-    <div className="form-row"><label>ID<input required disabled={!isNew} pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input required type="number" min="0" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: Number(event.target.value) })}/></label></div>
+    <div className="form-row"><label>ID<input required disabled={!isNew} pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input aria-label="Policy priority" type="number" min="0" aria-required="true" aria-invalid={Boolean(priorityError)} value={priorityText} onChange={(event) => { setPriorityText(event.target.value); if (priorityError) setPriorityError(""); }}/>{priorityError && <small className="field-error" role="alert">{priorityError}</small>}</label></div>
     <div className="form-row two"><fieldset><legend>Source zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.source_zones?.includes(zone) ?? false} onChange={() => toggleZone("source_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset><fieldset><legend>Destination zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.destination_zones?.includes(zone) ?? false} onChange={() => toggleZone("destination_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset></div>
-    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input value={draft.services?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, services: csv(event.target.value) })} placeholder="tcp:80, tcp:443"/></label><label>Applications <small>M3+; phải để trống để tương thích M2</small><input value={draft.applications?.join(", ") ?? ""} onChange={(event) => setDraft({ ...draft, applications: csv(event.target.value) })} placeholder="Không khả dụng trong M2"/></label></div>
+    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input aria-label="Services" value={servicesText} onChange={(event) => setServicesText(event.target.value)} placeholder="tcp:80, tcp:443"/></label><label>Applications <small>M3+; phải để trống để tương thích M2</small><input aria-label="Applications" value={applicationsText} onChange={(event) => setApplicationsText(event.target.value)} placeholder="Không khả dụng trong M2"/></label></div>
     <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>SESSION</option></select><small>M2 chỉ hỗ trợ SESSION scope.</small></label><label>Security profile <small>M3+; phải để trống trong M2</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label></div>
     <div className="form-row"><label>Minimum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
   </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào Candidate</Button></div></form></div>;

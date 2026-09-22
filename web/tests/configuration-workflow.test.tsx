@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
-import { ConfigurationPage, PolicyPage } from "../src/App.tsx";
+import { ConfigurationPage, ConfigStatusBar, PolicyEditor, PolicyPage } from "../src/App.tsx";
 import type { ConfigExport, NGFWConfig, SecurityPolicy } from "../src/types.ts";
 
 function baseConfig(): NGFWConfig {
@@ -164,4 +164,62 @@ test("Policy and JSON pages expose one shared Candidate state and a working back
 
   policyView.unmount();
   configurationView.unmount();
+});
+
+test("Commit stays disabled when Candidate is already synced and explains why", async () => {
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<ConfigStatusBar config={configExport(false)} dirty={false} comment="" onComment={() => undefined} onValidate={async () => undefined} onCommit={async () => undefined} onRollback={async () => undefined}/>);
+  });
+
+  const commit = button(view, "Commit");
+  assert.equal(commit.props.disabled, true);
+  assert.match(commit.props.title, /không có thay đổi để commit/);
+  assert.match(textOf(view.root.findByProps({ className: "config-state" })), /không có thay đổi để commit/);
+  view.unmount();
+});
+
+test("Policy editor keeps comma separated service text and allows clearing Priority while typing", async () => {
+  const value: SecurityPolicy = {
+    id: "allow-web",
+    name: "Web access",
+    priority: 10,
+    source_zones: ["lan"],
+    destination_zones: ["wan"],
+    services: ["tcp:80"],
+    applications: [],
+    action: "ALLOW",
+    scope: "SESSION",
+    log_start: true,
+    log_end: true,
+    enabled: true,
+  };
+  let saved: SecurityPolicy | undefined;
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<PolicyEditor value={value} zones={["lan", "wan"]} profiles={[]} busy={false} onClose={() => undefined} onSave={async (policy) => { saved = policy; }}/>);
+  });
+
+  const priority = () => view.root.findByProps({ "aria-label": "Policy priority" });
+  const services = () => view.root.findByProps({ "aria-label": "Services" });
+  act(() => priority().props.onChange({ target: { value: "" } }));
+  assert.equal(priority().props.value, "", "Priority must be clearable during editing");
+  act(() => services().props.onChange({ target: { value: "tcp:80, udp:53, tcp:443" } }));
+  assert.equal(services().props.value, "tcp:80, udp:53, tcp:443", "editor must preserve the raw comma separated text");
+
+  await act(async () => {
+    view.root.findByType("form").props.onSubmit({ preventDefault() {} });
+    await Promise.resolve();
+  });
+  assert.equal(saved, undefined, "blank Priority must not save an invalid policy");
+  assert.match(textOf(view.root.findByProps({ role: "alert" })), /Priority bắt buộc/);
+
+  act(() => priority().props.onChange({ target: { value: "20" } }));
+  await act(async () => {
+    view.root.findByType("form").props.onSubmit({ preventDefault() {} });
+    await Promise.resolve();
+  });
+  assert.equal(saved?.priority, 20);
+  assert.deepEqual(saved?.services, ["tcp:80", "udp:53", "tcp:443"]);
+  view.unmount();
 });
