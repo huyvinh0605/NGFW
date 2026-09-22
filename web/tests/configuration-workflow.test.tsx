@@ -179,6 +179,20 @@ test("Commit stays disabled when Candidate is already synced and explains why", 
   view.unmount();
 });
 
+test("Commit stays disabled when Candidate validation rejects a shadowed policy", async () => {
+  const invalid = configExport(true);
+  invalid.candidate_valid = false;
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<ConfigStatusBar config={invalid} dirty={true} comment="" onComment={() => undefined} onValidate={async () => undefined} onCommit={async () => undefined} onRollback={async () => undefined}/>);
+  });
+
+  const commit = button(view, "Commit");
+  assert.equal(commit.props.disabled, true);
+  assert.match(commit.props.title, /Candidate chưa hợp lệ/);
+  view.unmount();
+});
+
 test("Policy editor keeps comma separated service text and allows clearing Priority while typing", async () => {
   const value: SecurityPolicy = {
     id: "allow-web",

@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -357,36 +356,8 @@ func validateIPv4AddressOrCIDR(value string) error {
 }
 
 func validateM1Service(value string) error {
-	invalid := func() error {
-		return fmt.Errorf("invalid service %q; expected tcp, udp, icmp, tcp:80, udp:53, or tcp:1000-2000", value)
-	}
-	parts := strings.Split(value, ":")
-	protocol := strings.ToLower(strings.TrimSpace(parts[0]))
-	if protocol != "tcp" && protocol != "udp" && protocol != "icmp" {
-		return invalid()
-	}
-	if len(parts) == 1 {
-		return nil
-	}
-	if len(parts) != 2 || protocol == "icmp" {
-		return invalid()
-	}
-	portParts := strings.Split(strings.TrimSpace(parts[1]), "-")
-	if len(portParts) < 1 || len(portParts) > 2 {
-		return invalid()
-	}
-	ports := make([]int, len(portParts))
-	for index, raw := range portParts {
-		port, err := strconv.Atoi(raw)
-		if err != nil || port < 1 || port > 65535 {
-			return invalid()
-		}
-		ports[index] = port
-	}
-	if len(ports) == 2 && ports[0] > ports[1] {
-		return invalid()
-	}
-	return nil
+	_, err := parseM1ServiceSelector(value)
+	return err
 }
 
 func ipv4BelongsToZone(address, zone string, value domain.Config) bool {

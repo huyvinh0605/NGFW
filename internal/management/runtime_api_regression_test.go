@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +147,40 @@ func TestRuntimeAPIWebSocketStatsStaysOpen(t *testing.T) {
 	}
 	if !message.Success || message.Data.ActiveSessions != 3 {
 		t.Fatalf("unexpected runtime websocket message: %#v", message)
+	}
+}
+
+func TestRuntimeAPIWebSocketStatsStaysOpenThroughProxyWithBrowserOrigin(t *testing.T) {
+	runtime := &runtimeAPIFake{stats: domain.RuntimeStats{ActiveSessions: 8}}
+	target := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+	defer target.Close()
+	targetURL, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(httputil.NewSingleHostReverseProxy(targetURL))
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + "/ws/stats"
+	conn, err := websocket.Dial(wsURL, "", "http://192.168.100.1:5173")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2500 * time.Millisecond))
+	for index := 0; index < 2; index++ {
+		var message struct {
+			Success bool `json:"success"`
+			Data    struct {
+				ActiveSessions uint64 `json:"active_sessions"`
+			} `json:"data"`
+		}
+		if err := websocket.JSON.Receive(conn, &message); err != nil {
+			t.Fatalf("proxied message %d: %v", index, err)
+		}
+		if !message.Success || message.Data.ActiveSessions != 8 {
+			t.Fatalf("unexpected proxied message %d: %#v", index, message)
+		}
 	}
 }
 

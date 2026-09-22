@@ -55,6 +55,61 @@ func TestAPIHealthAndProtectedCommit(t *testing.T) {
 	}
 }
 
+func TestPoliciesRejectShadowedRuleWithoutMutatingCandidate(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir(), config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := manager.Candidate()
+	candidate.Zones = []domain.Zone{{ID: "lan"}, {ID: "wan"}}
+	candidate.Interfaces = []domain.Interface{
+		{ID: "lan0", SystemName: "eth1", ZoneID: "lan", Mode: domain.InterfaceL3},
+		{ID: "wan0", SystemName: "eth0", ZoneID: "wan", Mode: domain.InterfaceL3},
+	}
+	base := domain.SecurityPolicy{ID: "allow-lan-web", Name: "LAN web", Priority: 10, SourceZones: []string{"lan"}, DestinationZones: []string{"wan"}, Services: []string{"tcp:80", "tcp:443", "udp:53"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true}
+	candidate.Policies = []domain.SecurityPolicy{base}
+	if errs := manager.SetCandidate(candidate); len(errs) != 0 {
+		t.Fatalf("base candidate is invalid: %v", errs)
+	}
+
+	api := NewAPI(engine.New(manager, enforcement.NewMemory()), manager, "secret", nil)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	shadowed := domain.SecurityPolicy{ID: "test-lan-http", Name: "LAN web access", Priority: 50, SourceZones: []string{"lan"}, DestinationZones: []string{"wan"}, Services: []string{"tcp:80", "tcp:443"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true}
+	body, err := json.Marshal([]domain.SecurityPolicy{base, shadowed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/v1/policies", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	var envelope struct {
+		Error struct {
+			Details []string `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(envelope.Error.Details, "\n"), "policy test-lan-http is unreachable") {
+		t.Fatalf("unexpected error: %#v", envelope.Error.Details)
+	}
+	if policies := manager.Candidate().Policies; len(policies) != 1 || policies[0].ID != "allow-lan-web" {
+		t.Fatalf("invalid policy changed Candidate: %#v", policies)
+	}
+}
+
 func TestAPIRollbackAppliesPreviousConfiguration(t *testing.T) {
 	manager, err := config.NewManager(t.TempDir(), config.Defaults())
 	if err != nil {

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { closeSocketAfterOpen, reconnectDelay, type SocketLike } from "../src/wsLifecycle.ts";
+import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, isExpectedWebSocketProxyTeardown, reconnectDelay, type SocketLike } from "../src/wsLifecycle.ts";
+
+test("delays the initial dial long enough for the StrictMode effect probe", () => {
+  assert.ok(INITIAL_WEBSOCKET_DIAL_DELAY_MS >= 100, "a zero-delay dial can race StrictMode cleanup and create a proxy EPIPE");
+});
+
+test("recognizes only expected browser-side proxy teardown errors", () => {
+  assert.equal(isExpectedWebSocketProxyTeardown("ws proxy socket error: Error: write EPIPE"), true);
+  assert.equal(isExpectedWebSocketProxyTeardown({ code: "ECONNRESET" }), true);
+  assert.equal(isExpectedWebSocketProxyTeardown("ws proxy error: 502 upstream unavailable"), false);
+  assert.equal(isExpectedWebSocketProxyTeardown({ code: "ECONNREFUSED" }), false);
+});
 
 test("does not abort a CONNECTING socket during component cleanup", () => {
   let openListener: (() => void) | undefined;

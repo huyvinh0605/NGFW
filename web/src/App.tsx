@@ -19,7 +19,7 @@ import {
   normalizeSessionPage,
   normalizeStats,
 } from "./runtimeData";
-import { closeSocketAfterOpen, reconnectDelay } from "./wsLifecycle";
+import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay } from "./wsLifecycle";
 import type {
   AuditEntry,
   ConfigExport,
@@ -337,9 +337,10 @@ export default function App() {
         };
       };
       // React StrictMode mounts, cleans up, and mounts effects again in dev.
-      // Deferring the first dial lets cleanup cancel it before a CONNECTING
-      // socket exists, avoiding a false handshake error in the Vite proxy.
-      const timer = window.setTimeout(() => { startTimers.delete(timer); open(); }, 0);
+      // Leave enough time for that probe to finish before dialing, otherwise
+      // the first socket is opened only to be closed during its handshake and
+      // Vite reports a misleading EPIPE on the browser-facing socket.
+      const timer = window.setTimeout(() => { startTimers.delete(timer); open(); }, INITIAL_WEBSOCKET_DIAL_DELAY_MS);
       startTimers.add(timer);
     };
     connect<unknown>("/ws/stats", (stats) => {
@@ -379,6 +380,10 @@ export default function App() {
       notify("success", "Đã cập nhật policy vào candidate");
       return true;
     } catch (error) {
+      // Policy endpoints keep Candidate state available for correction even
+      // when validation rejects it. Refresh so the Commit control reflects the
+      // authoritative invalid Candidate immediately instead of stale UI state.
+      await loadConfig();
       notify("error", errorMessage(error));
       return false;
     }

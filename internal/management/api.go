@@ -366,11 +366,12 @@ func (a *API) policies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.Policies = items
-		errs := a.Config.SetCandidate(c)
+		errs := validateCandidateConfig(c)
 		if len(errs) > 0 {
 			writeJSON(w, 400, map[string]any{"success": false, "error": map[string]any{"code": "INVALID_POLICY", "message": "policy rejected", "details": errs}})
 			return
 		}
+		_ = a.Config.SetCandidate(c)
 		a.auditAction(r, "UPDATE", "policies", "candidate", "SUCCESS", strconv.Itoa(len(items))+" policies")
 		writeJSON(w, 200, map[string]any{"success": true, "data": items})
 	default:
@@ -423,10 +424,11 @@ func (a *API) policyByID(w http.ResponseWriter, r *http.Request) {
 			c.Policies = append(c.Policies, p)
 		}
 	}
-	if errs := a.Config.SetCandidate(c); len(errs) > 0 {
+	if errs := validateCandidateConfig(c); len(errs) > 0 {
 		writeJSON(w, 400, map[string]any{"success": false, "error": map[string]any{"code": "INVALID_POLICY", "message": "policy rejected", "details": errs}})
 		return
 	}
+	_ = a.Config.SetCandidate(c)
 	a.auditAction(r, strings.ToUpper(r.Method), "policy", id, "SUCCESS", "candidate updated")
 	writeJSON(w, 200, map[string]any{"success": true, "data": map[string]string{"id": id, "state": "candidate"}})
 }
@@ -754,11 +756,23 @@ func (a *API) validate(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *API) candidateValidationErrors() []string {
-	errs := a.Config.ValidateCandidate()
+	return validateCandidateConfig(a.Config.Candidate())
+}
+
+// validateCandidateConfig is used for structured policy edits before they
+// replace Candidate state. The advanced JSON editor intentionally retains an
+// invalid draft for correction; the policy form instead rejects an
+// unreachable rule transactionally, so a failed save cannot make Commit look
+// available for a rule that will never match.
+func validateCandidateConfig(candidate domain.Config) []string {
+	errs := (config.Validator{}).Validate(candidate)
 	if len(errs) != 0 {
 		return errs
 	}
-	if _, err := connectivity.CompileM2(a.Config.Candidate(), 1); err != nil {
+	if errs := config.UnreachablePolicyErrors(candidate.Policies); len(errs) != 0 {
+		return errs
+	}
+	if _, err := connectivity.CompileM2(candidate, 1); err != nil {
 		return []string{"M2 runtime compatibility: " + err.Error()}
 	}
 	return nil
@@ -779,6 +793,11 @@ func (a *API) commit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Author == "" {
 		req.Author = "api"
+	}
+	if errs := a.candidateValidationErrors(); len(errs) > 0 {
+		a.auditAction(r, "COMMIT", "config", strconv.FormatUint(req.ExpectedVersion, 10), "FAILED", strings.Join(errs, "; "))
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": map[string]any{"code": "INVALID_CONFIG", "message": "candidate invalid", "details": errs}})
+		return
 	}
 	var v domain.ConfigVersion
 	var err error

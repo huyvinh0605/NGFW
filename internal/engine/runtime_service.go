@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,9 @@ func (s *RuntimeServiceAdapter) CommitConfig(ctx context.Context, desired domain
 			return version, nil
 		}
 		s.mu.Unlock()
+	}
+	if errs := config.UnreachablePolicyErrors(desired.Policies); len(errs) > 0 {
+		return s.Config.Version(), errors.New(strings.Join(errs, "; "))
 	}
 	if errs := s.Config.SetCandidate(desired); len(errs) > 0 {
 		return s.Config.Version(), errors.New("invalid candidate")
