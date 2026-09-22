@@ -40,7 +40,7 @@ func TestUnreachablePolicyErrorsAllowsPartiallyOverlappingPolicy(t *testing.T) {
 }
 
 func TestUnreachablePolicyErrorsRecognizesNetworkAndAction(t *testing.T) {
-	earlier := l3Policy("allow-lan-web", 10, []string{"tcp"})
+	earlier := l3Policy("allow-lan-web", 10, []string{"tcp:1-65535"})
 	earlier.SourceAddresses = []string{"192.168.0.0/16"}
 	later := l3Policy("drop-subnet-web", 20, []string{"tcp:443"})
 	later.SourceAddresses = []string{"192.168.10.0/24"}

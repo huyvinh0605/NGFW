@@ -265,6 +265,9 @@ export type ConfigExport = {
   candidate: NGFWConfig;
   version: ConfigVersion;
   candidate_valid: boolean;
+  candidate_validation_state?: "VALID" | "INVALID" | "STALE" | "NOT_RUN" | string;
+  candidate_checksum?: string;
+  checked_candidate_checksum?: string;
 };
 
 export type User = {

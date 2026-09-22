@@ -3,6 +3,7 @@ package dataplane
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/kltngfw/ngfw/internal/domain"
@@ -177,20 +178,16 @@ func renderReversePolicyRules(policy domain.SecurityPolicy, zoneIfaces map[strin
 }
 
 func reverseServiceExpression(value string) (string, error) {
-	parts := strings.Split(value, ":")
-	protocol := strings.ToLower(strings.TrimSpace(parts[0]))
-	if protocol != "tcp" && protocol != "udp" && protocol != "icmp" {
-		return "", fmt.Errorf("invalid service %q", value)
-	}
-	if len(parts) == 1 {
-		return "meta l4proto " + protocol, nil
-	}
-	if len(parts) != 2 || protocol == "icmp" {
-		return "", fmt.Errorf("invalid service %q", value)
-	}
-	port, err := canonicalPort(parts[1])
+	selector, err := domain.ParseServiceSelector(value)
 	if err != nil {
-		return "", fmt.Errorf("invalid service %q: %w", value, err)
+		return "", err
 	}
-	return protocol + " sport " + port, nil
+	if selector.AllPorts {
+		return "meta l4proto " + selector.Protocol, nil
+	}
+	port := strconv.Itoa(int(selector.First))
+	if selector.First != selector.Last {
+		port += "-" + strconv.Itoa(int(selector.Last))
+	}
+	return selector.Protocol + " sport " + port, nil
 }

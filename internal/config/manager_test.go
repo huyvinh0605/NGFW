@@ -112,3 +112,108 @@ func TestCommitApplyFailureRestoresOldConfigAndDoesNotPublish(t *testing.T) {
 		t.Fatal("failed candidate was published")
 	}
 }
+
+func TestCandidateValidationIsBoundToCandidateChecksum(t *testing.T) {
+	m, err := NewManager(t.TempDir(), Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, _, valid := m.CandidateValidation()
+	if state != "NOT_RUN" || valid {
+		t.Fatalf("initial validation state=%s valid=%v", state, valid)
+	}
+	m.MarkCandidateValidation(true)
+	state, _, _, valid = m.CandidateValidation()
+	if state != "VALID" || !valid {
+		t.Fatalf("marked validation state=%s valid=%v", state, valid)
+	}
+	candidate := m.Candidate()
+	candidate.DefaultDeny = !candidate.DefaultDeny
+	if errs := m.SetCandidate(candidate); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	state, _, _, valid = m.CandidateValidation()
+	if state != "NOT_RUN" || valid {
+		t.Fatalf("edited candidate retained validation state=%s valid=%v", state, valid)
+	}
+}
+
+func TestCandidateValidationForRejectsStaleSnapshot(t *testing.T) {
+	m, err := NewManager(t.TempDir(), Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := m.Candidate()
+	changed := snapshot
+	changed.DefaultDeny = !changed.DefaultDeny
+	if errs := m.SetCandidate(changed); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if m.MarkCandidateValidationFor(snapshot, true) {
+		t.Fatal("stale validation snapshot was accepted")
+	}
+	state, _, _, valid := m.CandidateValidation()
+	if state != "NOT_RUN" || valid {
+		t.Fatalf("stale validation changed state=%s valid=%v", state, valid)
+	}
+}
+
+func TestValidatorServiceTable(t *testing.T) {
+	cases := []struct {
+		value string
+		valid bool
+	}{
+		{"tcp:80", true}, {"tcp:443", true}, {"udp:53", true}, {"tcp:80-90", true}, {"icmp", true},
+		{"80", false}, {"tcp", false}, {"tcp:", false}, {"tcp:0", false}, {"tcp:65536", false}, {"tcp:http", false}, {"icmp:80", false}, {"tcp:80,", false},
+	}
+	for _, tc := range cases {
+		value := Defaults()
+		value.Policies = []domain.SecurityPolicy{{ID: "p", Priority: 1, Services: []string{tc.value}, Action: domain.DecisionAllow, Enabled: true}}
+		errs := (Validator{}).Validate(value)
+		if (len(errs) == 0) != tc.valid {
+			t.Errorf("service %q valid=%v errors=%v", tc.value, tc.valid, errs)
+		}
+	}
+}
+
+func TestCommitRevalidatesExactEffectiveDuplicates(t *testing.T) {
+	m, err := NewManager(t.TempDir(), Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := m.Candidate()
+	candidate.Policies = []domain.SecurityPolicy{
+		{ID: "a", Priority: 10, Services: []string{"tcp:80", "tcp:443"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true},
+		{ID: "b", Priority: 20, Services: []string{"TCP:443", "tcp:80"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true},
+	}
+	if errs := m.SetCandidate(candidate); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if _, err := m.Commit("test", "duplicate", 0); err == nil || !strings.Contains(err.Error(), "exact duplicate") {
+		t.Fatalf("commit accepted duplicate: %v", err)
+	}
+	if m.Version().Version != 0 {
+		t.Fatal("duplicate commit changed running version")
+	}
+}
+
+func TestValidatorPolicyIdentityAndPriorityRules(t *testing.T) {
+	base := Defaults()
+	base.Policies = []domain.SecurityPolicy{
+		{ID: "ok", Priority: 10, Action: domain.DecisionAllow, Enabled: true},
+		{ID: "ok", Priority: 10, Action: domain.DecisionDrop, Enabled: true},
+	}
+	errs := strings.Join((Validator{}).Validate(base), "\n")
+	for _, expected := range []string{"duplicate object ok", "duplicate policy priority 10"} {
+		if !strings.Contains(errs, expected) {
+			t.Fatalf("missing %q in %s", expected, errs)
+		}
+	}
+	for _, id := range []string{"", " whitespace", "<script>", "á"} {
+		value := Defaults()
+		value.Policies = []domain.SecurityPolicy{{ID: id, Priority: 1, Action: domain.DecisionAllow, Enabled: true}}
+		if len((Validator{}).Validate(value)) == 0 {
+			t.Errorf("invalid policy ID %q was accepted", id)
+		}
+	}
+}

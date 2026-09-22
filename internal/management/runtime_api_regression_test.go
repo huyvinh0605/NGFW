@@ -366,6 +366,66 @@ func TestRuntimeAPIConfigReadAndCandidateSaveDoNotActivateEngine(t *testing.T) {
 	}
 }
 
+func TestRuntimeAPICandidateValidationStateFollowsCandidateRevision(t *testing.T) {
+	running := config.Defaults()
+	runtime := &runtimeAPIFake{running: running, version: domain.ConfigVersion{Version: 1}}
+	manager, err := config.NewManager(t.TempDir(), running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewRuntimeAPI(runtime, manager, "test-token", nil).Handler())
+	defer server.Close()
+	candidate := manager.Candidate()
+	candidate.MaxSessions++
+	body, _ := json.Marshal(candidate)
+	request, _ := http.NewRequest(http.MethodPut, server.URL+"/api/v1/config/candidate", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("candidate save status=%d", response.StatusCode)
+	}
+	readState := func() (bool, string) {
+		response, err := http.Get(server.URL + "/api/v1/config")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var envelope struct {
+			Data struct {
+				CandidateValid bool `json:"candidate_valid"`
+				Validation     struct {
+					State string `json:"state"`
+				} `json:"candidate_validation"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Data.CandidateValid, envelope.Data.Validation.State
+	}
+	if valid, state := readState(); !valid || state != "NOT_RUN" {
+		t.Fatalf("after save validation valid=%v state=%s", valid, state)
+	}
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/policies/validate", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("validate status=%d", response.StatusCode)
+	}
+	if valid, state := readState(); !valid || state != "VALID" {
+		t.Fatalf("after validate validation valid=%v state=%s", valid, state)
+	}
+}
+
 func TestRuntimeAPIValidateRejectsM2IncompatibleScopeBeforeCommit(t *testing.T) {
 	running := config.Defaults()
 	runtime := &runtimeAPIFake{running: running, version: domain.ConfigVersion{Version: 3}}

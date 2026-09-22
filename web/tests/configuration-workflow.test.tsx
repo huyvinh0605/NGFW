@@ -193,6 +193,19 @@ test("Commit stays disabled when Candidate validation rejects a shadowed policy"
   view.unmount();
 });
 
+test("Commit stays disabled when a previously valid Candidate becomes stale", async () => {
+  const config = configExport(true);
+  config.candidate_validation_state = "STALE";
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<ConfigStatusBar config={config} dirty={true} comment="" onComment={() => undefined} onValidate={async () => undefined} onCommit={async () => undefined} onRollback={async () => undefined}/>);
+  });
+  const commit = button(view, "Commit");
+  assert.equal(commit.props.disabled, true);
+  assert.match(commit.props.title, /chưa được Validate/);
+  view.unmount();
+});
+
 test("Policy editor keeps comma separated service text and allows clearing Priority while typing", async () => {
   const value: SecurityPolicy = {
     id: "allow-web",
@@ -234,6 +247,62 @@ test("Policy editor keeps comma separated service text and allows clearing Prior
     await Promise.resolve();
   });
   assert.equal(saved?.priority, 20);
-  assert.deepEqual(saved?.services, ["tcp:80", "udp:53", "tcp:443"]);
+  assert.deepEqual(saved?.services, ["tcp:80", "tcp:443", "udp:53"]);
+  view.unmount();
+});
+
+test("Policy table renders the actual service value separately from its example hint", async () => {
+  const config = configExport(false);
+  config.candidate.policies = [{ id: "https", name: "HTTPS", priority: 10, source_zones: [], destination_zones: [], source_addresses: [], destination_addresses: [], services: ["tcp:443"], applications: [], action: "ALLOW", scope: "SESSION", log_start: true, log_end: true, enabled: true }];
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<PolicyPage config={config} onSave={async () => true} onValidate={noopBoolean} onCommit={noopBoolean} onRollback={noopBoolean} onOpenAdvanced={() => undefined}/>);
+  });
+  const serviceValue = view.root.findAllByType("strong").find((item) => textOf(item) === "tcp:443");
+  assert.ok(serviceValue, "table should contain the actual service value");
+  assert.equal(view.root.findAllByType("small").some((item) => textOf(item) === "Ví dụ: tcp:80, tcp:443, udp:53"), true);
+  view.unmount();
+});
+
+test("Policy table orders execution by numeric priority", async () => {
+  const config = configExport(false);
+  config.candidate.policies = [
+    { id: "p100", name: "Late", priority: 100, services: [], applications: [], action: "ALLOW", scope: "SESSION", log_start: true, log_end: true, enabled: true },
+    { id: "p20", name: "Middle", priority: 20, services: [], applications: [], action: "DROP", scope: "SESSION", log_start: true, log_end: true, enabled: true },
+    { id: "p3", name: "Early", priority: 3, services: [], applications: [], action: "ALLOW", scope: "SESSION", log_start: true, log_end: true, enabled: true },
+  ];
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<PolicyPage config={config} onSave={async () => true} onValidate={noopBoolean} onCommit={noopBoolean} onRollback={noopBoolean} onOpenAdvanced={() => undefined}/>);
+  });
+  const priorities = view.root.findAll((item) => item.props.className === "priority-box").map((item) => textOf(item));
+  assert.deepEqual(priorities, ["3", "20", "100"]);
+  view.unmount();
+});
+
+test("Policy save adds one Candidate row and does not commit", async () => {
+  const config = configExport(false);
+  const calls = { save: 0, commit: 0 };
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<PolicyPage config={config} onSave={async (policies) => { calls.save++; config.candidate.policies = policies; return true; }} onValidate={noopBoolean} onCommit={async () => { calls.commit++; return true; }} onRollback={noopBoolean} onOpenAdvanced={() => undefined}/>);
+  });
+  act(() => button(view, "Thêm policy").props.onClick());
+  const modal = view.root.findByType(PolicyEditor);
+  const form = modal.findByType("form");
+  const inputs = modal.findAllByType("input");
+  const byLabel = (label: string) => inputs.find((item) => item.props.placeholder === label);
+  act(() => {
+    byLabel("allow-lan-web")?.props.onChange({ target: { value: "new-web" } });
+    byLabel("LAN web access")?.props.onChange({ target: { value: "New web" } });
+    modal.findByProps({ "aria-label": "Policy priority" }).props.onChange({ target: { value: "10" } });
+  });
+  await act(async () => {
+    form.props.onSubmit({ preventDefault() {} });
+    await Promise.resolve();
+  });
+  assert.equal(calls.save, 1);
+  assert.equal(calls.commit, 0);
+  assert.equal(config.candidate.policies.length, 1);
   view.unmount();
 });

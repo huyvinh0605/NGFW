@@ -52,8 +52,14 @@ func (s *RuntimeServiceAdapter) CommitConfig(ctx context.Context, desired domain
 		}
 		s.mu.Unlock()
 	}
+	if errs := config.ExactDuplicatePolicyErrors(desired.Policies); len(errs) > 0 {
+		return s.Config.Version(), errors.New(strings.Join(errs, "; "))
+	}
 	if errs := config.UnreachablePolicyErrors(desired.Policies); len(errs) > 0 {
 		return s.Config.Version(), errors.New(strings.Join(errs, "; "))
+	}
+	if errs := (config.Validator{}).Validate(desired); len(errs) > 0 {
+		return s.Config.Version(), errors.New("invalid candidate: " + strings.Join(errs, "; "))
 	}
 	if errs := s.Config.SetCandidate(desired); len(errs) > 0 {
 		return s.Config.Version(), errors.New("invalid candidate")

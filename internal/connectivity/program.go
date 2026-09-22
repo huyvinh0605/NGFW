@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/kltngfw/ngfw/internal/domain"
@@ -249,37 +248,18 @@ func prefixes(values []string) ([]netip.Prefix, error) {
 }
 
 func parseService(value string) (Service, error) {
-	parts := strings.Split(strings.TrimSpace(value), ":")
-	if len(parts) > 2 || parts[0] == "" {
-		return Service{}, fmt.Errorf("invalid service")
+	selector, err := domain.ParseServiceSelector(value)
+	if err != nil {
+		return Service{}, err
 	}
-	proto, ok := domain.ParseProtocol(parts[0])
+	proto, ok := domain.ParseProtocol(selector.Protocol)
 	if !ok {
 		return Service{}, fmt.Errorf("invalid protocol")
 	}
 	service := Service{Protocol: proto}
-	if len(parts) == 1 {
-		return service, nil
+	if !selector.AllPorts {
+		service.Ports = []PortRange{{First: selector.First, Last: selector.Last}}
 	}
-	if proto == 1 || proto == 58 {
-		return Service{}, fmt.Errorf("ICMP does not use ports")
-	}
-	rangeParts := strings.Split(parts[1], "-")
-	if len(rangeParts) > 2 {
-		return Service{}, fmt.Errorf("invalid port range")
-	}
-	first, err := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
-	if err != nil || first < 1 || first > 65535 {
-		return Service{}, fmt.Errorf("invalid port")
-	}
-	last := first
-	if len(rangeParts) == 2 {
-		last, err = strconv.Atoi(strings.TrimSpace(rangeParts[1]))
-		if err != nil || last < first || last > 65535 {
-			return Service{}, fmt.Errorf("invalid port range")
-		}
-	}
-	service.Ports = []PortRange{{First: uint16(first), Last: uint16(last)}}
 	return service, nil
 }
 

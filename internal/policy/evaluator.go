@@ -105,16 +105,14 @@ func addressMatches(values []string, ip string) bool {
 	return false
 }
 func serviceMatches(values []string, c *domain.SecurityContext) bool {
-	for _, v := range values {
-		x := strings.ToUpper(v)
-		if x == strings.ToUpper(c.Network.Protocol) {
-			return true
+	protocol := strings.ToLower(strings.TrimSpace(c.Network.Protocol))
+	for _, raw := range values {
+		selector, err := domain.ParseServiceSelector(raw)
+		if err != nil || selector.Protocol != protocol {
+			continue
 		}
-		if strings.Contains(x, ":") {
-			parts := strings.SplitN(x, ":", 2)
-			if strings.EqualFold(parts[0], c.Network.Protocol) && parts[1] == fmt.Sprint(c.Network.DstPort) {
-				return true
-			}
+		if selector.AllPorts || (c.Network.DstPort >= int(selector.First) && c.Network.DstPort <= int(selector.Last)) {
+			return true
 		}
 	}
 	return false

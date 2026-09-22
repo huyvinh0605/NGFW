@@ -253,6 +253,7 @@ td time { white-space: nowrap; }
 label { display: flex; flex-direction: column; gap: 6px; color: #8fa3b5; font-size: 9px; font-weight: 500; }
 label small { color: #5d7489; font-size: 8px; font-weight: 400; }
 .field-error { color: #ff9cab !important; font-size: 8px; font-weight: 500; }
+.field-hint { color: #7890ab; font-size: 10px; font-weight: 400; }
 .form-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .form-row.two { grid-template-columns: repeat(2, 1fr); }
 .block-list { display: flex; flex-direction: column; }

@@ -153,22 +153,18 @@ func policyAction(action domain.Decision) (string, error) {
 }
 
 func serviceExpression(value string) (string, error) {
-	parts := strings.Split(value, ":")
-	protocol := strings.ToLower(strings.TrimSpace(parts[0]))
-	if protocol != "tcp" && protocol != "udp" && protocol != "icmp" {
-		return "", fmt.Errorf("invalid service %q", value)
-	}
-	if len(parts) == 1 {
-		return "meta l4proto " + protocol, nil
-	}
-	if len(parts) != 2 || protocol == "icmp" {
-		return "", fmt.Errorf("invalid service %q", value)
-	}
-	port, err := canonicalPort(parts[1])
+	selector, err := domain.ParseServiceSelector(value)
 	if err != nil {
-		return "", fmt.Errorf("invalid service %q: %w", value, err)
+		return "", err
 	}
-	return protocol + " dport " + port, nil
+	if selector.AllPorts {
+		return "meta l4proto " + selector.Protocol, nil
+	}
+	port := strconv.Itoa(int(selector.First))
+	if selector.First != selector.Last {
+		port += "-" + strconv.Itoa(int(selector.Last))
+	}
+	return selector.Protocol + " dport " + port, nil
 }
 
 func canonicalPort(value string) (string, error) {

@@ -19,6 +19,7 @@ import {
   normalizeSessionPage,
   normalizeStats,
 } from "./runtimeData";
+import { normalizeServiceList } from "./policy";
 import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay } from "./wsLifecycle";
 import type {
   AuditEntry,
@@ -192,6 +193,7 @@ export default function App() {
   const configLoading = useRef(false);
   const liveError = useRef("");
   const configError = useRef("");
+  const commitInFlight = useRef(false);
 
   const refreshConnectionError = useCallback(() => {
     setConnectionError(liveError.current || configError.current);
@@ -377,12 +379,11 @@ export default function App() {
     try {
       await api<SecurityPolicy[]>("/api/v1/policies", { method: "PUT", body: JSON.stringify(policies) }, token);
       await loadConfig();
-      notify("success", "Đã cập nhật policy vào candidate");
+      notify("success", "Đã cập nhật policy vào Candidate; hãy Validate trước Commit");
       return true;
     } catch (error) {
-      // Policy endpoints keep Candidate state available for correction even
-      // when validation rejects it. Refresh so the Commit control reflects the
-      // authoritative invalid Candidate immediately instead of stale UI state.
+      // Refresh after a rejected request so the editor/table reflect the
+      // authoritative Candidate rather than retaining a local optimistic row.
       await loadConfig();
       notify("error", errorMessage(error));
       return false;
@@ -394,7 +395,7 @@ export default function App() {
     try {
       await api<NGFWConfig>("/api/v1/config/candidate", { method: "PUT", body: JSON.stringify(candidate) }, token);
       await loadConfig();
-      notify("success", "Candidate đã được lưu và kiểm tra schema");
+      notify("success", "Candidate đã được lưu; hãy Validate trước Commit");
       return true;
     } catch (error) {
       notify("error", errorMessage(error));
@@ -416,7 +417,8 @@ export default function App() {
   }, [loadConfig, notify, requireAccess, token]);
 
   const commitCandidate = useCallback(async (comment: string) => {
-    if (!requireAccess() || !config) return false;
+    if (commitInFlight.current || !requireAccess() || !config) return false;
+    commitInFlight.current = true;
     try {
       await api("/api/v1/policies/commit", {
         method: "POST",
@@ -429,6 +431,8 @@ export default function App() {
       notify("error", errorMessage(error));
       await loadConfig();
       return false;
+    } finally {
+      commitInFlight.current = false;
     }
   }, [config, loadConfig, notify, requireAccess, token, user]);
 
@@ -841,35 +845,46 @@ export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, o
   const [editing, setEditing] = useState<SecurityPolicy | null>(null);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState("");
+  const saveInFlight = useRef(false);
   const policies = useMemo(() => [...(config?.candidate.policies ?? [])].sort((a, b) => a.priority - b.priority), [config]);
   const dirty = !!config && objectChanged(config.running, config.candidate);
   const defaultPolicy: SecurityPolicy = { id: "", name: "", priority: (policies[policies.length - 1]?.priority ?? 0) + 10, source_zones: [], destination_zones: [], services: [], applications: [], action: "ALLOW", scope: "SESSION", log_start: true, log_end: true, enabled: true };
 
   async function savePolicy(policy: SecurityPolicy) {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
     const next = policies.filter((item) => item.id !== policy.id);
     next.push(policy);
     setBusy("save");
-    const ok = await onSave(next);
-    setBusy("");
-    if (ok) setEditing(null);
+    try {
+      const ok = await onSave(next);
+      if (ok) setEditing(null);
+    } finally {
+      setBusy("");
+      saveInFlight.current = false;
+    }
   }
   async function deletePolicy(policy: SecurityPolicy) {
+    if (saveInFlight.current) return;
     if (!window.confirm(`Xóa policy “${policy.name}” khỏi candidate?`)) return;
+    saveInFlight.current = true;
     setBusy(policy.id);
-    await onSave(policies.filter((item) => item.id !== policy.id));
-    setBusy("");
+    try { await onSave(policies.filter((item) => item.id !== policy.id)); }
+    finally { setBusy(""); saveInFlight.current = false; }
   }
   async function togglePolicy(policy: SecurityPolicy) {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
     setBusy(policy.id);
-    await onSave(policies.map((item) => item.id === policy.id ? { ...item, enabled: !item.enabled } : item));
-    setBusy("");
+    try { await onSave(policies.map((item) => item.id === policy.id ? { ...item, enabled: !item.enabled } : item)); }
+    finally { setBusy(""); saveInFlight.current = false; }
   }
 
   return <div className="page-stack">
     <ConfigStatusBar config={config} dirty={dirty} comment={comment} onComment={setComment} busy={busy} onValidate={async () => { setBusy("validate"); await onValidate(); setBusy(""); }} onCommit={async () => { setBusy("commit"); const ok = await onCommit(comment); setBusy(""); if (ok) setComment(""); }} onRollback={async () => { setBusy("rollback"); await onRollback(); setBusy(""); }}/>
     <section className="panel table-panel">
       <div className="panel-heading padded"><div><h2>Security policy rules</h2><p>Ưu tiên số nhỏ được đánh giá trước; default {config?.candidate.default_deny ? "deny" : "allow"}</p></div><div className="panel-heading-actions"><Button variant="ghost" icon="configuration" title="Mở trình soạn thảo nâng cao cho cùng Candidate hiện tại" onClick={onOpenAdvanced}>Mở JSON nâng cao</Button><Button variant="primary" icon="plus" onClick={() => setEditing(defaultPolicy)}>Thêm policy</Button></div></div>
-      <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service L3/L4</th><th>Tương thích M2</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => { const scope = (policy.scope || "SESSION").toUpperCase(); const compatible = scope === "SESSION" && !policy.applications?.length && !policy.security_profile_id && policy.minimum_risk == null && policy.maximum_risk == null && ["ALLOW", "DROP", "REJECT"].includes(policy.action.toUpperCase()); return <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small>Ví dụ: tcp:80, udp:53</small></td><td><Badge tone={compatible ? "low" : "critical"}>{compatible ? "Compatible" : "Validate sẽ từ chối"}</Badge></td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{scope}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>; })}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service L3/L4</th><th>Tương thích M2</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => { const scope = (policy.scope || "SESSION").toUpperCase(); const compatible = scope === "SESSION" && !policy.applications?.length && !policy.security_profile_id && policy.minimum_risk == null && policy.maximum_risk == null && ["ALLOW", "DROP", "REJECT"].includes(policy.action.toUpperCase()); return <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small className="field-hint">Ví dụ: tcp:80, tcp:443, udp:53</small></td><td><Badge tone={compatible ? "low" : "critical"}>{compatible ? "Compatible" : "Validate sẽ từ chối"}</Badge></td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{scope}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>; })}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
     </section>
     <section className="panel"><div className="panel-heading"><div><h2>Security profiles</h2><p>{config?.candidate.security_profiles.length ?? 0} định nghĩa được lưu cho milestone sau; M2 không chạy DPI, IDS, ML, TLS inspection hoặc risk engine.</p></div><Badge tone="medium">Unavailable in M2</Badge></div></section>
     {editing && <PolicyEditor value={editing} zones={config?.candidate.zones.map((zone) => zone.id) ?? []} profiles={config?.candidate.security_profiles.map((profile) => profile.id) ?? []} busy={busy === "save"} onClose={() => setEditing(null)} onSave={savePolicy}/>} 
@@ -877,13 +892,17 @@ export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, o
 }
 
 export function ConfigStatusBar({ config, dirty, comment, onComment, busy, onValidate, onCommit, onRollback }: { config: ConfigExport | null; dirty: boolean; comment: string; onComment: (value: string) => void; busy: string; onValidate: () => Promise<void>; onCommit: () => Promise<void>; onRollback: () => Promise<void> }) {
-  const commitDisabled = !dirty || !config?.candidate_valid || busy === "commit";
+  const validationReady = !!config?.candidate_valid && (!config.candidate_validation_state || config.candidate_validation_state === "VALID");
+  const commitDisabled = !dirty || !validationReady || busy === "commit";
   const commitTitle = !dirty
     ? "Candidate đã đồng bộ với Running; không có thay đổi để commit"
-    : !config?.candidate_valid
-      ? "Candidate chưa hợp lệ; hãy sửa lỗi và Validate"
+    : !validationReady
+      ? config?.candidate_validation_state === "STALE" || config?.candidate_validation_state === "NOT_RUN"
+        ? "Candidate chưa được Validate sau thay đổi; hãy chạy Validate"
+        : "Candidate chưa hợp lệ; hãy sửa lỗi và Validate"
       : "Kích hoạt Candidate thành Running và áp dụng dataplane";
-  return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version" aria-label={`Running version ${config?.version.version ?? 0}`}>Running<br/>v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate changed — chưa Commit" : "Candidate synced với Running · không có thay đổi để commit"}</strong><small>{config?.candidate_valid ? "Validation: hợp lệ" : "Validation: cần kiểm tra"}{config?.version.author ? ` · Running commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} title="Chỉ kiểm tra Candidate; không áp dụng dataplane" onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} title="Khôi phục previous known-good theo backend và áp dụng lại dataplane" onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={commitDisabled} title={commitTitle} onClick={() => void onCommit()}>Commit</Button></div></section>;
+  const validationLabel = !config?.candidate_valid ? "Validation: không hợp lệ" : config.candidate_validation_state === "VALID" || !config.candidate_validation_state ? "Validation: hợp lệ" : `Validation: ${config.candidate_validation_state.toLowerCase()}`;
+  return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version" aria-label={`Running version ${config?.version.version ?? 0}`}>Running<br/>v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate changed — chưa Commit" : "Candidate synced với Running · không có thay đổi để commit"}</strong><small>{validationLabel}{config?.version.author ? ` · Running commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} title="Chỉ kiểm tra Candidate; không áp dụng dataplane" onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} title="Khôi phục previous known-good theo backend và áp dụng lại dataplane" onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={commitDisabled} title={commitTitle} onClick={() => void onCommit()}>Commit</Button></div></section>;
 }
 
 export function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: string[]; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
@@ -892,14 +911,15 @@ export function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: 
   const [applicationsText, setApplicationsText] = useState(() => (value.applications ?? []).join(", "));
   const [priorityText, setPriorityText] = useState(() => String(value.priority ?? ""));
   const [priorityError, setPriorityError] = useState("");
+  const [serviceError, setServiceError] = useState("");
   const isNew = !value.id;
-  function parseCSV(input: string) { return input.split(",").map((item) => item.trim()).filter(Boolean); }
   function toggleZone(field: "source_zones" | "destination_zones", zone: string) {
     const current = draft[field] ?? [];
     setDraft({ ...draft, [field]: current.includes(zone) ? current.filter((item) => item !== zone) : [...current, zone] });
   }
   function submit(event: FormEvent) {
     event.preventDefault();
+    if (busy) return;
     const trimmedPriority = priorityText.trim();
     if (!trimmedPriority) {
       setPriorityError("Priority bắt buộc phải có giá trị.");
@@ -911,12 +931,20 @@ export function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: 
       return;
     }
     setPriorityError("");
-    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services: parseCSV(servicesText), applications: parseCSV(applicationsText) });
+    let services: string[];
+    try {
+      services = normalizeServiceList(servicesText);
+    } catch (error) {
+      setServiceError(error instanceof Error ? error.message : "Service không hợp lệ.");
+      return;
+    }
+    setServiceError("");
+    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services, applications: applicationsText.split(",").map((item) => item.trim()).filter(Boolean) });
   }
   return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal policy-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CANDIDATE POLICY</span><h2>{isNew ? "Thêm policy" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body">
     <div className="form-row"><label>ID<input required disabled={!isNew} pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input aria-label="Policy priority" type="number" min="0" aria-required="true" aria-invalid={Boolean(priorityError)} value={priorityText} onChange={(event) => { setPriorityText(event.target.value); if (priorityError) setPriorityError(""); }}/>{priorityError && <small className="field-error" role="alert">{priorityError}</small>}</label></div>
     <div className="form-row two"><fieldset><legend>Source zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.source_zones?.includes(zone) ?? false} onChange={() => toggleZone("source_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset><fieldset><legend>Destination zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.destination_zones?.includes(zone) ?? false} onChange={() => toggleZone("destination_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset></div>
-    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input aria-label="Services" value={servicesText} onChange={(event) => setServicesText(event.target.value)} placeholder="tcp:80, tcp:443"/></label><label>Applications <small>M3+; phải để trống để tương thích M2</small><input aria-label="Applications" value={applicationsText} onChange={(event) => setApplicationsText(event.target.value)} placeholder="Không khả dụng trong M2"/></label></div>
+    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input aria-label="Services" aria-invalid={Boolean(serviceError)} value={servicesText} onChange={(event) => { setServicesText(event.target.value); if (serviceError) setServiceError(""); }} placeholder="tcp:80, tcp:443"/>{serviceError && <small className="field-error" role="alert">{serviceError}</small>}</label><label>Applications <small>M3+; phải để trống để tương thích M2</small><input aria-label="Applications" value={applicationsText} onChange={(event) => setApplicationsText(event.target.value)} placeholder="Không khả dụng trong M2"/></label></div>
     <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>SESSION</option></select><small>M2 chỉ hỗ trợ SESSION scope.</small></label><label>Security profile <small>M3+; phải để trống trong M2</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label></div>
     <div className="form-row"><label>Minimum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
   </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
@@ -941,6 +969,7 @@ export function ConfigurationPage({ config, originPage, onBack, onSave, onValida
   const [parseError, setParseError] = useState("");
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState("");
+  const saveInFlight = useRef(false);
   useEffect(() => {
     if (config && !editorDirty) setEditor(JSON.stringify(config.candidate, null, 2));
   }, [config, editorDirty]);
@@ -950,15 +979,19 @@ export function ConfigurationPage({ config, originPage, onBack, onSave, onValida
   ].filter(([, running, candidate]) => objectChanged(running, candidate)).map(([name]) => String(name)) : [];
 
   async function saveEditor() {
+    if (saveInFlight.current) return;
     try {
       const parsed = JSON.parse(editor) as NGFWConfig;
       setParseError("");
+      saveInFlight.current = true;
       setBusy("save");
       const ok = await onSave(parsed);
-      setBusy("");
       if (ok) setEditorDirty(false);
     } catch (error) {
       setParseError(error instanceof Error ? error.message : "JSON không hợp lệ");
+    } finally {
+      setBusy("");
+      saveInFlight.current = false;
     }
   }
   function formatEditor() {

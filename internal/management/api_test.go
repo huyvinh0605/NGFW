@@ -110,6 +110,157 @@ func TestPoliciesRejectShadowedRuleWithoutMutatingCandidate(t *testing.T) {
 	}
 }
 
+func TestPolicyAPIRejectsExactEffectiveDuplicate(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir(), config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := manager.Candidate()
+	candidate.Zones = []domain.Zone{{ID: "lan"}, {ID: "wan"}}
+	candidate.Interfaces = []domain.Interface{
+		{ID: "lan0", SystemName: "eth1", ZoneID: "lan", Mode: domain.InterfaceL3},
+		{ID: "wan0", SystemName: "eth0", ZoneID: "wan", Mode: domain.InterfaceL3},
+	}
+	first := domain.SecurityPolicy{ID: "allow-lan-web", Name: "LAN web", Priority: 10, SourceZones: []string{"lan", "dmz"}, DestinationZones: []string{"wan"}, Services: []string{"tcp:80", "tcp:443"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true}
+	// dmz has no interface, so use only the configured zone in the stored base.
+	first.SourceZones = []string{"lan"}
+	candidate.Policies = []domain.SecurityPolicy{first}
+	if errs := manager.SetCandidate(candidate); len(errs) != 0 {
+		t.Fatalf("base candidate is invalid: %v", errs)
+	}
+	api := NewAPI(engine.New(manager, enforcement.NewMemory()), manager, "secret", nil)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	second := first
+	second.ID = "allow-lan-web-copy"
+	second.Name = "Same effective rule"
+	second.Priority = 20
+	second.Services = []string{"TCP:443", "tcp:80"}
+	body, err := json.Marshal([]domain.SecurityPolicy{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/v1/policies", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("duplicate status=%d", response.StatusCode)
+	}
+	var envelope struct {
+		Error struct {
+			Details []string `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(envelope.Error.Details, "\n"), "exact duplicate") {
+		t.Fatalf("unexpected duplicate details: %#v", envelope.Error.Details)
+	}
+	if got := manager.Candidate().Policies; len(got) != 1 || got[0].ID != first.ID {
+		t.Fatalf("rejected duplicate changed Candidate: %#v", got)
+	}
+}
+
+func TestCandidateAPIRejectsMalformedServiceWithoutMutatingCandidate(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir(), config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(engine.New(manager, enforcement.NewMemory()), manager, "secret", nil)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	candidate := manager.Candidate()
+	candidate.Policies = []domain.SecurityPolicy{{ID: "bad", Priority: 1, Services: []string{"tcp:80,,tcp:443"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true}}
+	body, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/v1/config/candidate", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed service status=%d", response.StatusCode)
+	}
+	if len(manager.Candidate().Policies) != 0 {
+		t.Fatalf("malformed request changed Candidate: %#v", manager.Candidate().Policies)
+	}
+}
+
+func TestPolicyDeleteMissingReturnsNotFound(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir(), config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewAPI(engine.New(manager, enforcement.NewMemory()), manager, "secret", nil).Handler())
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/policies/missing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing policy delete status=%d", response.StatusCode)
+	}
+}
+
+func TestPolicyServicesRoundTripCanonicalRepresentation(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir(), config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewAPI(engine.New(manager, enforcement.NewMemory()), manager, "secret", nil).Handler())
+	defer server.Close()
+	policy := domain.SecurityPolicy{ID: "test-https", Name: "HTTPS", Priority: 10, Services: []string{"TCP:443", "tcp:80", "tcp:443"}, Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true}
+	body, _ := json.Marshal([]domain.SecurityPolicy{policy})
+	request, _ := http.NewRequest(http.MethodPut, server.URL+"/api/v1/policies", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("policy save status=%d", response.StatusCode)
+	}
+	get, err := http.Get(server.URL + "/api/v1/policies")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer get.Body.Close()
+	var envelope struct {
+		Data []domain.SecurityPolicy `json:"data"`
+	}
+	if err := json.NewDecoder(get.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Data) != 1 || strings.Join(envelope.Data[0].Services, ",") != "tcp:80,tcp:443" {
+		t.Fatalf("service round trip=%#v", envelope.Data)
+	}
+}
+
 func TestAPIRollbackAppliesPreviousConfiguration(t *testing.T) {
 	manager, err := config.NewManager(t.TempDir(), config.Defaults())
 	if err != nil {

@@ -24,3 +24,15 @@ func TestDefaultDeny(t *testing.T) {
 		t.Fatal("default deny not applied")
 	}
 }
+
+func TestServiceMatcherUsesSharedRangeAndCaseSemantics(t *testing.T) {
+	policies := []domain.SecurityPolicy{{ID: "web", Name: "web", Priority: 1, Services: []string{"TCP:80-90"}, Action: domain.DecisionAllow, Enabled: true}}
+	inside := &domain.SecurityContext{Network: domain.NetworkContext{Protocol: "tcp", DstPort: 85}}
+	if got := NewEvaluator(true).Evaluate(inside, policies, nil, 1); got.Action != domain.DecisionAllow {
+		t.Fatalf("range service did not match: %#v", got)
+	}
+	outside := &domain.SecurityContext{Network: domain.NetworkContext{Protocol: "tcp", DstPort: 443}}
+	if got := NewEvaluator(true).Evaluate(outside, policies, nil, 1); got.Action != domain.DecisionDrop {
+		t.Fatalf("out-of-range service unexpectedly matched: %#v", got)
+	}
+}

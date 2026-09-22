@@ -425,6 +425,13 @@ type Manager struct {
 	version      domain.ConfigVersion
 	previous     *domain.Config
 	validator    Validator
+	validation   candidateValidation
+}
+
+type candidateValidation struct {
+	checksum string
+	valid    bool
+	checked  bool
 }
 
 func NewManager(dir string, initial domain.Config) (*Manager, error) {
@@ -456,10 +463,54 @@ func (m *Manager) Version() domain.ConfigVersion {
 	return m.version
 }
 func (m *Manager) SetCandidate(c domain.Config) []string {
+	normalized, normalizationErrors := normalizeCandidateServices(c)
+	if len(normalizationErrors) == 0 {
+		c = normalized
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.candidate = cloneConfig(c)
-	return m.validator.Validate(c)
+	m.validation = candidateValidation{}
+	return append(normalizationErrors, m.validator.Validate(c)...)
+}
+
+// SetCandidateIfValid replaces Candidate only after the structural schema has
+// passed. This is used by the HTTP JSON endpoint so a rejected request cannot
+// silently leave a malformed Candidate behind. SetCandidate remains available
+// to the engine/runtime tests that intentionally stage an M2-incompatible
+// candidate for the separate compatibility validator.
+func (m *Manager) SetCandidateIfValid(c domain.Config) []string {
+	normalized, normalizationErrors := normalizeCandidateServices(c)
+	if len(normalizationErrors) != 0 {
+		return normalizationErrors
+	}
+	if errs := m.validator.Validate(normalized); len(errs) != 0 {
+		return errs
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.candidate = cloneConfig(normalized)
+	m.validation = candidateValidation{}
+	return nil
+}
+
+func normalizeCandidateServices(c domain.Config) (domain.Config, []string) {
+	normalized := cloneConfig(c)
+	var errs []string
+	for index := range normalized.Policies {
+		services, err := domain.CanonicalServiceList(normalized.Policies[index].Services)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("policy %s: %v", normalized.Policies[index].ID, err))
+			continue
+		}
+		normalized.Policies[index].Services = services
+		normalized.Policies[index].SourceZones = canonicalStrings(normalized.Policies[index].SourceZones)
+		normalized.Policies[index].DestinationZones = canonicalStrings(normalized.Policies[index].DestinationZones)
+		normalized.Policies[index].SourceAddresses = canonicalAddresses(normalized.Policies[index].SourceAddresses)
+		normalized.Policies[index].DestinationAddresses = canonicalAddresses(normalized.Policies[index].DestinationAddresses)
+		normalized.Policies[index].Applications = canonicalStrings(normalized.Policies[index].Applications)
+	}
+	return normalized, errs
 }
 
 // SyncRunning updates the management-plane snapshot after the privileged
@@ -475,6 +526,66 @@ func (m *Manager) SyncRunning(c domain.Config, v domain.ConfigVersion) {
 	if oldCandidateJSON, oldRunningJSON := configDigest(oldCandidate), configDigest(oldRunning); oldCandidateJSON == oldRunningJSON {
 		m.candidate = cloneConfig(c)
 	}
+	if configDigest(m.candidate) == configDigest(c) {
+		m.validation = candidateValidation{checksum: configDigest(c), valid: true, checked: true}
+	}
+}
+
+// SyncRollback intentionally replaces Candidate as well: rollback is an
+// explicit restore operation, so leaving a pre-rollback draft in the editor
+// would make the management view claim a state different from the engine.
+func (m *Manager) SyncRollback(c domain.Config, v domain.ConfigVersion) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.running = cloneConfig(c)
+	m.candidate = cloneConfig(c)
+	m.version = v
+	m.validation = candidateValidation{checksum: configDigest(c), valid: true, checked: true}
+}
+
+// MarkCandidateValidation records the result for the exact Candidate digest
+// that the API just checked. Any later Candidate mutation clears this record.
+func (m *Manager) MarkCandidateValidation(valid bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.validation = candidateValidation{checksum: configDigest(m.candidate), valid: valid, checked: true}
+}
+
+// MarkCandidateValidationFor only records a result if the Candidate still
+// has the exact digest that was checked. A concurrent policy edit therefore
+// cannot accidentally inherit a VALID result from another request.
+func (m *Manager) MarkCandidateValidationFor(candidate domain.Config, valid bool) bool {
+	expected := configDigest(candidate)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if configDigest(m.candidate) != expected {
+		return false
+	}
+	m.validation = candidateValidation{checksum: expected, valid: valid, checked: true}
+	return true
+}
+
+// CandidateValidation returns a UI-safe state machine state. The digest binds
+// a validation result to the Candidate it actually covered, so edits cannot
+// leave a stale VALID badge or enable Commit for another revision.
+func (m *Manager) CandidateValidation() (state, candidateChecksum, checkedChecksum string, valid bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	candidateChecksum = configDigest(m.candidate)
+	checkedChecksum = m.validation.checksum
+	if m.validation.checked && m.validation.checksum == candidateChecksum {
+		if m.validation.valid {
+			return "VALID", candidateChecksum, checkedChecksum, true
+		}
+		return "INVALID", candidateChecksum, checkedChecksum, false
+	}
+	if len(m.validator.Validate(m.candidate)) != 0 {
+		return "INVALID", candidateChecksum, checkedChecksum, false
+	}
+	if m.validation.checked {
+		return "STALE", candidateChecksum, checkedChecksum, false
+	}
+	return "NOT_RUN", candidateChecksum, checkedChecksum, false
 }
 
 func configDigest(c domain.Config) string {
@@ -501,6 +612,10 @@ func (m *Manager) Commit(author, comment string, expected uint64) (domain.Config
 	if len(validationErrors) > 0 {
 		return current, fmt.Errorf("invalid candidate: %s", strings.Join(validationErrors, "; "))
 	}
+	semanticErrors := append(ExactDuplicatePolicyErrors(candidate.Policies), UnreachablePolicyErrors(candidate.Policies)...)
+	if len(semanticErrors) > 0 {
+		return current, fmt.Errorf("invalid candidate: %s", strings.Join(semanticErrors, "; "))
+	}
 	next, nextErr := incrementVersion(current.Version)
 	if nextErr != nil {
 		return current, nextErr
@@ -517,6 +632,7 @@ func (m *Manager) Commit(author, comment string, expected uint64) (domain.Config
 	m.previous = &old
 	m.running = cloneConfig(candidate)
 	m.version = v
+	m.validation = candidateValidation{checksum: configDigest(candidate), valid: true, checked: true}
 	m.mu.Unlock()
 	return v, nil
 }
@@ -538,6 +654,10 @@ func (m *Manager) CommitWithApply(ctx context.Context, author, comment string, e
 	}
 	if len(validationErrors) > 0 {
 		return current, fmt.Errorf("invalid candidate: %s", strings.Join(validationErrors, "; "))
+	}
+	semanticErrors := append(ExactDuplicatePolicyErrors(candidate.Policies), UnreachablePolicyErrors(candidate.Policies)...)
+	if len(semanticErrors) > 0 {
+		return current, fmt.Errorf("invalid candidate: %s", strings.Join(semanticErrors, "; "))
 	}
 	next, nextErr := incrementVersion(current.Version)
 	if nextErr != nil {
@@ -563,6 +683,7 @@ func (m *Manager) CommitWithApply(ctx context.Context, author, comment string, e
 	m.previous = &old
 	m.running = cloneConfig(candidate)
 	m.version = v
+	m.validation = candidateValidation{checksum: configDigest(candidate), valid: true, checked: true}
 	m.mu.Unlock()
 	return v, nil
 }
@@ -617,6 +738,7 @@ func (m *Manager) rollbackLocked(ctx context.Context, author, comment string, ap
 	m.candidate = cloneConfig(target)
 	m.previous = &old
 	m.version = v
+	m.validation = candidateValidation{checksum: configDigest(target), valid: true, checked: true}
 	m.mu.Unlock()
 	return v, nil
 }
@@ -755,7 +877,30 @@ func cloneConfig(value domain.Config) domain.Config {
 func (m *Manager) Export() map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return map[string]any{"running": cloneConfig(m.running), "candidate": cloneConfig(m.candidate), "version": m.version, "candidate_valid": len(m.validator.Validate(m.candidate)) == 0}
+	state, candidateChecksum, checkedChecksum, _ := m.candidateValidationLocked()
+	return map[string]any{
+		"running": cloneConfig(m.running), "candidate": cloneConfig(m.candidate), "version": m.version,
+		"candidate_valid":      len(m.validator.Validate(m.candidate)) == 0,
+		"candidate_validation": map[string]any{"state": state, "candidate_checksum": candidateChecksum, "checked_checksum": checkedChecksum},
+	}
+}
+
+func (m *Manager) candidateValidationLocked() (state, candidateChecksum, checkedChecksum string, valid bool) {
+	candidateChecksum = configDigest(m.candidate)
+	checkedChecksum = m.validation.checksum
+	if m.validation.checked && m.validation.checksum == candidateChecksum {
+		if m.validation.valid {
+			return "VALID", candidateChecksum, checkedChecksum, true
+		}
+		return "INVALID", candidateChecksum, checkedChecksum, false
+	}
+	if len(m.validator.Validate(m.candidate)) != 0 {
+		return "INVALID", candidateChecksum, checkedChecksum, false
+	}
+	if m.validation.checked {
+		return "STALE", candidateChecksum, checkedChecksum, false
+	}
+	return "NOT_RUN", candidateChecksum, checkedChecksum, false
 }
 func SortPolicies(c domain.Config) {
 	sort.SliceStable(c.Policies, func(i, j int) bool { return c.Policies[i].Priority < c.Policies[j].Priority })

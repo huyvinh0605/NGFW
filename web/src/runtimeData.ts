@@ -496,6 +496,7 @@ export function normalizeConfigExport(value: unknown): ConfigExport | null {
   if (!running) return null;
   const candidate = normalizeConfig(valueAt(record, "candidate")) ?? normalizeConfig(running) ?? running;
   const versionRecord = objectValue(valueAt(record, "version"));
+  const validationRecord = objectValue(valueAt(record, "candidate_validation"));
   return {
     running,
     candidate,
@@ -507,6 +508,9 @@ export function normalizeConfigExport(value: unknown): ConfigExport | null {
       checksum: stringValue(valueAt(versionRecord, "checksum")),
     },
     candidate_valid: booleanValue(valueAt(record, "candidate_valid"), true),
+    candidate_validation_state: stringValue(valueAt(validationRecord, "state")) || undefined,
+    candidate_checksum: stringValue(valueAt(validationRecord, "candidate_checksum")) || undefined,
+    checked_candidate_checksum: stringValue(valueAt(validationRecord, "checked_checksum")) || undefined,
   };
 }
 

@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
 // policyServiceSelector uses the same protocol and destination-port semantics
-// as the M1 nftables compiler and the M2 connectivity program. A selector
-// without a port means every port for that protocol.
+// as the M1 nftables compiler and the M2 connectivity program. ICMP selectors
+// have no port; TCP/UDP selectors carry a single port or range.
 type policyServiceSelector struct {
 	protocol string
 	first    uint16
@@ -21,41 +20,11 @@ type policyServiceSelector struct {
 }
 
 func parseM1ServiceSelector(value string) (policyServiceSelector, error) {
-	invalid := func() error {
-		return fmt.Errorf("invalid service %q; expected tcp, udp, icmp, tcp:80, udp:53, or tcp:1000-2000", value)
+	parsed, err := domain.ParseServiceSelector(value)
+	if err != nil {
+		return policyServiceSelector{}, err
 	}
-	parts := strings.Split(strings.TrimSpace(value), ":")
-	if len(parts) > 2 || len(parts) == 0 {
-		return policyServiceSelector{}, invalid()
-	}
-	protocol := strings.ToLower(strings.TrimSpace(parts[0]))
-	if protocol != "tcp" && protocol != "udp" && protocol != "icmp" {
-		return policyServiceSelector{}, invalid()
-	}
-	selector := policyServiceSelector{protocol: protocol, allPorts: true}
-	if len(parts) == 1 {
-		return selector, nil
-	}
-	if protocol == "icmp" {
-		return policyServiceSelector{}, invalid()
-	}
-	portParts := strings.Split(strings.TrimSpace(parts[1]), "-")
-	if len(portParts) < 1 || len(portParts) > 2 {
-		return policyServiceSelector{}, invalid()
-	}
-	first, err := strconv.Atoi(strings.TrimSpace(portParts[0]))
-	if err != nil || first < 1 || first > 65535 {
-		return policyServiceSelector{}, invalid()
-	}
-	last := first
-	if len(portParts) == 2 {
-		last, err = strconv.Atoi(strings.TrimSpace(portParts[1]))
-		if err != nil || last < first || last > 65535 {
-			return policyServiceSelector{}, invalid()
-		}
-	}
-	selector.first, selector.last, selector.allPorts = uint16(first), uint16(last), false
-	return selector, nil
+	return policyServiceSelector{protocol: parsed.Protocol, first: parsed.First, last: parsed.Last, allPorts: parsed.AllPorts}, nil
 }
 
 // UnreachablePolicyErrors reports a policy only when one earlier M1/M2 L3/L4

@@ -328,7 +328,14 @@ func (a *API) configView(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "ENGINE_UNAVAILABLE", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"running": running, "candidate": a.Config.Candidate(), "version": version, "candidate_valid": len(a.candidateValidationErrors()) == 0}})
+		validationErrors := a.candidateValidationErrors()
+		validationState, candidateChecksum, checkedChecksum, _ := a.Config.CandidateValidation()
+		candidateValid := len(validationErrors) == 0
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+			"running": running, "candidate": a.Config.Candidate(), "version": version,
+			"candidate_valid":      candidateValid,
+			"candidate_validation": map[string]any{"state": validationState, "candidate_checksum": candidateChecksum, "checked_checksum": checkedChecksum},
+		}})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": a.Config.Export()})
@@ -343,13 +350,16 @@ func (a *API) candidate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "INVALID_JSON", err.Error())
 			return
 		}
-		errs := a.Config.SetCandidate(c)
+		errs := validateCandidateConfig(c)
+		if len(errs) == 0 {
+			errs = a.Config.SetCandidateIfValid(c)
+		}
 		if len(errs) > 0 {
 			writeJSON(w, 400, map[string]any{"success": false, "error": map[string]any{"code": "INVALID_CONFIG", "message": "candidate rejected", "details": errs}})
 			return
 		}
 		a.auditAction(r, "UPDATE", "config", "candidate", "SUCCESS", "candidate replaced")
-		writeJSON(w, 200, map[string]any{"success": true, "data": c})
+		writeJSON(w, 200, map[string]any{"success": true, "data": a.Config.Candidate()})
 	default:
 		writeError(w, 405, "METHOD_NOT_ALLOWED", "GET or PUT required")
 	}
@@ -373,7 +383,7 @@ func (a *API) policies(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = a.Config.SetCandidate(c)
 		a.auditAction(r, "UPDATE", "policies", "candidate", "SUCCESS", strconv.Itoa(len(items))+" policies")
-		writeJSON(w, 200, map[string]any{"success": true, "data": items})
+		writeJSON(w, 200, map[string]any{"success": true, "data": a.Config.Candidate().Policies})
 	default:
 		writeError(w, 405, "METHOD_NOT_ALLOWED", "GET or PUT required")
 	}
@@ -400,11 +410,17 @@ func (a *API) policyByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		found := false
 		for i, p := range c.Policies {
 			if p.ID == id {
 				c.Policies = append(c.Policies[:i], c.Policies[i+1:]...)
+				found = true
 				break
 			}
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "policy not found")
+			return
 		}
 	} else {
 		var p domain.SecurityPolicy
@@ -746,10 +762,23 @@ func replaceProfile(v []domain.SecurityProfile, x domain.SecurityProfile) []doma
 	}
 	return append(v, x)
 }
-func (a *API) validate(w http.ResponseWriter, _ *http.Request) {
-	errs := a.candidateValidationErrors()
+func (a *API) validate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "POST required")
+		return
+	}
+	candidate := a.Config.Candidate()
+	errs := validateCandidateConfig(candidate)
 	if len(errs) > 0 {
+		if !a.Config.MarkCandidateValidationFor(candidate, false) {
+			writeError(w, http.StatusConflict, "CANDIDATE_CHANGED", "candidate changed while validation was running")
+			return
+		}
 		writeJSON(w, 400, map[string]any{"success": false, "error": map[string]any{"code": "INVALID_CONFIG", "message": "candidate invalid", "details": errs}})
+		return
+	}
+	if !a.Config.MarkCandidateValidationFor(candidate, true) {
+		writeError(w, http.StatusConflict, "CANDIDATE_CHANGED", "candidate changed while validation was running")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "data": map[string]any{"valid": true}})
@@ -767,6 +796,9 @@ func (a *API) candidateValidationErrors() []string {
 func validateCandidateConfig(candidate domain.Config) []string {
 	errs := (config.Validator{}).Validate(candidate)
 	if len(errs) != 0 {
+		return errs
+	}
+	if errs := config.ExactDuplicatePolicyErrors(candidate.Policies); len(errs) != 0 {
 		return errs
 	}
 	if errs := config.UnreachablePolicyErrors(candidate.Policies); len(errs) != 0 {
@@ -847,7 +879,7 @@ func (a *API) rollback(w http.ResponseWriter, r *http.Request) {
 		if running, _, syncErr := a.Runtime.GetRunningConfig(r.Context()); syncErr == nil {
 			// Rollback response carries the new version; the engine response is
 			// authoritative for the configuration payload.
-			a.Config.SyncRunning(running, v)
+			a.Config.SyncRollback(running, v)
 		}
 		a.auditAction(r, "ROLLBACK", "config", strconv.FormatUint(v.Version, 10), "SUCCESS", "restored previous configuration")
 		writeJSON(w, 200, map[string]any{"success": true, "data": v})
