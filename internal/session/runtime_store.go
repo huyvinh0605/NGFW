@@ -120,6 +120,29 @@ func NewRuntimeStore(limits RuntimeLimits) *RuntimeStore {
 	return &RuntimeStore{byID: map[string]*domain.RuntimeSession{}, byIdentity: map[domain.ConntrackIdentity]string{}, byConntrack: map[conntrackKey]string{}, byTuple: map[flow.Key]map[string]struct{}{}, aliasesBySession: map[string][]flow.Key{}, identitiesBySession: map[string][]domain.ConntrackIdentity{}, conntracksBySession: map[string][]conntrackKey{}, limits: limits}
 }
 
+// HasActiveKernelKey reports whether an active session currently owns the
+// nft-visible application-guard key. KernelStart is deliberately excluded:
+// nftables cannot encode it in the compound set element. This check prevents a
+// delayed close cleanup from deleting a guard that now belongs to a reused
+// conntrack ID and identical tuple.
+func (s *RuntimeStore) HasActiveKernelKey(identity domain.ConntrackIdentity) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, current := range s.byID {
+		if current == nil {
+			continue
+		}
+		candidate := current.Identity
+		if candidate.NetworkNS == identity.NetworkNS && candidate.Zone == identity.Zone && candidate.Family == identity.Family && candidate.ID == identity.ID && candidate.Original == identity.Original {
+			return true
+		}
+	}
+	return false
+}
+
 func sessionID(identity domain.ConntrackIdentity) string {
 	b := []byte(identity.BootID + "\x00" + identity.NetworkNS + "\x00" + identity.Original.String())
 	b = append(b, byte(identity.Zone>>8), byte(identity.Zone), byte(identity.Family), byte(identity.ID>>24), byte(identity.ID>>16), byte(identity.ID>>8), byte(identity.ID))
@@ -677,7 +700,8 @@ func (s *RuntimeStore) Invalidate(id string, generation uint64, reason string, n
 	v.CacheState = domain.CacheInvalidated
 	v.KernelCacheVerified = false
 	v.MatchedPolicyID = ""
-	if v.Revoked {
+	guardApplied := v.Inspection != nil && v.Inspection.Enforcement.Mechanism == domain.EnforcementNFTSessionGuard && v.Inspection.Enforcement.Status == domain.EnforcementApplied && v.Inspection.Enforcement.RequestedAction == domain.DecisionDrop
+	if v.Revoked || guardApplied {
 		v.Decision = domain.DecisionDrop
 		v.EffectiveDecision = domain.DecisionDrop
 	} else {
@@ -750,7 +774,12 @@ func (s *RuntimeStore) setDecision(id string, expectedRevision, generation uint6
 	v.PolicyGeneration = generation
 	v.DecisionGeneration++
 	v.Decision = action
-	v.EffectiveDecision = action
+	guardApplied := v.Inspection != nil && v.Inspection.Enforcement.Mechanism == domain.EnforcementNFTSessionGuard && v.Inspection.Enforcement.Status == domain.EnforcementApplied && v.Inspection.Enforcement.RequestedAction == domain.DecisionDrop
+	if v.Revoked || guardApplied {
+		v.EffectiveDecision = domain.DecisionDrop
+	} else {
+		v.EffectiveDecision = action
+	}
 	v.DecisionReason = reason
 	v.CacheState = domain.CacheCached
 	v.InvalidatedAt = nil

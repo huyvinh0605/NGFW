@@ -29,11 +29,14 @@ type Rule struct {
 }
 
 type Program struct {
-	Rules          []Rule
-	DefaultDeny    bool
-	Generation     uint64
-	zonePrefixes   map[string][]netip.Prefix
-	localAddresses map[netip.Addr]struct{}
+	Rules                       []Rule
+	DefaultDeny                 bool
+	Generation                  uint64
+	Selections                  map[string]InspectionSelection
+	InspectionIncludeManagement bool
+	ManagementZones             map[string]struct{}
+	zonePrefixes                map[string][]netip.Prefix
+	localAddresses              map[netip.Addr]struct{}
 }
 
 const (
@@ -83,10 +86,13 @@ func CompileM2(config domain.Config, generation uint64) (Program, error) {
 }
 
 func Compile(config domain.Config, generation uint64) (Program, error) {
-	program := Program{DefaultDeny: config.DefaultDeny, Generation: generation, zonePrefixes: map[string][]netip.Prefix{}, localAddresses: map[netip.Addr]struct{}{}}
+	program := Program{DefaultDeny: config.DefaultDeny, Generation: generation, ManagementZones: map[string]struct{}{}, zonePrefixes: map[string][]netip.Prefix{}, localAddresses: map[netip.Addr]struct{}{}}
 	interfacesByID := make(map[string]domain.Interface, len(config.Interfaces))
 	for _, iface := range config.Interfaces {
 		interfacesByID[iface.ID] = iface
+		if iface.Mode == domain.InterfaceManagement && strings.TrimSpace(iface.ZoneID) != "" {
+			program.ManagementZones[strings.ToLower(strings.TrimSpace(iface.ZoneID))] = struct{}{}
+		}
 		for _, raw := range append(append([]string{}, iface.IPv4Addresses...), iface.IPv6Addresses...) {
 			prefix, err := parseInterfacePrefix(raw)
 			if err == nil {

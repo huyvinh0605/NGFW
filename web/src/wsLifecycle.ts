@@ -18,6 +18,10 @@ export function reconnectDelay(attempt: number, baseMillis = 1000, maximumMillis
   return Math.min(maximumMillis, baseMillis * (2 ** exponent));
 }
 
+export function requiresEventCatchup(messageType: unknown): boolean {
+  return messageType === "gap" || messageType === "stream_reset";
+}
+
 // Vite emits this from its browser-facing proxy socket after the browser has
 // already gone away (for example during a refresh). It is distinct from an
 // upstream API error and is safe to silence only in that narrow proxy log.

@@ -59,6 +59,7 @@ export type Session = {
   original_tuple?: FlowTuple;
   reply_tuple?: FlowTuple;
   translated_tuple?: FlowTuple;
+  inspection?: SessionInspection;
 };
 
 export type FlowTuple = {
@@ -84,6 +85,7 @@ export type SecurityContext = {
   risk: { score: number; level: string; reasons?: string[]; contributions?: RiskContribution[] };
   policy: { matched_policy_id?: string; action: string; scope?: string; reason?: string };
   signals?: SecurityEvent[];
+  inspection?: SessionInspection;
   updated_at: string;
 };
 
@@ -108,14 +110,90 @@ export type SecurityEvent = {
   event_class: "runtime" | "policy" | "security" | string;
   category: string;
   signature_id?: string;
-  severity: "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | string;
+  severity: "UNKNOWN" | "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | string;
   confidence: number;
+  confidence_available?: boolean;
   source_ip?: string;
   destination_ip?: string;
   application?: string;
   evidence?: string;
   recommended_action?: string;
   metadata?: Record<string, unknown>;
+  capture_mode?: "IDS" | "IPS" | string;
+  correlation_state?: "CORRELATED" | "UNCORRELATED" | "AMBIGUOUS" | string;
+  verdict?: "UNKNOWN" | "ALERT" | "DROP" | "ERROR" | string;
+  packet_verdict?: string;
+  enforcement?: EnforcementResult;
+};
+
+export type ApplicationIdentity = {
+  name: string;
+  raw_name?: string;
+  source: string;
+  confidence: string;
+  first_seen?: string;
+  last_seen?: string;
+  conflicted: boolean;
+};
+
+export type EnforcementResult = {
+  mechanism: string;
+  scope: string;
+  requested_action?: string;
+  status: string;
+  reason?: string;
+  observed_at?: string;
+  operation_id?: string;
+};
+
+export type SessionInspection = {
+  generation: number;
+  revision: number;
+  profile_id?: string;
+  mode: "OFF" | "IDS" | "IPS" | string;
+  state: string;
+  reason?: string;
+  coverage: string;
+  application: ApplicationIdentity;
+  app_policy_state: string;
+  app_deadline?: string;
+  threat_count: number;
+  last_event_id?: string;
+  max_severity: string;
+  latest_verdict: string;
+  enforcement: EnforcementResult;
+  sources: string[];
+  missing_evidence: string[];
+};
+
+export type InspectionHealth = {
+  enabled: boolean;
+  status: string;
+  reason?: string;
+  generation: number;
+  sources: Record<string, {
+    sensor_id: string;
+    mode?: string;
+    state: string;
+    reason?: string;
+    last_read?: string;
+    last_heartbeat?: string;
+    counters: { uptime_seconds?: number; captured_packets?: number; capture_drops?: number; nfqueue_drops?: number; source_timestamp?: string };
+    reader_stats: Record<string, number>;
+  }>;
+  ips_queue: { requested: boolean; configured: boolean; capture_live: boolean; lease_active: boolean; last_renewal?: string; last_error?: string };
+  stats: Record<string, number>;
+  updated_at: string;
+};
+
+export type InspectionCapabilities = {
+  supported: boolean;
+  modes: string[];
+  applications: string[];
+  fail_modes: string[];
+  rulesets: string[];
+  application_match_modes: string[];
+  limitations: string[];
 };
 
 export type TemporaryBlock = {
@@ -207,6 +285,7 @@ export type SecurityPolicy = {
   destination_addresses?: string[];
   services?: string[];
   applications?: string[];
+  application_match_mode?: string;
   security_profile_id?: string;
   minimum_risk?: number;
   maximum_risk?: number;
@@ -232,6 +311,33 @@ export type SecurityProfile = {
   logging_level: string;
   inspection_required: boolean;
   inspection_failure_action: string;
+  inspection?: InspectionProfile;
+};
+
+export type InspectionProfile = {
+  mode: "IDS" | "IPS" | string;
+  fail_mode: "OPEN" | string;
+  ruleset_id: string;
+};
+
+export type InspectionLimits = {
+  eve_line_bytes: number;
+  normalized_event_bytes: number;
+  observation_queue_items: number;
+  observation_queue_bytes: number;
+  security_events: number;
+  security_event_bytes: number;
+  correlation_pending: number;
+  correlation_wait_ms: number;
+  recent_sessions: number;
+  recent_session_ttl_seconds: number;
+  app_detection_timeout_ms: number;
+};
+
+export type InspectionConfig = {
+  enabled: boolean;
+  include_management: boolean;
+  limits: InspectionLimits;
 };
 
 export type NGFWConfig = {
@@ -241,6 +347,7 @@ export type NGFWConfig = {
   nat_rules: NATRule[];
   policies: SecurityPolicy[];
   security_profiles: SecurityProfile[];
+  inspection?: InspectionConfig;
   max_sessions: number;
   max_events_queue: number;
   max_http_body_inspection: number;

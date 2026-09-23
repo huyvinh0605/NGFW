@@ -22,14 +22,35 @@ import (
 // management boundary ensures these tests exercise the production Runtime
 // handlers rather than the legacy in-process API path.
 type runtimeAPIFake struct {
-	running       domain.Config
-	version       domain.ConfigVersion
-	health        domain.RuntimeHealth
-	stats         domain.RuntimeStats
-	events        domain.RuntimeEventPage
-	configErr     error
-	commitCalls   int
-	lastCommitted domain.Config
+	running        domain.Config
+	version        domain.ConfigVersion
+	health         domain.RuntimeHealth
+	stats          domain.RuntimeStats
+	events         domain.RuntimeEventPage
+	configErr      error
+	commitCalls    int
+	lastCommitted  domain.Config
+	inspection     domain.InspectionHealth
+	capabilities   domain.InspectionCapabilities
+	security       domain.SecurityEventPage
+	securityEvent  domain.ThreatEvent
+	securityQuery  domain.SecurityQuery
+	securityErr    error
+	securityGetErr error
+}
+
+func (f *runtimeAPIFake) InspectionHealth(context.Context) (domain.InspectionHealth, error) {
+	return f.inspection, nil
+}
+func (f *runtimeAPIFake) InspectionCapabilities(context.Context) (domain.InspectionCapabilities, error) {
+	return f.capabilities, nil
+}
+func (f *runtimeAPIFake) ListSecurityEvents(_ context.Context, query domain.SecurityQuery) (domain.SecurityEventPage, error) {
+	f.securityQuery = query
+	return f.security, f.securityErr
+}
+func (f *runtimeAPIFake) GetSecurityEvent(context.Context, string) (domain.ThreatEvent, error) {
+	return f.securityEvent, f.securityGetErr
 }
 
 func (f *runtimeAPIFake) GetRunningConfig(ctx context.Context) (domain.Config, domain.ConfigVersion, error) {
@@ -80,6 +101,106 @@ func newRuntimeAPIForTest(t *testing.T, runtime *runtimeAPIFake) *API {
 		t.Fatal(err)
 	}
 	return NewRuntimeAPI(runtime, manager, "", nil)
+}
+
+func TestRuntimeAPIM3HealthEventsAndStrictFilters(t *testing.T) {
+	runtime := &runtimeAPIFake{
+		inspection:    domain.InspectionHealth{Enabled: true, Status: "degraded", Generation: 7, Sources: map[string]domain.InspectionSourceStatus{"ips": {SensorID: "ips", Mode: domain.InspectionModeIPS, State: "UNAVAILABLE"}}, Stats: map[string]uint64{"observation_drops": 2}},
+		capabilities:  domain.InspectionCapabilities{Supported: true, Modes: []domain.InspectionMode{domain.InspectionModeIDS, domain.InspectionModeIPS}, FailModes: []string{"OPEN"}},
+		security:      domain.SecurityEventPage{Items: []domain.ThreatEvent{{EventID: "evt-1", CaptureMode: domain.InspectionModeIPS, CorrelationState: domain.CorrelationCorrelated, Severity: domain.SeverityHigh, Verdict: domain.VerdictDrop}}, NextSequence: 9},
+		securityEvent: domain.ThreatEvent{EventID: "evt-1", SuricataFlowID: "18446744073709551615", CaptureMode: domain.InspectionModeIPS},
+	}
+	server := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+	defer server.Close()
+
+	for _, path := range []string{"/api/v1/inspection/health", "/api/v1/inspection/capabilities", "/api/v1/security/events?mode=ips&severity=high&verdict=drop&correlation_state=correlated&limit=1", "/api/v1/security/events/evt-1"} {
+		response, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK {
+			response.Body.Close()
+			t.Fatalf("%s status=%d", path, response.StatusCode)
+		}
+		response.Body.Close()
+	}
+	if runtime.securityQuery.Mode != domain.InspectionModeIPS || runtime.securityQuery.Severity != domain.SeverityHigh || runtime.securityQuery.Verdict != domain.VerdictDrop || runtime.securityQuery.Correlation != domain.CorrelationCorrelated || runtime.securityQuery.Limit != 1 {
+		t.Fatalf("security filters were not forwarded: %#v", runtime.securityQuery)
+	}
+	for _, path := range []string{"/api/v1/security/events?mode=off", "/api/v1/security/events?limit=201", "/api/v1/security/events?after=-1", "/api/v1/security/events?correlation_state=clean", "/api/v1/security/events?sensor_id=other", "/api/v1/security/events?cursor=bad", "/api/v1/security/events?cursor=stream:1&stream_id=stream"} {
+		response, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusBadRequest {
+			response.Body.Close()
+			t.Fatalf("invalid filter %s status=%d", path, response.StatusCode)
+		}
+		response.Body.Close()
+	}
+}
+
+func TestRuntimeAPISecurityCursorAndResponseLimit(t *testing.T) {
+	runtime := &runtimeAPIFake{security: domain.SecurityEventPage{StreamID: "stream-a", Items: []domain.ThreatEvent{
+		{EventID: "a", Sequence: 1, Signature: strings.Repeat("a", 700<<10)},
+		{EventID: "b", Sequence: 2, Signature: strings.Repeat("b", 700<<10)},
+	}, NextSequence: 2, NextCursor: "stream-a:2"}}
+	server := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+	defer server.Close()
+	response, err := http.Get(server.URL + "/api/v1/security/events?cursor=stream-a:7&limit=200")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(body) > 1<<20 {
+		t.Fatalf("status=%d response bytes=%d", response.StatusCode, len(body))
+	}
+	if runtime.securityQuery.StreamID != "stream-a" || runtime.securityQuery.AfterSequence != 7 {
+		t.Fatalf("cursor was not decoded: %#v", runtime.securityQuery)
+	}
+	var envelope struct {
+		Data domain.SecurityEventPage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Data.Items) != 1 || !envelope.Data.HasMore || envelope.Data.NextCursor != "stream-a:7" {
+		t.Fatalf("response was not bounded at an event boundary: %#v", envelope.Data)
+	}
+}
+
+func TestRuntimeAPISecurityErrorsPreserveTimeoutUnavailableAndNotFound(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		listErr error
+		getErr  error
+		want    int
+	}{
+		{name: "list timeout", path: "/api/v1/security/events", listErr: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{name: "list unavailable", path: "/api/v1/security/events", listErr: errors.New("engine offline"), want: http.StatusServiceUnavailable},
+		{name: "get not found", path: "/api/v1/security/events/missing", getErr: domain.ErrSecurityEventNotFound, want: http.StatusNotFound},
+		{name: "get unavailable", path: "/api/v1/security/events/missing", getErr: errors.New("engine offline"), want: http.StatusServiceUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime := &runtimeAPIFake{securityErr: tc.listErr, securityGetErr: tc.getErr}
+			server := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+			defer server.Close()
+			response, err := http.Get(server.URL + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != tc.want {
+				t.Fatalf("status=%d want=%d", response.StatusCode, tc.want)
+			}
+		})
+	}
 }
 
 func TestRuntimeAPIEventsKeepRuntimeLifecycleSchema(t *testing.T) {
@@ -265,6 +386,34 @@ func TestRuntimeAPIWebSocketEventsSendsHeartbeatWhenIdle(t *testing.T) {
 	}
 	if !message.Success || message.Type != "heartbeat" || message.Data != nil {
 		t.Fatalf("heartbeat=%#v", message)
+	}
+}
+
+func TestRuntimeAPIWebSocketEventsReportsCursorGapExplicitly(t *testing.T) {
+	runtime := &runtimeAPIFake{events: domain.RuntimeEventPage{StreamID: "boot-a", GapFrom: 5, NextSequence: 8}}
+	server := httptest.NewServer(newRuntimeAPIForTest(t, runtime).Handler())
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/events"
+	conn, err := websocket.Dial(wsURL, "", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var message struct {
+		Success  bool   `json:"success"`
+		Type     string `json:"type"`
+		StreamID string `json:"stream_id"`
+		Data     struct {
+			GapFrom      uint64 `json:"gap_from"`
+			NextSequence uint64 `json:"next_sequence"`
+		} `json:"data"`
+	}
+	if err := websocket.JSON.Receive(conn, &message); err != nil {
+		t.Fatal(err)
+	}
+	if !message.Success || message.Type != "gap" || message.StreamID != "boot-a" || message.Data.GapFrom != 5 || message.Data.NextSequence != 8 {
+		t.Fatalf("gap notification=%#v", message)
 	}
 }
 

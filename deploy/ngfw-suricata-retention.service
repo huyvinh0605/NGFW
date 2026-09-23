@@ -1,0 +1,15 @@
+[Unit]
+Description=SENTINEL NGFW Suricata EVE retention
+
+[Service]
+Type=oneshot
+User=root
+Group=ngfw-inspect
+EnvironmentFile=-/etc/ngfw/ngfw.env
+ExecStart=/usr/local/libexec/ngfw/rotate-suricata-logs.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0027
+ReadWritePaths=/var/lib/ngfw/inspection /run/ngfw

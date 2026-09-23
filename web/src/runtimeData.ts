@@ -21,6 +21,7 @@ import type {
   Zone,
   FlowTuple,
 } from "./types";
+import { normalizeSessionInspection } from "./inspectionData";
 
 type ObjectValue = Record<string, unknown>;
 
@@ -237,7 +238,11 @@ export function normalizeSession(value: unknown, index = 0): Session | null {
     ? "FAST"
     : declaredPath === "INSPECT" ? "INSPECT" : "UNAVAILABLE";
   const riskAvailable = booleanValue(valueAt(record, "risk_available"), Object.prototype.hasOwnProperty.call(record, "risk_score"));
-  const applicationAvailable = booleanValue(valueAt(record, "application_available"), Object.prototype.hasOwnProperty.call(record, "application"));
+	const rawApplication = valueAt(record, "application");
+	const applicationAvailable = booleanValue(valueAt(record, "application_available"), typeof rawApplication === "string" && rawApplication.trim() !== "");
+	const inspection = normalizeSessionInspection(valueAt(record, "inspection"));
+	const observedApplication = inspection?.application.name && inspection.application.name !== "UNKNOWN" ? inspection.application.name : "";
+	const inspectionConfidence = inspection?.application.confidence === "VERIFIED" ? 1 : inspection?.application.confidence === "HIGH" ? 0.9 : inspection?.application.confidence === "MEDIUM" ? 0.6 : inspection?.application.confidence === "LOW" ? 0.3 : 0;
   const runtimeOriginal = original ? { ...original } : undefined;
   const runtimeReply = reply ? { ...reply } : undefined;
   return {
@@ -256,9 +261,9 @@ export function normalizeSession(value: unknown, index = 0): Session | null {
     packets_down: Math.max(0, numberValue(valueAt(record, "packets_down") ?? valueAt(record, "packets_reply"))),
     bytes_up: Math.max(0, numberValue(valueAt(record, "bytes_up") ?? valueAt(record, "bytes_original"))),
     bytes_down: Math.max(0, numberValue(valueAt(record, "bytes_down") ?? valueAt(record, "bytes_reply"))),
-    application: stringValue(valueAt(record, "application"), "Unavailable"),
-    application_available: applicationAvailable,
-    application_confidence: boundedNumber(valueAt(record, "application_confidence"), 0, 0, 1),
+		application: observedApplication || stringValue(valueAt(record, "application"), "Unavailable"),
+		application_available: Boolean(observedApplication) || applicationAvailable,
+		application_confidence: observedApplication ? inspectionConfidence : boundedNumber(valueAt(record, "application_confidence"), 0, 0, 1),
     security_context_id: stringValue(valueAt(record, "security_context_id"), id),
     policy_id: stringValue(valueAt(record, "policy_id")) || stringValue(valueAt(record, "matched_policy_id")),
     policy_version: Math.max(0, numberValue(valueAt(record, "policy_version") ?? valueAt(record, "policy_generation"))),
@@ -277,7 +282,8 @@ export function normalizeSession(value: unknown, index = 0): Session | null {
     revoked,
     original_tuple: runtimeOriginal,
     reply_tuple: runtimeReply,
-    translated_tuple: tupleValue(valueAt(record, "translated_tuple")) ?? undefined,
+		translated_tuple: tupleValue(valueAt(record, "translated_tuple")) ?? undefined,
+		inspection,
   };
 }
 
@@ -292,7 +298,8 @@ function normalizeSecurityContext(value: unknown, session: Session): SessionDeta
   const risk = objectValue(valueAt(record, "risk"));
   const policy = objectValue(valueAt(record, "policy"));
   const ml = objectValue(valueAt(record, "ml"));
-  const tls = objectValue(valueAt(record, "tls"));
+	const tls = objectValue(valueAt(record, "tls"));
+	const inspection = normalizeSessionInspection(valueAt(record, "inspection")) ?? session.inspection;
   return {
     flow_id: stringValue(valueAt(record, "flow_id"), session.id),
     session_id: stringValue(valueAt(record, "session_id"), session.id),
@@ -321,7 +328,8 @@ function normalizeSecurityContext(value: unknown, session: Session): SessionDeta
       scope: stringValue(valueAt(policy, "scope")) || undefined,
       reason: stringValue(valueAt(policy, "reason")) || session.decision_reason || undefined,
     },
-    signals: Array.isArray(valueAt(record, "signals")) ? valueAt(record, "signals") as SecurityEvent[] : [],
+		signals: Array.isArray(valueAt(record, "signals")) ? valueAt(record, "signals") as SecurityEvent[] : [],
+		inspection,
     updated_at: validTimestamp(valueAt(record, "updated_at")) || session.last_seen,
   };
 }
@@ -408,7 +416,8 @@ function normalizePolicy(value: unknown, index: number): SecurityPolicy | null {
     source_addresses: stringArray(valueAt(record, "source_addresses")),
     destination_addresses: stringArray(valueAt(record, "destination_addresses")),
     services: stringArray(valueAt(record, "services")),
-    applications: stringArray(valueAt(record, "applications")),
+		applications: stringArray(valueAt(record, "applications")),
+		application_match_mode: stringValue(valueAt(record, "application_match_mode")) || undefined,
     security_profile_id: stringValue(valueAt(record, "security_profile_id")) || undefined,
     minimum_risk: valueAt(record, "minimum_risk") == null ? undefined : boundedNumber(valueAt(record, "minimum_risk"), 0, 0, 100),
     maximum_risk: valueAt(record, "maximum_risk") == null ? undefined : boundedNumber(valueAt(record, "maximum_risk"), 100, 0, 100),
@@ -423,7 +432,8 @@ function normalizePolicy(value: unknown, index: number): SecurityPolicy | null {
 function normalizeProfile(value: unknown, index: number): SecurityProfile | null {
   const record = objectValue(value);
   if (!record) return null;
-  return {
+	const inspection = objectValue(valueAt(record, "inspection"));
+	return {
     id: stringValue(valueAt(record, "id"), `profile-${index}`),
     name: stringValue(valueAt(record, "name"), stringValue(valueAt(record, "id"), `Profile ${index + 1}`)),
     ids_ips_enabled: booleanValue(valueAt(record, "ids_ips_enabled")),
@@ -437,7 +447,12 @@ function normalizeProfile(value: unknown, index: number): SecurityProfile | null
     minimum_block_risk: boundedNumber(valueAt(record, "minimum_block_risk"), 80, 0, 100),
     logging_level: stringValue(valueAt(record, "logging_level"), "INFO"),
     inspection_required: booleanValue(valueAt(record, "inspection_required")),
-    inspection_failure_action: stringValue(valueAt(record, "inspection_failure_action"), "ALLOW"),
+		inspection_failure_action: stringValue(valueAt(record, "inspection_failure_action"), "ALLOW"),
+		inspection: inspection ? {
+			mode: stringValue(valueAt(inspection, "mode"), "OFF").toUpperCase(),
+			fail_mode: stringValue(valueAt(inspection, "fail_mode"), "OPEN").toUpperCase(),
+			ruleset_id: stringValue(valueAt(inspection, "ruleset_id")),
+		} : undefined,
   };
 }
 
@@ -476,7 +491,30 @@ function normalizeConfig(value: unknown): NGFWConfig | null {
   config.routes = routes.map(normalizeRoute).filter((item): item is Route => item !== null);
   config.nat_rules = natRules.map(normalizeNAT).filter((item): item is NATRule => item !== null);
   config.policies = policies.map(normalizePolicy).filter((item): item is SecurityPolicy => item !== null);
-  config.security_profiles = profiles.map(normalizeProfile).filter((item): item is SecurityProfile => item !== null);
+	config.security_profiles = profiles.map(normalizeProfile).filter((item): item is SecurityProfile => item !== null);
+	const inspection = objectValue(valueAt(record, "inspection"));
+	if (inspection) {
+		const limits = objectValue(valueAt(inspection, "limits"));
+		config.inspection = {
+			enabled: booleanValue(valueAt(inspection, "enabled")),
+			include_management: booleanValue(valueAt(inspection, "include_management")),
+			limits: {
+				eve_line_bytes: Math.max(0, numberValue(valueAt(limits, "eve_line_bytes"))),
+				normalized_event_bytes: Math.max(0, numberValue(valueAt(limits, "normalized_event_bytes"))),
+				observation_queue_items: Math.max(0, numberValue(valueAt(limits, "observation_queue_items"))),
+				observation_queue_bytes: Math.max(0, numberValue(valueAt(limits, "observation_queue_bytes"))),
+				security_events: Math.max(0, numberValue(valueAt(limits, "security_events"))),
+				security_event_bytes: Math.max(0, numberValue(valueAt(limits, "security_event_bytes"))),
+				correlation_pending: Math.max(0, numberValue(valueAt(limits, "correlation_pending"))),
+				correlation_wait_ms: Math.max(0, numberValue(valueAt(limits, "correlation_wait_ms"))),
+				recent_sessions: Math.max(0, numberValue(valueAt(limits, "recent_sessions"))),
+				recent_session_ttl_seconds: Math.max(0, numberValue(valueAt(limits, "recent_session_ttl_seconds"))),
+				app_detection_timeout_ms: Math.max(0, numberValue(valueAt(limits, "app_detection_timeout_ms"))),
+			},
+		};
+	} else {
+		delete config.inspection;
+	}
   config.max_sessions = Math.max(0, numberValue(valueAt(record, "max_sessions")));
   config.max_events_queue = Math.max(0, numberValue(valueAt(record, "max_events_queue")));
   config.max_http_body_inspection = Math.max(0, numberValue(valueAt(record, "max_http_body_inspection")));

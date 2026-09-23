@@ -50,3 +50,20 @@ func TestUnreachablePolicyErrorsRecognizesNetworkAndAction(t *testing.T) {
 		t.Fatalf("expected higher-priority allow to shadow later drop, got: %v", errs)
 	}
 }
+
+func TestM3UnreachableIgnoresDifferentApplicationLists(t *testing.T) {
+	c := m3Config()
+	first := c.Policies[0]
+	first.ID = "l3-first"
+	first.Applications = nil
+	first.ApplicationMatchMode = ""
+	first.SecurityProfileID = ""
+	second := c.Policies[0]
+	second.ID = "l3-second"
+	second.Priority = 20
+	second.Applications = []string{"TLS"}
+	c.Policies = []domain.SecurityPolicy{first, second}
+	if errs := M3UnreachablePolicyErrors(c); len(errs) != 1 {
+		t.Fatalf("expected application-restricted rule to be unreachable, got %v", errs)
+	}
+}

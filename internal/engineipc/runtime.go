@@ -1,6 +1,8 @@
 package engineipc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,7 +17,7 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
-const RuntimeProtocolVersion uint16 = 2
+const RuntimeProtocolVersion uint16 = 3
 
 type RuntimeService interface {
 	GetRunningConfig(context.Context) (domain.Config, domain.ConfigVersion, error)
@@ -32,6 +34,13 @@ type RuntimeService interface {
 	ReadRuntimeEvents(context.Context, uint64, int) (domain.RuntimeEventPage, error)
 }
 
+type InspectionRuntimeService interface {
+	InspectionHealth(context.Context) (domain.InspectionHealth, error)
+	InspectionCapabilities(context.Context) (domain.InspectionCapabilities, error)
+	ListSecurityEvents(context.Context, domain.SecurityQuery) (domain.SecurityEventPage, error)
+	GetSecurityEvent(context.Context, string) (domain.ThreatEvent, error)
+}
+
 type runtimeRequest struct {
 	Version   uint16          `json:"version"`
 	RequestID string          `json:"request_id"`
@@ -42,18 +51,32 @@ type runtimeResponse struct {
 	Version   uint16          `json:"version"`
 	RequestID string          `json:"request_id"`
 	OK        bool            `json:"ok"`
+	Code      string          `json:"code,omitempty"`
 	Error     string          `json:"error,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
 }
 
 type RuntimeClient struct {
-	SocketPath      string
-	QueryTimeout    time.Duration
-	MutationTimeout time.Duration
+	SocketPath       string
+	QueryTimeout     time.Duration
+	MutationTimeout  time.Duration
+	MaxResponseBytes int64
 }
 
 func NewRuntimeClient(socketPath string) *RuntimeClient {
-	return &RuntimeClient{SocketPath: socketPath, QueryTimeout: 2 * time.Second, MutationTimeout: 60 * time.Second}
+	return &RuntimeClient{SocketPath: socketPath, QueryTimeout: 2 * time.Second, MutationTimeout: 60 * time.Second, MaxResponseBytes: 8 << 20}
+}
+
+type RemoteError struct {
+	Code    string
+	Message string
+}
+
+func (e *RemoteError) Error() string     { return e.Message }
+func (e *RemoteError) ErrorCode() string { return e.Code }
+func (e *RemoteError) Is(target error) bool {
+	return (target == context.DeadlineExceeded && e.Code == "DEADLINE_EXCEEDED") ||
+		(target == domain.ErrSecurityEventNotFound && e.Code == "NOT_FOUND")
 }
 
 func (c *RuntimeClient) call(ctx context.Context, operation string, value any, out any, mutation bool) error {
@@ -90,9 +113,20 @@ func (c *RuntimeClient) call(ctx context.Context, operation string, value any, o
 	if err := json.NewEncoder(connection).Encode(runtimeRequest{Version: RuntimeProtocolVersion, RequestID: requestID, Operation: operation, Payload: body}); err != nil {
 		return err
 	}
-	var response runtimeResponse
-	if err := json.NewDecoder(io.LimitReader(connection, 8<<20)).Decode(&response); err != nil {
+	maxResponse := c.MaxResponseBytes
+	if maxResponse <= 0 {
+		maxResponse = 8 << 20
+	}
+	encoded, err := io.ReadAll(io.LimitReader(connection, maxResponse+1))
+	if err != nil {
 		return err
+	}
+	if int64(len(encoded)) > maxResponse {
+		return errors.New("runtime IPC response exceeds configured byte limit")
+	}
+	var response runtimeResponse
+	if err := json.Unmarshal(bytes.TrimSpace(encoded), &response); err != nil {
+		return fmt.Errorf("decode runtime response: %w", err)
 	}
 	if response.Version != RuntimeProtocolVersion || response.RequestID != requestID {
 		return errors.New("invalid runtime IPC response")
@@ -101,7 +135,7 @@ func (c *RuntimeClient) call(ctx context.Context, operation string, value any, o
 		if response.Error == "" {
 			response.Error = "runtime operation failed"
 		}
-		return errors.New(response.Error)
+		return &RemoteError{Code: response.Code, Message: response.Error}
 	}
 	if out != nil && len(response.Data) > 0 {
 		if err := json.Unmarshal(response.Data, out); err != nil {
@@ -182,17 +216,38 @@ func (c *RuntimeClient) ReadRuntimeEvents(ctx context.Context, after uint64, max
 	}{after, max}, &out, false)
 	return out, err
 }
+func (c *RuntimeClient) InspectionHealth(ctx context.Context) (domain.InspectionHealth, error) {
+	var out domain.InspectionHealth
+	err := c.call(ctx, "inspection_health", nil, &out, false)
+	return out, err
+}
+func (c *RuntimeClient) InspectionCapabilities(ctx context.Context) (domain.InspectionCapabilities, error) {
+	var out domain.InspectionCapabilities
+	err := c.call(ctx, "inspection_capabilities", nil, &out, false)
+	return out, err
+}
+func (c *RuntimeClient) ListSecurityEvents(ctx context.Context, query domain.SecurityQuery) (domain.SecurityEventPage, error) {
+	var out domain.SecurityEventPage
+	err := c.call(ctx, "list_security_events", query, &out, false)
+	return out, err
+}
+func (c *RuntimeClient) GetSecurityEvent(ctx context.Context, id string) (domain.ThreatEvent, error) {
+	var out domain.ThreatEvent
+	err := c.call(ctx, "get_security_event", map[string]string{"id": id}, &out, false)
+	return out, err
+}
 
 type RuntimeServer struct {
 	SocketPath                    string
 	Service                       RuntimeService
 	MaxPending                    int
 	MaxRequestBytes               int64
+	MaxResponseBytes              int64
 	QueryTimeout, MutationTimeout time.Duration
 }
 
 func NewRuntimeServer(socketPath string, service RuntimeService) *RuntimeServer {
-	return &RuntimeServer{SocketPath: socketPath, Service: service, MaxPending: 16, MaxRequestBytes: 8 << 20, QueryTimeout: 2 * time.Second, MutationTimeout: 60 * time.Second}
+	return &RuntimeServer{SocketPath: socketPath, Service: service, MaxPending: 16, MaxRequestBytes: 8 << 20, MaxResponseBytes: 8 << 20, QueryTimeout: 2 * time.Second, MutationTimeout: 60 * time.Second}
 }
 
 func (s *RuntimeServer) Serve(ctx context.Context) error {
@@ -229,7 +284,7 @@ func (s *RuntimeServer) Serve(ctx context.Context) error {
 			workers.Add(1)
 			go func() { defer workers.Done(); defer func() { <-semaphore }(); s.handle(ctx, connection) }()
 		default:
-			_ = writeRuntimeResponse(connection, runtimeResponse{Version: RuntimeProtocolVersion, OK: false, Error: "runtime IPC queue is full"})
+			_ = writeRuntimeResponse(connection, runtimeResponse{Version: RuntimeProtocolVersion, OK: false, Code: "IPC_CAPACITY", Error: "runtime IPC queue is full"})
 			_ = connection.Close()
 		}
 	}
@@ -241,14 +296,14 @@ func (s *RuntimeServer) handle(parent context.Context, connection net.Conn) {
 	if maxBytes <= 0 {
 		maxBytes = 8 << 20
 	}
-	_ = connection.SetDeadline(time.Now().Add(s.MutationTimeout + 5*time.Second))
+	_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var request runtimeRequest
-	if err := json.NewDecoder(io.LimitReader(connection, maxBytes)).Decode(&request); err != nil {
-		_ = writeRuntimeResponse(connection, runtimeResponse{Version: RuntimeProtocolVersion, Error: err.Error()})
+	if err := readRuntimeRequest(connection, maxBytes, &request); err != nil {
+		_ = writeRuntimeResponse(connection, runtimeResponse{Version: RuntimeProtocolVersion, Code: "INVALID_REQUEST", Error: err.Error()})
 		return
 	}
 	if request.Version != RuntimeProtocolVersion || request.RequestID == "" {
-		_ = writeRuntimeResponse(connection, runtimeResponse{Version: RuntimeProtocolVersion, RequestID: request.RequestID, Error: "unsupported runtime IPC version"})
+		_ = writeRuntimeResponse(connection, runtimeResponse{Version: RuntimeProtocolVersion, RequestID: request.RequestID, Code: "IPC_VERSION_MISMATCH", Error: "unsupported runtime IPC version; rebuild ngfw-engine and ngfw-api"})
 		return
 	}
 	timeout := s.QueryTimeout
@@ -258,16 +313,72 @@ func (s *RuntimeServer) handle(parent context.Context, connection net.Conn) {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
+	_ = connection.SetDeadline(time.Now().Add(timeout + 5*time.Second))
 	callContext, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	data, err := s.dispatch(callContext, request)
 	response := runtimeResponse{Version: RuntimeProtocolVersion, RequestID: request.RequestID, OK: err == nil}
 	if err != nil {
+		response.Code = runtimeErrorCode(err)
 		response.Error = err.Error()
 	} else {
 		response.Data = data
 	}
-	_ = writeRuntimeResponse(connection, response)
+	_ = writeRuntimeResponse(connection, response, s.MaxResponseBytes)
+}
+
+func readRuntimeRequest(reader io.Reader, maxBytes int64, out *runtimeRequest) error {
+	if maxBytes <= 0 {
+		maxBytes = 8 << 20
+	}
+	bufferSize := 64 << 10
+	if maxBytes < int64(bufferSize) {
+		bufferSize = int(maxBytes)
+	}
+	if bufferSize < 1 {
+		bufferSize = 1
+	}
+	buffered := bufio.NewReaderSize(reader, bufferSize)
+	var encoded bytes.Buffer
+	tooLarge := false
+	for {
+		fragment, more, err := buffered.ReadLine()
+		if !tooLarge {
+			if int64(encoded.Len()+len(fragment)) > maxBytes {
+				tooLarge = true
+			} else {
+				_, _ = encoded.Write(fragment)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && (encoded.Len() > 0 || tooLarge) {
+				more = false
+			} else {
+				return err
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	if tooLarge {
+		return errors.New("runtime IPC request exceeds configured byte limit")
+	}
+	if err := json.Unmarshal(encoded.Bytes(), out); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runtimeErrorCode(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "DEADLINE_EXCEEDED"
+	case errors.Is(err, domain.ErrSecurityEventNotFound):
+		return "NOT_FOUND"
+	default:
+		return "RUNTIME_ERROR"
+	}
 }
 
 func isMutation(operation string) bool {
@@ -402,10 +513,83 @@ func (s *RuntimeServer) dispatch(ctx context.Context, request runtimeRequest) (j
 			return nil, err
 		}
 		return encode(result)
+	case "inspection_health":
+		service, ok := s.Service.(InspectionRuntimeService)
+		if !ok {
+			return nil, errors.New("inspection runtime IPC is unavailable")
+		}
+		result, err := service.InspectionHealth(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
+	case "inspection_capabilities":
+		service, ok := s.Service.(InspectionRuntimeService)
+		if !ok {
+			return nil, errors.New("inspection runtime IPC is unavailable")
+		}
+		result, err := service.InspectionCapabilities(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
+	case "list_security_events":
+		service, ok := s.Service.(InspectionRuntimeService)
+		if !ok {
+			return nil, errors.New("inspection runtime IPC is unavailable")
+		}
+		var query domain.SecurityQuery
+		if err := decodePayload(request, &query); err != nil {
+			return nil, err
+		}
+		result, err := service.ListSecurityEvents(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
+	case "get_security_event":
+		service, ok := s.Service.(InspectionRuntimeService)
+		if !ok {
+			return nil, errors.New("inspection runtime IPC is unavailable")
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := decodePayload(request, &payload); err != nil {
+			return nil, err
+		}
+		result, err := service.GetSecurityEvent(ctx, payload.ID)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
 	default:
 		return nil, fmt.Errorf("unsupported runtime operation %q", request.Operation)
 	}
 }
-func writeRuntimeResponse(connection net.Conn, response runtimeResponse) error {
-	return json.NewEncoder(connection).Encode(response)
+func writeRuntimeResponse(connection net.Conn, response runtimeResponse, limits ...int64) error {
+	limit := int64(8 << 20)
+	if len(limits) > 0 && limits[0] > 0 {
+		limit = limits[0]
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	if int64(len(encoded)+1) > limit {
+		response.OK = false
+		response.Data = nil
+		response.Code = "IPC_RESPONSE_TOO_LARGE"
+		response.Error = "runtime IPC response exceeds configured byte limit"
+		encoded, err = json.Marshal(response)
+		if err != nil {
+			return err
+		}
+		if int64(len(encoded)+1) > limit {
+			return errors.New("runtime IPC response limit is too small for an error envelope")
+		}
+	}
+	encoded = append(encoded, '\n')
+	_, err = connection.Write(encoded)
+	return err
 }

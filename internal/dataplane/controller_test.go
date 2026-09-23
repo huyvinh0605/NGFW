@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kltngfw/ngfw/internal/domain"
@@ -132,4 +133,102 @@ type fakeForwarding struct{ calls int }
 func (f *fakeForwarding) Ensure(context.Context) error {
 	f.calls++
 	return nil
+}
+
+type fakeBundleApplier struct {
+	fakeRulesetApplier
+	bundles []RulesetBundle
+	clears  int
+	fail    bool
+}
+
+func (f *fakeBundleApplier) ApplyBundle(_ context.Context, bundle RulesetBundle) error {
+	f.bundles = append(f.bundles, bundle)
+	if f.fail {
+		f.fail = false
+		return errors.New("injected bundle failure")
+	}
+	return nil
+}
+
+func (f *fakeBundleApplier) ClearInspectionRuntimeState(context.Context) error {
+	f.clears++
+	return nil
+}
+
+func TestControllerPersistsM3ActivationOptionsAndCleansDowngrade(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "dataplane-applied.json")
+	rules := &fakeBundleApplier{}
+	first, err := NewController(&fakeNetworkReconciler{}, rules, &fakeForwarding{}, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := M2CompileOptions{Epoch: 7, ZoneSlots: map[string]uint8{"lan": 1, "wan": 2}, CacheEnabled: true}
+	if err := first.ApplyRuntime(context.Background(), m3DataplaneConfig(), options, 5); err != nil {
+		t.Fatal(err)
+	}
+	restartedRules := &fakeBundleApplier{}
+	restarted, err := NewController(&fakeNetworkReconciler{}, restartedRules, &fakeForwarding{}, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.currentUsesM3 || restarted.currentGeneration != 5 || restarted.currentM2Options.Epoch != 7 || restarted.currentM2Options.ZoneSlots["wan"] != 2 {
+		t.Fatalf("runtime activation metadata was not restored: %#v", restarted)
+	}
+	if err := restarted.ApplyRuntime(context.Background(), baseM1Config(), M2CompileOptions{Epoch: 8, ZoneSlots: map[string]uint8{"lan": 1, "wan": 2}, CacheEnabled: true}, 6); err != nil {
+		t.Fatal(err)
+	}
+	if len(restartedRules.bundles) != 1 || restartedRules.clears != 1 {
+		t.Fatalf("M3 downgrade did not atomically replace selectors and clear guards: bundles=%d clears=%d", len(restartedRules.bundles), restartedRules.clears)
+	}
+	if strings.Contains(restartedRules.bundles[0].PolicyTransaction, "queue num 100") || strings.Contains(restartedRules.bundles[0].PolicyTransaction, "log group 100") {
+		t.Fatalf("inspection remained active after downgrade:\n%s", restartedRules.bundles[0].PolicyTransaction)
+	}
+	loaded, exists, err := loadAppliedSnapshot(statePath)
+	if err != nil || !exists || loaded.Generation != 6 || loaded.UsesM3 {
+		t.Fatalf("unexpected persisted downgrade snapshot: %#v exists=%v err=%v", loaded, exists, err)
+	}
+}
+
+func TestControllerAcceptsGenerationZeroAsInitialM3Baseline(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "dataplane-applied.json")
+	rules := &fakeBundleApplier{}
+	controller, err := NewController(&fakeNetworkReconciler{}, rules, &fakeForwarding{}, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := M2CompileOptions{Epoch: 1, ZoneSlots: map[string]uint8{"lan": 1, "wan": 2}, CacheEnabled: true}
+	if err := controller.ApplyRuntime(context.Background(), m3DataplaneConfig(), options, 0); err != nil {
+		t.Fatalf("version-zero startup reconciliation failed: %v", err)
+	}
+	if controller.currentGeneration != 0 || len(rules.bundles) != 1 {
+		t.Fatalf("unexpected initial generation/bundle state: generation=%d bundles=%d", controller.currentGeneration, len(rules.bundles))
+	}
+	loaded, exists, err := loadAppliedSnapshot(statePath)
+	if err != nil || !exists || loaded.Generation != 0 || !loaded.UsesM3 {
+		t.Fatalf("version-zero applied snapshot was not durable: %#v exists=%v err=%v", loaded, exists, err)
+	}
+}
+
+func TestControllerM3FailureRestoresPreviousRuntimeSnapshot(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "dataplane-applied.json")
+	rules := &fakeBundleApplier{}
+	controller, err := NewController(&fakeNetworkReconciler{}, rules, &fakeForwarding{}, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOptions := M2CompileOptions{Epoch: 3, ZoneSlots: map[string]uint8{"lan": 1, "wan": 2}, CacheEnabled: true}
+	if err := controller.ApplyRuntime(context.Background(), m3DataplaneConfig(), oldOptions, 3); err != nil {
+		t.Fatal(err)
+	}
+	desired := m3DataplaneConfig()
+	desired.Policies[0].Services = []string{"tcp:8080"}
+	rules.fail = true
+	if err := controller.ApplyRuntime(context.Background(), desired, M2CompileOptions{Epoch: 4, ZoneSlots: oldOptions.ZoneSlots, CacheEnabled: true}, 4); err == nil {
+		t.Fatal("expected injected M3 bundle failure")
+	}
+	loaded, exists, err := loadAppliedSnapshot(statePath)
+	if err != nil || !exists || loaded.Generation != 3 || loaded.Options == nil || loaded.Options.Epoch != 3 || !loaded.UsesM3 {
+		t.Fatalf("previous runtime snapshot was not restored: %#v exists=%v err=%v", loaded, exists, err)
+	}
 }

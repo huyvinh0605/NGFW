@@ -140,6 +140,14 @@ proxy, UI, ML or IDS services. Complete `tests/integration/m1/README.md` after
 the non-traffic checks. The nftables adapter checks the ruleset before
 atomically replacing only the managed `inet ngfw` table.
 
+When source code changes, restarting systemd alone does not rebuild the installed
+executables. Run the installer again to rebuild and copy the current
+`ngfw-engine` and `ngfw-api`, then restart the services:
+
+```bash
+sudo bash scripts/install-linux.sh --skip-apt --start
+```
+
 The sample topology uses WAN, LAN, DMZ and MGMT interfaces. It is a starting configuration only: replace addresses, gateways and interface names for the VM.
 
 ## Verification

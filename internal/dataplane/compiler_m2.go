@@ -13,9 +13,18 @@ import (
 // activation. Runtime guards live in a separate table so replacing the policy
 // table cannot delete an active temporary block or revoke fence.
 type M2CompileOptions struct {
-	Epoch        uint16
-	ZoneSlots    map[string]uint8
-	CacheEnabled bool
+	Epoch        uint16           `json:"epoch"`
+	ZoneSlots    map[string]uint8 `json:"zone_slots,omitempty"`
+	CacheEnabled bool             `json:"cache_enabled"`
+}
+
+func (o M2CompileOptions) Clone() M2CompileOptions {
+	c := o
+	c.ZoneSlots = make(map[string]uint8, len(o.ZoneSlots))
+	for key, value := range o.ZoneSlots {
+		c.ZoneSlots[key] = value
+	}
+	return c
 }
 
 func CompileM2Ruleset(config domain.Config, options M2CompileOptions) (string, error) {

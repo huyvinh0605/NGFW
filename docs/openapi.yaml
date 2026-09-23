@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: NGFW Management API
-  version: 0.1.0
+  version: 0.3.0
 servers:
   - url: http://localhost:8080/api/v1
 paths:
@@ -101,6 +101,44 @@ paths:
       security: [{bearerAuth: []}]
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {'200': {description: Session terminated}}
+  /inspection/health:
+    get:
+      summary: M3 coordinator and sensor health
+      responses:
+        '200':
+          description: Inspection health; zero alerts does not imply a failed sensor
+          content: {application/json: {schema: {$ref: '#/components/schemas/InspectionHealthEnvelope'}}}
+        '503': {description: Engine IPC unavailable}
+  /inspection/capabilities:
+    get:
+      summary: M3 modes and policy values implemented by this engine build
+      responses:
+        '200': {description: Supported IDS/IPS, applications, OPEN fail mode and rulesets}
+        '503': {description: Engine IPC unavailable}
+  /security/events:
+    get:
+      summary: Bounded M3 Suricata security-event stream
+      parameters:
+        - {name: session_id, in: query, schema: {type: string}}
+        - {name: sensor_id, in: query, schema: {type: string, enum: [ids, ips]}}
+        - {name: mode, in: query, schema: {type: string, enum: [IDS, IPS]}}
+        - {name: severity, in: query, schema: {type: string, enum: [UNKNOWN, INFO, LOW, MEDIUM, HIGH, CRITICAL]}}
+        - {name: verdict, in: query, schema: {type: string, enum: [UNKNOWN, ALERT, DROP, ERROR]}}
+        - {name: correlation_state, in: query, schema: {type: string, enum: [CORRELATED, UNCORRELATED, AMBIGUOUS]}}
+        - {name: application, in: query, schema: {type: string}}
+        - {name: after, in: query, schema: {type: integer, format: int64, minimum: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 100}}
+      responses:
+        '200': {description: SecurityEventPage; gap_from reports evicted history}
+        '400': {description: Invalid filter}
+        '503': {description: Engine IPC or inspection runtime unavailable}
+  /security/events/{id}:
+    get:
+      summary: One M3 security event
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: ThreatEvent with capture, correlation, packet verdict and enforcement kept distinct}
+        '404': {description: Unknown or evicted event}
   /events:
     get:
       parameters:
@@ -189,6 +227,65 @@ components:
         revoked: {type: boolean}
         revision: {type: integer, format: int64}
         quality: {type: object}
+        inspection: {$ref: '#/components/schemas/SessionInspection'}
+    ApplicationIdentity:
+      type: object
+      required: [name, source, confidence, conflicted]
+      properties:
+        name: {type: string, enum: [UNKNOWN, HTTP, TLS, DNS, SSH, OTHER]}
+        raw_name: {type: string}
+        source: {type: string, enum: [UNKNOWN, SURICATA_APP_PROTO, DPI_PARSER, TLS_METADATA, PORT_HEURISTIC]}
+        confidence: {type: string, enum: [UNKNOWN, LOW, MEDIUM, HIGH, VERIFIED]}
+        first_seen: {type: string, format: date-time}
+        last_seen: {type: string, format: date-time}
+        conflicted: {type: boolean}
+    EnforcementResult:
+      type: object
+      properties:
+        mechanism: {type: string, enum: [NONE, SURICATA_NFQUEUE, NFT_SESSION_GUARD]}
+        scope: {type: string, enum: [PACKET, SESSION]}
+        requested_action: {type: string}
+        status: {type: string, enum: [NOT_REQUESTED, PENDING, REPORTED, APPLIED, FAILED, UNAVAILABLE]}
+        reason: {type: string}
+        observed_at: {type: string, format: date-time}
+        operation_id: {type: string}
+    SessionInspection:
+      type: object
+      required: [generation, revision, mode, state, coverage, application, app_policy_state, threat_count, max_severity, latest_verdict, enforcement]
+      properties:
+        generation: {type: integer, format: int64}
+        revision: {type: integer, format: int64}
+        profile_id: {type: string}
+        mode: {type: string, enum: [OFF, IDS, IPS]}
+        state: {type: string, enum: [NOT_REQUESTED, QUEUED, INSPECTING, DEGRADED, ERROR, COMPLETE]}
+        reason: {type: string}
+        coverage: {type: string, enum: [NONE, OBSERVED, PARTIAL, UNAVAILABLE]}
+        application: {$ref: '#/components/schemas/ApplicationIdentity'}
+        app_policy_state: {type: string, enum: [NOT_APPLICABLE, PENDING, MATCHED, MISMATCH, UNKNOWN_ALLOWED]}
+        app_deadline: {type: string, format: date-time}
+        threat_count: {type: integer, format: int64}
+        last_event_id: {type: string}
+        max_severity: {type: string}
+        latest_verdict: {type: string}
+        enforcement: {$ref: '#/components/schemas/EnforcementResult'}
+        sources: {type: array, items: {type: string}}
+        missing_evidence: {type: array, items: {type: string}}
+    InspectionHealthEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [enabled, status, generation, sources, stats, updated_at]
+          properties:
+            enabled: {type: boolean}
+            status: {type: string, enum: [disabled, healthy, degraded]}
+            reason: {type: string}
+            generation: {type: integer, format: int64}
+            sources: {type: object, additionalProperties: {type: object}}
+            stats: {type: object, additionalProperties: {type: integer, format: int64}}
+            updated_at: {type: string, format: date-time}
     Config:
       type: object
       required: [interfaces, zones, routes, nat_rules, policies, security_profiles]
@@ -198,7 +295,28 @@ components:
         routes: {type: array, items: {$ref: '#/components/schemas/Route'}}
         nat_rules: {type: array, items: {$ref: '#/components/schemas/NATRule'}}
         policies: {type: array, items: {$ref: '#/components/schemas/FirewallPolicy'}}
-        security_profiles: {type: array, items: {type: object}}
+        security_profiles: {type: array, items: {$ref: '#/components/schemas/SecurityProfile'}}
+        inspection: {$ref: '#/components/schemas/InspectionConfig'}
+    InspectionConfig:
+      type: object
+      required: [enabled, include_management, limits]
+      properties:
+        enabled: {type: boolean}
+        include_management: {type: boolean}
+        limits: {type: object, description: Bounded EVE, queue, event, correlation and App-ID timeout limits}
+    SecurityProfile:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        inspection:
+          type: object
+          required: [mode, fail_mode, ruleset_id]
+          properties:
+            mode: {type: string, enum: [IDS, IPS]}
+            fail_mode: {type: string, enum: [OPEN]}
+            ruleset_id: {type: string, enum: [m3-builtin-v1]}
     Interface:
       type: object
       required: [id, system_name, mode, ipv4_addresses, ipv6_addresses, admin_state]
@@ -254,5 +372,9 @@ components:
         source_addresses: {type: array, items: {type: string, description: IPv4 address or CIDR}}
         destination_addresses: {type: array, items: {type: string, description: IPv4 address or CIDR}}
         services: {type: array, items: {type: string, example: 'tcp:443'}}
+        applications: {type: array, items: {type: string, enum: [HTTP, TLS, DNS, SSH]}}
+        application_match_mode: {type: string, enum: [RESTRICT_L3_ALLOW]}
+        security_profile_id: {type: string}
+        scope: {type: string, enum: [SESSION]}
         action: {type: string, enum: [ALLOW, DROP, REJECT]}
         enabled: {type: boolean}

@@ -6,6 +6,17 @@
 > M2 implementation đã có trong workspace và đang chờ Ubuntu VM acceptance.
 > Phần bên dưới là kế hoạch tổng thể ban đầu.
 
+> **Đặc tả code M3 hiện tại:** [M3_IMPLEMENTATION_PLAN.md](docs/M3_IMPLEMENTATION_PLAN.md),
+> kèm [32 task triển khai](docs/m3/CODING_TASKS.md) và
+> [ma trận nghiệm thu](docs/m3-acceptance-matrix.md).
+> [CODE_CONTRACTS.md](docs/m3/CODE_CONTRACTS.md) chốt structs, boundary algorithms,
+> error codes và JSON fixtures để agent dùng trực tiếp khi code/test.
+> Hướng dẫn vào việc và prompt giao agent: [START_HERE.md](docs/m3/START_HERE.md).
+> M3 được chốt thành M3-A App-ID/Suricata IDS và M3-B IPS/NFQUEUE/application
+> restriction. Đặc tả này thay phạm vi M3 cũ bên dưới; nDPI, URL/TI và behavior
+> detectors được hoãn, không coi như đã thực hiện. Hiện mới viết đặc tả code M3,
+> chưa triển khai hoặc nghiệm thu M3. M1/M2 vẫn chờ Ubuntu VM acceptance.
+
 ## 1. Mục tiêu và phân tích đặc tả
 
 Xây dựng appliance NGFW Linux nhiều NIC, bao phủ toàn bộ chức năng trong tài liệu, triển khai theo các mốc có thể chạy và nghiệm thu độc lập.

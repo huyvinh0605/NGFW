@@ -23,3 +23,10 @@ type RuntimeClient interface {
 	ListTemporaryBlocks(context.Context) ([]domain.TemporaryBlock, error)
 	ReadRuntimeEvents(context.Context, uint64, int) (domain.RuntimeEventPage, error)
 }
+
+type InspectionRuntimeClient interface {
+	InspectionHealth(context.Context) (domain.InspectionHealth, error)
+	InspectionCapabilities(context.Context) (domain.InspectionCapabilities, error)
+	ListSecurityEvents(context.Context, domain.SecurityQuery) (domain.SecurityEventPage, error)
+	GetSecurityEvent(context.Context, string) (domain.ThreatEvent, error)
+}

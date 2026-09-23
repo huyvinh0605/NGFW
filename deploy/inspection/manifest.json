@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "managed_root": "/var/lib/ngfw/inspection",
+  "sensors": [
+    {
+      "id": "ids",
+      "mode": "IDS",
+      "epoch": "replace-at-install-ids",
+      "epoch_path": "/var/lib/ngfw/inspection/ids/sensor.epoch",
+      "config_hash": "replace-at-install",
+      "ruleset_id": "m3-builtin-v1",
+      "eve_path": "/var/lib/ngfw/inspection/ids/eve.json",
+      "control_socket": "/var/lib/ngfw/inspection/ids/control.sock",
+      "service_unit": "ngfw-suricata-ids.service",
+      "discovery_sids": [9900001, 9900002, 9900003, 9900004]
+    },
+    {
+      "id": "ips",
+      "mode": "IPS",
+      "epoch": "replace-at-install-ips",
+      "epoch_path": "/var/lib/ngfw/inspection/ips/sensor.epoch",
+      "config_hash": "replace-at-install",
+      "ruleset_id": "m3-builtin-v1",
+      "eve_path": "/var/lib/ngfw/inspection/ips/eve.json",
+      "control_socket": "/var/lib/ngfw/inspection/ips/control.sock",
+      "service_unit": "ngfw-suricata-ips.service",
+      "discovery_sids": [9900001, 9900002, 9900003, 9900004]
+    }
+  ]
+}

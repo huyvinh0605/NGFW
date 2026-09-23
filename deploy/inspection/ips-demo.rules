@@ -1,0 +1,1 @@
+drop tcp any any -> any any (msg:"NGFW safe integration marker"; flow:established,to_server; content:"NGFW_M3_TEST_"; sid:9900100; rev:1;)

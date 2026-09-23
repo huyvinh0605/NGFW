@@ -45,6 +45,7 @@ type RuntimeHealth struct {
 
 type RuntimeEventPage struct {
 	Items        []RuntimeEvent `json:"items"`
+	StreamID     string         `json:"stream_id"`
 	GapFrom      uint64         `json:"gap_from,omitempty"`
 	NextSequence uint64         `json:"next_sequence"`
 }

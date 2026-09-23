@@ -1,0 +1,45 @@
+%YAML 1.1
+---
+vars:
+  address-groups:
+    # The installer renders this from the selected appliance config. "any" is
+    # retained in the source template solely for isolated offline replay.
+    HOME_NET: "any"
+    EXTERNAL_NET: "any"
+default-rule-path: /etc/ngfw/inspection/rules
+rule-files:
+  - app-discovery.rules
+  - ids-demo.rules
+nflog:
+  - group: 100
+    buffer-size: 18432
+    qthreshold: 1
+    qtimeout: 100
+stream:
+  inline: no
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /var/lib/ngfw/inspection/ids/eve.json
+      types:
+        - alert
+        - flow
+        - http
+        - dns
+        - tls
+        - ssh
+        - stats:
+            totals: yes
+            threads: no
+unix-command:
+  enabled: yes
+  filename: /var/lib/ngfw/inspection/ids/control.sock
+stats:
+  enabled: yes
+  interval: 2
+logging:
+  default-log-level: notice
+  outputs:
+    - console:
+        enabled: yes

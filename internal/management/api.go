@@ -84,6 +84,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/policies/", a.policyByID)
 	mux.HandleFunc("/api/v1/security-profiles", a.profiles)
 	mux.HandleFunc("/api/v1/security-profiles/", func(w http.ResponseWriter, r *http.Request) { a.objectByID(w, r, "profile") })
+	mux.HandleFunc("/api/v1/inspection/health", a.inspectionHealth)
+	mux.HandleFunc("/api/v1/inspection/capabilities", a.inspectionCapabilities)
+	mux.HandleFunc("/api/v1/security/events", a.securityEvents)
+	mux.HandleFunc("/api/v1/security/events/", a.securityEventByID)
 	mux.HandleFunc("/api/v1/policies/validate", a.validate)
 	mux.HandleFunc("/api/v1/policies/commit", a.commit)
 	mux.HandleFunc("/api/v1/policies/rollback", a.rollback)
@@ -798,10 +802,10 @@ func validateCandidateConfig(candidate domain.Config) []string {
 	if len(errs) != 0 {
 		return errs
 	}
-	if errs := config.ExactDuplicatePolicyErrors(candidate.Policies); len(errs) != 0 {
+	if errs := config.ExactDuplicatePolicyErrorsForConfig(candidate); len(errs) != 0 {
 		return errs
 	}
-	if errs := config.UnreachablePolicyErrors(candidate.Policies); len(errs) != 0 {
+	if errs := config.UnreachablePolicyErrorsForConfig(candidate); len(errs) != 0 {
 		return errs
 	}
 	if _, err := connectivity.CompileM2(candidate, 1); err != nil {
@@ -946,7 +950,7 @@ func (a *API) sessionByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"session": value, "security_context": nil}})
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"session": value, "security_context": map[string]any{"inspection": value.Inspection}}})
 		return
 	}
 	if r.Method == "DELETE" {
@@ -1323,6 +1327,7 @@ func (a *API) wsEvents(conn *websocket.Conn) {
 	defer finish()
 	if a.Runtime != nil {
 		var cursor uint64
+		var streamID string
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		lastHeartbeat := time.Time{}
@@ -1334,9 +1339,25 @@ func (a *API) wsEvents(conn *websocket.Conn) {
 				_ = a.writeWebSocket(conn, map[string]any{"success": false, "error": map[string]string{"code": "ENGINE_UNAVAILABLE", "message": err.Error()}})
 				return
 			}
+			if streamID != "" && page.StreamID != "" && page.StreamID != streamID {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "stream_reset", "stream_id": page.StreamID, "data": map[string]any{"previous_stream_id": streamID, "next_sequence": page.NextSequence}}); err != nil {
+					return
+				}
+				streamID = page.StreamID
+				cursor = 0
+				continue
+			}
+			if streamID == "" {
+				streamID = page.StreamID
+			}
+			if page.GapFrom != 0 {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "gap", "stream_id": streamID, "data": map[string]any{"gap_from": page.GapFrom, "next_sequence": page.NextSequence}}); err != nil {
+					return
+				}
+			}
 			for _, event := range page.Items {
 				cursor = event.Sequence
-				if err := a.writeWebSocket(conn, map[string]any{"success": true, "data": event}); err != nil {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "event", "stream_id": streamID, "data": event}); err != nil {
 					return
 				}
 			}

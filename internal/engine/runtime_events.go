@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -13,13 +15,16 @@ type RuntimeEventRing struct {
 	capacity int
 	next     uint64
 	dropped  uint64
+	streamID string
 }
 
 func NewRuntimeEventRing(capacity int) *RuntimeEventRing {
 	if capacity <= 0 {
 		capacity = 10000
 	}
-	return &RuntimeEventRing{capacity: capacity, items: make([]domain.RuntimeEvent, 0, capacity)}
+	var seed [12]byte
+	_, _ = rand.Read(seed[:])
+	return &RuntimeEventRing{capacity: capacity, items: make([]domain.RuntimeEvent, 0, capacity), streamID: hex.EncodeToString(seed[:])}
 }
 
 func (r *RuntimeEventRing) Publish(ev domain.RuntimeEvent) domain.RuntimeEvent {
@@ -73,3 +78,8 @@ func (r *RuntimeEventRing) Read(after uint64, max int) ([]domain.RuntimeEvent, u
 }
 
 func (r *RuntimeEventRing) Dropped() uint64 { r.mu.Lock(); defer r.mu.Unlock(); return r.dropped }
+func (r *RuntimeEventRing) StreamID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.streamID
+}

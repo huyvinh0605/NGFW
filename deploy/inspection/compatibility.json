@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "NOT_RUN",
+  "target_os": "Ubuntu 24.04 LTS",
+  "suricata_version": null,
+  "suricata_build_hash": null,
+  "kernel_release": null,
+  "checks": {
+    "nflog_group_100": "NOT_RUN",
+    "nfqueue_100_bypass": "NOT_RUN",
+    "nfqueue_100_listener": "NOT_RUN",
+    "nfq_fail_open": "NOT_RUN",
+    "nft_compound_guard": "NOT_RUN",
+    "base_chain_priority": "NOT_RUN"
+  },
+  "evidence": null,
+  "note": "Generated source manifest only. Run tests/integration/m3/probe-capabilities.sh on the target Ubuntu VM; do not change status without captured evidence."
+}

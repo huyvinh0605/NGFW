@@ -42,6 +42,7 @@ type Runtime struct {
 	cancel         context.CancelFunc
 	guards         GuardEnforcer
 	resyncInterval time.Duration
+	inspection     *InspectionRuntime
 }
 
 const defaultRuntimeResyncInterval = 30 * time.Second
@@ -284,6 +285,23 @@ func (r *Runtime) releaseClosedSession(value domain.RuntimeSession, reason strin
 	}
 	r.closed.Add(1)
 	r.publish(domain.RuntimeEvent{Kind: domain.EventSessionClosed, SessionID: value.SessionID, Reason: reason})
+	r.mu.RLock()
+	inspectionRuntime := r.inspection
+	r.mu.RUnlock()
+	if inspectionRuntime != nil {
+		inspectionRuntime.OnSessionClosed(value)
+	}
+}
+
+func (r *Runtime) SetInspectionRuntime(value *InspectionRuntime) {
+	r.mu.Lock()
+	r.inspection = value
+	r.mu.Unlock()
+}
+func (r *Runtime) InspectionRuntime() *InspectionRuntime {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.inspection
 }
 
 func (r *Runtime) SetGuardEnforcer(guards GuardEnforcer) {
@@ -329,6 +347,12 @@ func (r *Runtime) applyRecord(record conntrack.Record, now time.Time, kind connt
 		r.publish(domain.RuntimeEvent{Kind: domain.EventSessionUpdated, SessionID: v.SessionID, Revision: v.Revision, Reason: string(kind)})
 	}
 	r.evaluateObserved(v)
+	r.mu.RLock()
+	inspectionRuntime := r.inspection
+	r.mu.RUnlock()
+	if inspectionRuntime != nil {
+		inspectionRuntime.OnSessionChanged(v)
+	}
 }
 
 // evaluateObserved records the connectivity decision associated with a
@@ -360,25 +384,44 @@ func (r *Runtime) publish(ev domain.RuntimeEvent) { r.Events.Publish(ev) }
 func (r *Runtime) CurrentProgram() connectivity.Program {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	p := r.program
-	p.Rules = append([]connectivity.Rule(nil), p.Rules...)
-	return p
+	return r.program.Clone()
 }
 func (r *Runtime) CurrentGeneration() uint64 { r.mu.RLock(); defer r.mu.RUnlock(); return r.generation }
 
 func (r *Runtime) Activate(program connectivity.Program, generation uint64, reason string) error {
+	inspectionRuntime := r.InspectionRuntime()
+	if inspectionRuntime != nil {
+		inspectionRuntime.BeginActivation()
+	}
+	changed, err := r.activateWhileInspectionPaused(program, generation, reason)
+	if inspectionRuntime != nil {
+		inspectionRuntime.EndActivation()
+		for _, value := range changed {
+			inspectionRuntime.OnSessionChanged(value)
+		}
+	}
+	return err
+}
+
+// activateWhileInspectionPaused publishes a new connectivity generation while
+// the caller owns the current inspection runtime's activation gate. The
+// management activation path uses this form so the same gate spans Linux
+// network/nft mutation and the in-memory generation cutover. Conntrack event
+// ingestion remains independent and may queue while the short cutover runs.
+func (r *Runtime) activateWhileInspectionPaused(program connectivity.Program, generation uint64, reason string) ([]domain.RuntimeSession, error) {
 	if generation == 0 {
-		return errors.New("policy generation must be non-zero")
+		return nil, errors.New("policy generation must be non-zero")
 	}
 	r.mu.Lock()
 	if generation <= r.generation {
 		r.mu.Unlock()
-		return errors.New("policy generation must increase")
+		return nil, errors.New("policy generation must increase")
 	}
 	r.program = program
 	r.program.Generation = generation
 	r.generation = generation
 	r.mu.Unlock()
+	changed := make([]domain.RuntimeSession, 0)
 	for _, current := range r.Store.List() {
 		if current.Revoked {
 			continue
@@ -392,9 +435,10 @@ func (r *Runtime) Activate(program connectivity.Program, generation uint64, reas
 			if current.SourceZone == connectivity.ZoneLocal || current.DestinationZone == connectivity.ZoneLocal {
 				r.evaluateObserved(v)
 			}
+			changed = append(changed, v)
 		}
 	}
-	return nil
+	return changed, nil
 }
 
 func inferSessionZones(program connectivity.Program, value domain.RuntimeSession) (string, string) {

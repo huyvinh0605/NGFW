@@ -84,5 +84,5 @@ export function candidateDiff(running: NGFWConfig, candidate: NGFWConfig): boole
 
 export function canCommit(config: ConfigExport | null, busy = ""): boolean {
   if (!config || busy === "commit" || !candidateDiff(config.running, config.candidate)) return false;
-  return config.candidate_valid && (!config.candidate_validation_state || config.candidate_validation_state === "VALID");
+  return config.candidate_valid && config.candidate_validation_state === "VALID";
 }

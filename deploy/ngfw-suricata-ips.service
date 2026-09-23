@@ -1,0 +1,26 @@
+[Unit]
+Description=SENTINEL NGFW Suricata IPS sensor
+After=network-pre.target
+Before=ngfw-engine.service
+ConditionPathExists=/etc/ngfw/inspection/ips.yaml
+
+[Service]
+Type=simple
+User=ngfw-inspect
+Group=ngfw-inspect
+ExecStart=/usr/local/libexec/ngfw/start-suricata-sensor.sh ips
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0027
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+ReadOnlyPaths=/etc/ngfw/inspection
+ReadWritePaths=/var/lib/ngfw/inspection/ips
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

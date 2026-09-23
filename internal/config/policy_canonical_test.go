@@ -43,3 +43,18 @@ func TestExactDuplicatePolicyErrorsDoNotRejectPartialOverlap(t *testing.T) {
 		t.Fatalf("partial overlap was mislabeled duplicate: %v", errs)
 	}
 }
+
+func TestM3DuplicateIncludesApplicationModeAndProfileSemantics(t *testing.T) {
+	c := m3Config()
+	duplicate := c.Policies[0]
+	duplicate.ID = "web-copy"
+	duplicate.Priority = 20
+	c.Policies = append(c.Policies, duplicate)
+	if errs := ExactDuplicatePolicyErrorsForConfig(c); len(errs) != 1 {
+		t.Fatalf("expected M3 duplicate, got %v", errs)
+	}
+	c.Policies[1].ApplicationMatchMode = ""
+	if errs := ExactDuplicatePolicyErrorsForConfig(c); len(errs) != 0 {
+		t.Fatal("application match mode was not part of effective key")
+	}
+}

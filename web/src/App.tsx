@@ -20,17 +20,22 @@ import {
   normalizeStats,
 } from "./runtimeData";
 import { normalizeServiceList } from "./policy";
-import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay } from "./wsLifecycle";
+import { normalizeInspectionCapabilities, normalizeInspectionHealth, normalizeThreatEventPage } from "./inspectionData";
+import { ApplicationBadge, InspectionBadge, InspectionHealthPanel, SessionInspectionDetails } from "./inspectionComponents";
+import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay, requiresEventCatchup } from "./wsLifecycle";
 import type {
   AuditEntry,
   ConfigExport,
   Health,
+  InspectionCapabilities,
+  InspectionHealth,
   MLStatus,
   NGFWConfig,
   Page,
   ReputationEntry,
   SecurityEvent,
   SecurityPolicy,
+  SecurityProfile,
   Session,
   SessionDetail,
   Stats,
@@ -148,6 +153,9 @@ function severityClass(severity: unknown) {
   return ["info", "low", "medium", "high", "critical"].includes(normalized) ? normalized : "info";
 }
 function objectChanged(a: unknown, b: unknown) { return JSON.stringify(a) !== JSON.stringify(b); }
+function defaultInspectionConfig(): NonNullable<NGFWConfig["inspection"]> {
+  return { enabled: true, include_management: false, limits: { eve_line_bytes: 1048576, normalized_event_bytes: 8192, observation_queue_items: 4096, observation_queue_bytes: 8388608, security_events: 5000, security_event_bytes: 16777216, correlation_pending: 2048, correlation_wait_ms: 2000, recent_sessions: 5000, recent_session_ttl_seconds: 60, app_detection_timeout_ms: 5000 } };
+}
 
 function Button({ children, icon, variant = "secondary", busy, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: IconName; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
   return <button {...props} className={cx("button", `button-${variant}`, props.className)} disabled={busy || props.disabled}>{busy ? <span className="spinner"/> : icon ? <Icon name={icon} size={16}/> : null}<span>{children}</span></button>;
@@ -170,9 +178,11 @@ type LiveData = {
   reputation: ReputationEntry[];
   audit: AuditEntry[];
   ml: MLStatus | null;
+  inspection: InspectionHealth | null;
+  inspectionCapabilities: InspectionCapabilities | null;
 };
 
-const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null };
+const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null, inspection: null, inspectionCapabilities: null };
 
 export default function App() {
   const initialNavigation = useRef(readConsoleNavigation(window.location.hash, window.history.state)).current;
@@ -211,7 +221,7 @@ export default function App() {
     liveLoading.current = true;
     if (!quiet) setRefreshing(true);
     try {
-      const endpointLabels = ["health", "sessions", "events", "blocks", "stats", "ML", "reputation", "audit"];
+      const endpointLabels = ["health", "sessions", "events", "blocks", "stats", "ML", "reputation", "audit", "inspection health", "security events", "inspection capabilities"];
       // These resources have independent failure modes (notably the runtime
       // IPC-backed sessions/config paths), so keep healthy panels rendering
       // when one endpoint is unavailable.
@@ -224,6 +234,9 @@ export default function App() {
         api<unknown>("/api/v1/ml/status"),
         api<unknown>("/api/v1/reputation"),
         api<unknown>("/api/v1/audit?limit=250"),
+		api<unknown>("/api/v1/inspection/health"),
+		api<unknown>("/api/v1/security/events?limit=200"),
+		api<unknown>("/api/v1/inspection/capabilities"),
       ]);
       const read = <T,>(index: number, previous: T, normalize: (value: unknown) => T | null): T => {
         const result = results[index];
@@ -236,16 +249,23 @@ export default function App() {
           return previous;
         }
       };
-      setLive((current) => ({
-        health: read(0, current.health, normalizeHealth),
-        sessions: read(1, current.sessions, (value) => normalizeSessionPage(value)),
-        events: read(2, current.events, (value) => normalizeEventPage(value)),
-        blocks: read(3, current.blocks, (value) => normalizeBlocks(value)),
-        stats: read(4, current.stats, (value) => normalizeStats(value)),
-        ml: read(5, current.ml, normalizeMLStatus),
-        reputation: read(6, current.reputation, (value) => normalizeReputation(value)),
-        audit: read(7, current.audit, (value) => normalizeAuditPage(value)),
-      }));
+      setLive((current) => {
+		const runtimeEvents = read(2, current.events.filter((event) => event.event_class !== "security"), (value) => normalizeEventPage(value));
+		const securityEvents = read(9, current.events.filter((event) => event.event_class === "security"), (value) => normalizeThreatEventPage(value));
+		const mergedEvents = [...securityEvents, ...runtimeEvents].filter((event, index, values) => values.findIndex((candidate) => candidate.event_id === event.event_id) === index).slice(0, 10000);
+		return {
+		  health: read(0, current.health, normalizeHealth),
+		  sessions: read(1, current.sessions, (value) => normalizeSessionPage(value)),
+		  events: mergedEvents,
+		  blocks: read(3, current.blocks, (value) => normalizeBlocks(value)),
+		  stats: read(4, current.stats, (value) => normalizeStats(value)),
+		  ml: read(5, current.ml, normalizeMLStatus),
+		  reputation: read(6, current.reputation, (value) => normalizeReputation(value)),
+		  audit: read(7, current.audit, (value) => normalizeAuditPage(value)),
+		  inspection: read(8, current.inspection, normalizeInspectionHealth),
+		  inspectionCapabilities: read(10, current.inspectionCapabilities, normalizeInspectionCapabilities),
+		};
+	  });
       const failures = results.flatMap((result, index) => result.status === "rejected" ? [`${endpointLabels[index]}: ${errorMessage(result.reason)}`] : []);
       liveError.current = failures.length ? `Một số nguồn dữ liệu tạm thời không khả dụng (${failures.join("; ")})` : "";
       if (results.some((result) => result.status === "fulfilled")) setLastUpdated(new Date().toISOString());
@@ -303,7 +323,7 @@ export default function App() {
     const current = new Map<string, WebSocket>();
     const attempts = new Map<string, number>();
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-    const connect = <T,>(path: string, receive: (data: T) => void) => {
+    const connect = <T,>(path: string, receive: (data: T, messageType: string) => void) => {
       const open = () => {
         if (stopped) return;
         const active = current.get(path);
@@ -321,8 +341,8 @@ export default function App() {
         };
         socket.onmessage = (message) => {
           try {
-            const envelope = JSON.parse(String(message.data)) as { success?: unknown; data?: T };
-            if (envelope && envelope.success === true) receive(envelope.data as T);
+            const envelope = JSON.parse(String(message.data)) as { success?: unknown; type?: unknown; data?: T };
+            if (envelope && envelope.success === true) receive(envelope.data as T, typeof envelope.type === "string" ? envelope.type : "event");
           } catch { /* polling remains the fallback for malformed frames */ }
         };
         socket.onerror = () => { /* onclose schedules a bounded reconnect */ };
@@ -351,8 +371,12 @@ export default function App() {
         setLive((current) => ({ ...current, stats: normalized }));
       } catch { /* polling remains the fallback for malformed frames */ }
     });
-    connect<unknown>("/ws/events", (value) => {
+    connect<unknown>("/ws/events", (value, messageType) => {
       try {
+        if (requiresEventCatchup(messageType)) {
+          void loadLive(true);
+          return;
+        }
         const event = normalizeEvent(value);
         if (!event) return;
         setLive((current) => ({ ...current, events: [event, ...current.events.filter((item) => item.event_id !== event.event_id)].slice(0, 10000) }));
@@ -365,7 +389,7 @@ export default function App() {
       sockets.forEach((socket) => closeSocketAfterOpen(socket));
       current.clear();
     };
-  }, []);
+  }, [loadLive]);
 
   const requireAccess = useCallback(() => {
     if (token) return true;
@@ -615,9 +639,11 @@ export default function App() {
           {page === "overview" && <OverviewPage live={live} config={config} lastUpdated={lastUpdated} onNavigate={navigate}/>} 
           {page === "sessions" && <SessionsPage sessions={live.sessions} onTerminate={terminateSession} onNeedAccess={() => setAccessOpen(true)}/>} 
           {page === "threats" && <ThreatsPage events={live.events} blocks={live.blocks} reputation={live.reputation} audit={live.audit} onAddBlock={addBlock} onDeleteBlock={deleteBlock} onAddReputation={addReputation} onDeleteReputation={deleteReputation}/>} 
-          {page === "policy" && <PolicyPage
-            config={config}
-            onSave={savePolicies}
+		  {page === "policy" && <PolicyPage
+			config={config}
+			capabilities={live.inspectionCapabilities}
+			onSave={savePolicies}
+			onSaveProfiles={async (profiles) => config ? saveCandidate({ ...config.candidate, inspection: { ...(config.candidate.inspection ?? defaultInspectionConfig()), enabled: true }, security_profiles: profiles }) : false}
             onValidate={validateCandidate}
             onCommit={commitCandidate}
             onRollback={rollback}
@@ -686,10 +712,12 @@ function OverviewPage({ live, config, lastUpdated, onNavigate }: { live: LiveDat
         <div className="component-list">{live.health && Object.entries(live.health.components).map(([name, item]) => <div className="component-row" key={name}><span className={cx("component-dot", item.status)}/><div><strong>{item.name || name}</strong><small>{item.message || "Hoạt động bình thường"}</small></div><span>{item.status}</span></div>)}</div>
       </section>
 
-      <section className="panel span-2">
-        <div className="panel-heading"><div><h2>Nhận diện ứng dụng</h2><p>Trạng thái milestone hiện tại</p></div></div>
-        <EmptyState icon="sessions" title="App-ID chưa khả dụng trong M2" description="DPI và nhận diện ứng dụng thuộc milestone M3; giao diện không suy diễn ứng dụng từ port."/>
-      </section>
+	  <InspectionHealthPanel health={live.inspection}/>
+
+	  <section className="panel span-2">
+		<div className="panel-heading"><div><h2>Nhận diện ứng dụng M3</h2><p>Từ Suricata app_proto; UNKNOWN được giữ nguyên và không suy diễn từ port.</p></div><Badge tone={live.inspection?.enabled ? "blue" : "neutral"}>{live.inspection?.enabled ? "ENABLED" : "DISABLED"}</Badge></div>
+		{Object.keys(live.stats?.applications ?? {}).length ? <div className="setting-list">{Object.entries(live.stats?.applications ?? {}).map(([name, count]) => <div key={name}><span>{name}</span><strong>{formatNumber(count)}</strong></div>)}</div> : <p className="muted">Chưa có aggregate App-ID. Xem từng session để biết evidence, source và confidence.</p>}
+	  </section>
 
       <section className="panel posture-card">
         <div className="panel-heading"><div><h2>Policy posture</h2><p>Candidate hiện tại</p></div></div>
@@ -745,7 +773,7 @@ function SessionsPage({ sessions, onTerminate, onNeedAccess }: { sessions: Sessi
 
     <section className="panel table-panel">
       <div className="table-scroll"><table><thead><tr><th>Client</th><th>Server</th><th>App / Protocol</th><th>Zones</th><th>Risk</th><th>Decision</th><th>Path</th><th/></tr></thead><tbody>
-        {filtered.map((session) => <tr className="clickable-row" key={session.id} onClick={() => void openDetail(session.id)}><td><strong className="mono">{session.client_ip}</strong><small>:{session.client_port}</small></td><td><strong className="mono">{session.server_ip}</strong><small>:{session.server_port}</small></td><td><strong>{session.application_available ? session.application : "Unavailable (M2)"}</strong><small>{session.protocol?.toUpperCase()} · {session.tcp_state || "active"}</small></td><td><span className="zone-route"><Badge>{session.source_zone || "unknown"}</Badge><span>→</span><Badge>{session.destination_zone || "unknown"}</Badge></span></td><td><span className={cx("risk-value", session.risk_available && riskClass(session.risk_score))}>{session.risk_available ? session.risk_score : "Unavailable"}</span></td><td><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge></td><td><span className={cx("path-label", session.path_classification === "FAST" ? "fast" : session.path_classification === "INSPECT" ? "inspect" : "unavailable")} title={session.fast_path_reason}><i/>{session.path_classification === "UNAVAILABLE" ? "Unavailable" : session.path_classification === "FAST" ? "Fast" : "Inspect"}</span></td><td><button className="icon-button danger-hover" title="Kết thúc session" disabled={terminating === session.id} onClick={(event) => { event.stopPropagation(); void terminate(session.id); }}>{terminating === session.id ? <span className="spinner"/> : <Icon name="close" size={15}/>}</button></td></tr>)}
+		{filtered.map((session) => <tr className="clickable-row" key={session.id} onClick={() => void openDetail(session.id)}><td><strong className="mono">{session.client_ip}</strong><small>:{session.client_port}</small></td><td><strong className="mono">{session.server_ip}</strong><small>:{session.server_port}</small></td><td><strong>{session.inspection ? <ApplicationBadge inspection={session.inspection}/> : session.application_available ? session.application : "Unavailable"}</strong><small>{session.protocol?.toUpperCase()} · {session.tcp_state || "active"} {session.inspection && <>· <InspectionBadge inspection={session.inspection}/></>}</small></td><td><span className="zone-route"><Badge>{session.source_zone || "unknown"}</Badge><span>→</span><Badge>{session.destination_zone || "unknown"}</Badge></span></td><td><span className={cx("risk-value", session.risk_available && riskClass(session.risk_score))}>{session.risk_available ? session.risk_score : "Unavailable"}</span></td><td><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge></td><td><span className={cx("path-label", session.path_classification === "FAST" ? "fast" : session.path_classification === "INSPECT" ? "inspect" : "unavailable")} title={session.fast_path_reason}><i/>{session.path_classification === "UNAVAILABLE" ? "Unavailable" : session.path_classification === "FAST" ? "Fast" : "Inspect"}</span></td><td><button className="icon-button danger-hover" title="Kết thúc session" disabled={terminating === session.id} onClick={(event) => { event.stopPropagation(); void terminate(session.id); }}>{terminating === session.id ? <span className="spinner"/> : <Icon name="close" size={15}/>}</button></td></tr>)}
         {!filtered.length && <tr><td colSpan={8}><EmptyState icon="sessions" title={sessions.length ? "Không tìm thấy session" : "Chưa có session hoạt động"} description={sessions.length ? "Thử thay đổi bộ lọc hoặc từ khóa tìm kiếm." : "Session sẽ xuất hiện khi engine nhận được traffic."}/></td></tr>}
       </tbody></table></div>
     </section>
@@ -761,7 +789,8 @@ function SessionDrawer({ detail, loading, onClose, onTerminate }: { detail: Sess
       <div className="risk-summary"><div className={cx("risk-orb", session.risk_available && riskClass(session.risk_score))}><strong>{session.risk_available ? session.risk_score : "—"}</strong><span>RISK</span></div><div><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge><h3>{session.risk_available ? context.risk.level || "Unknown risk" : "Risk engine chưa có trong M2"}</h3><p>{context.policy.reason || session.decision_reason || session.policy_id || "Decision chưa khả dụng"}</p></div></div>
       <DetailSection title="Kết nối"><DetailPair label="Client" value={`${session.client_ip}:${session.client_port}`}/><DetailPair label="Server" value={`${session.server_ip}:${session.server_port}`}/><DetailPair label="Zone" value={`${session.source_zone} → ${session.destination_zone}`}/><DetailPair label="Protocol" value={`${session.protocol?.toUpperCase()} · ${session.tcp_state || "—"}`}/><DetailPair label="Bắt đầu" value={formatDate(session.start_time)}/><DetailPair label="Lần cuối" value={relativeTime(session.last_seen)}/></DetailSection>
       <DetailSection title="Lưu lượng">{session.counters_available ? <div className="traffic-pair"><div><span>↑ Original</span><strong>{formatBytes(session.bytes_up)}</strong><small>{formatNumber(session.packets_up)} packets</small></div><div><span>↓ Reply</span><strong>{formatBytes(session.bytes_down)}</strong><small>{formatNumber(session.packets_down)} packets</small></div></div> : <p className="muted">Unavailable: conntrack chưa cung cấp counters cho session này.</p>}</DetailSection>
-      <DetailSection title="Security context"><DetailPair label="Policy" value={context.policy.matched_policy_id || session.policy_id || "default"}/><DetailPair label="Scope" value={context.policy.scope || "SESSION"}/><DetailPair label="ML" value={context.ml.available ? `${context.ml.predicted_class || "BENIGN"} · ${Math.round(context.ml.confidence * 100)}%` : "Unavailable"}/><DetailPair label="TLS" value={String(context.tls.available ? context.tls.tls_version || "Observed" : "Unavailable")}/><DetailPair label="Signals" value={String(context.signals?.length ?? 0)}/></DetailSection>
+	  <DetailSection title="Security context"><DetailPair label="Policy" value={context.policy.matched_policy_id || session.policy_id || "default"}/><DetailPair label="Scope" value={context.policy.scope || "SESSION"}/><DetailPair label="ML" value={context.ml.available ? `${context.ml.predicted_class || "BENIGN"} · ${Math.round(context.ml.confidence * 100)}%` : "Unavailable"}/><DetailPair label="TLS" value={String(context.tls.available ? context.tls.tls_version || "Observed" : "Unavailable")}/><DetailPair label="Signals" value={String(context.signals?.length ?? 0)}/></DetailSection>
+	  <DetailSection title="M3 inspection"><SessionInspectionDetails inspection={context.inspection ?? session.inspection}/></DetailSection>
       {!!context.risk.contributions?.length && <DetailSection title="Risk contributions"><div className="contribution-list">{context.risk.contributions.map((item, index) => <div key={`${item.source}-${index}`}><span>{item.source}</span><div><i style={{ width: `${Math.min(100, item.value * 2.5)}%` }}/></div><strong>+{item.value}</strong><small>{item.reason}</small></div>)}</div></DetailSection>}
     </div>}
     {session && <div className="drawer-footer"><Button variant="danger" icon="close" onClick={() => void onTerminate(session.id)}>Kết thúc session</Button></div>}
@@ -838,17 +867,19 @@ function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBl
 }
 
 function EventDrawer({ event, onClose, onBlock }: { event: SecurityEvent; onClose: () => void; onBlock: () => Promise<void> }) {
-  return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng" onClick={onClose}/><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">{event.event_class.toUpperCase()} EVENT</span><h2>{event.category}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="drawer-body"><div className="event-hero"><Badge tone={event.event_class === "security" ? severityClass(event.severity) : "blue"}>{event.event_class}</Badge>{event.event_class === "security" && <strong>{Math.round(event.confidence * 100)}% confidence</strong>}<span>{formatDate(event.timestamp)}</span></div><DetailSection title="Nguồn sự kiện"><DetailPair label="Class" value={event.event_class}/><DetailPair label="Producer" value={event.detector}/><DetailPair label="Signature" value={event.signature_id || "Unavailable"}/><DetailPair label="Recommended" value={event.recommended_action || "Unavailable"}/></DetailSection><DetailSection title="Liên kết"><DetailPair label="Source" value={event.source_ip || "Unavailable"}/><DetailPair label="Destination" value={event.destination_ip || "Unavailable"}/><DetailPair label="Session" value={event.session_id || "Unavailable"}/></DetailSection>{event.evidence && <DetailSection title="Chi tiết"><pre className="evidence">{event.evidence}</pre></DetailSection>}{event.metadata && <DetailSection title="Metadata"><pre className="json-preview">{JSON.stringify(event.metadata, null, 2)}</pre></DetailSection>}</div>{event.event_class === "security" && event.source_ip && <div className="drawer-footer"><Button variant="danger" icon="shield" onClick={() => void onBlock()}>Chặn source trong 1 giờ</Button></div>}</aside></div>;
+	return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng" onClick={onClose}/><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">{event.event_class.toUpperCase()} EVENT</span><h2>{event.category}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="drawer-body"><div className="event-hero"><Badge tone={event.event_class === "security" ? severityClass(event.severity) : "blue"}>{event.event_class}</Badge>{event.event_class === "security" && event.confidence_available && <strong>{Math.round(event.confidence * 100)}% confidence</strong>}<span>{formatDate(event.timestamp)}</span></div><DetailSection title="Nguồn sự kiện"><DetailPair label="Class" value={event.event_class}/><DetailPair label="Producer" value={event.detector}/><DetailPair label="Capture mode" value={event.capture_mode || "Unavailable"}/><DetailPair label="Signature" value={event.signature_id || "Unavailable"}/><DetailPair label="Recommended" value={event.recommended_action || "Unavailable"}/></DetailSection><DetailSection title="Verdict và enforcement"><DetailPair label="Correlation" value={event.correlation_state || "Unavailable"}/><DetailPair label="Alert verdict" value={event.verdict || "Unknown"}/><DetailPair label="Packet verdict" value={event.packet_verdict || "Not reported"}/><DetailPair label="Enforcement" value={event.enforcement ? `${event.enforcement.mechanism} / ${event.enforcement.scope} / ${event.enforcement.status}` : "NOT_REQUESTED"}/></DetailSection><DetailSection title="Liên kết"><DetailPair label="Source" value={event.source_ip || "Unavailable"}/><DetailPair label="Destination" value={event.destination_ip || "Unavailable"}/><DetailPair label="Session" value={event.session_id || "Unavailable"}/></DetailSection>{event.evidence && <DetailSection title="Chi tiết"><pre className="evidence">{event.evidence}</pre></DetailSection>}{event.metadata && <DetailSection title="Metadata"><pre className="json-preview">{JSON.stringify(event.metadata, null, 2)}</pre></DetailSection>}</div>{event.event_class === "security" && event.source_ip && <div className="drawer-footer"><Button variant="danger" icon="shield" onClick={() => void onBlock()}>Chặn source trong 1 giờ</Button></div>}</aside></div>;
 }
 
-export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, onOpenAdvanced }: { config: ConfigExport | null; onSave: (policies: SecurityPolicy[]) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean>; onOpenAdvanced: () => void }) {
+export function PolicyPage({ config, capabilities, onSave, onSaveProfiles, onValidate, onCommit, onRollback, onOpenAdvanced }: { config: ConfigExport | null; capabilities?: InspectionCapabilities | null; onSave: (policies: SecurityPolicy[]) => Promise<boolean>; onSaveProfiles?: (profiles: SecurityProfile[]) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean>; onOpenAdvanced: () => void }) {
   const [editing, setEditing] = useState<SecurityPolicy | null>(null);
+  const [editingProfile, setEditingProfile] = useState<SecurityProfile | null>(null);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState("");
   const saveInFlight = useRef(false);
   const policies = useMemo(() => [...(config?.candidate.policies ?? [])].sort((a, b) => a.priority - b.priority), [config]);
   const dirty = !!config && objectChanged(config.running, config.candidate);
   const defaultPolicy: SecurityPolicy = { id: "", name: "", priority: (policies[policies.length - 1]?.priority ?? 0) + 10, source_zones: [], destination_zones: [], services: [], applications: [], action: "ALLOW", scope: "SESSION", log_start: true, log_end: true, enabled: true };
+  const defaultProfile: SecurityProfile = { id: "", name: "", ids_ips_enabled: true, dpi_enabled: false, dns_security_enabled: false, url_filtering_enabled: false, threat_intel_enabled: false, behavior_enabled: false, ml_detection_enabled: false, tls_mode: "METADATA_ONLY", minimum_block_risk: 80, logging_level: "INFO", inspection_required: false, inspection_failure_action: "ALLOW", inspection: { mode: "IDS", fail_mode: "OPEN", ruleset_id: capabilities?.rulesets[0] ?? "m3-builtin-v1" } };
 
   async function savePolicy(policy: SecurityPolicy) {
     if (saveInFlight.current) return;
@@ -879,39 +910,60 @@ export function PolicyPage({ config, onSave, onValidate, onCommit, onRollback, o
     try { await onSave(policies.map((item) => item.id === policy.id ? { ...item, enabled: !item.enabled } : item)); }
     finally { setBusy(""); saveInFlight.current = false; }
   }
+  async function saveProfile(profile: SecurityProfile) {
+    if (!onSaveProfiles || saveInFlight.current) return;
+    saveInFlight.current = true;
+    setBusy("profile-save");
+    try {
+      const next = (config?.candidate.security_profiles ?? []).filter((item) => item.id !== profile.id);
+      next.push(profile);
+      if (await onSaveProfiles(next)) setEditingProfile(null);
+    } finally { setBusy(""); saveInFlight.current = false; }
+  }
 
   return <div className="page-stack">
     <ConfigStatusBar config={config} dirty={dirty} comment={comment} onComment={setComment} busy={busy} onValidate={async () => { setBusy("validate"); await onValidate(); setBusy(""); }} onCommit={async () => { setBusy("commit"); const ok = await onCommit(comment); setBusy(""); if (ok) setComment(""); }} onRollback={async () => { setBusy("rollback"); await onRollback(); setBusy(""); }}/>
     <section className="panel table-panel">
       <div className="panel-heading padded"><div><h2>Security policy rules</h2><p>Ưu tiên số nhỏ được đánh giá trước; default {config?.candidate.default_deny ? "deny" : "allow"}</p></div><div className="panel-heading-actions"><Button variant="ghost" icon="configuration" title="Mở trình soạn thảo nâng cao cho cùng Candidate hiện tại" onClick={onOpenAdvanced}>Mở JSON nâng cao</Button><Button variant="primary" icon="plus" onClick={() => setEditing(defaultPolicy)}>Thêm policy</Button></div></div>
-      <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service L3/L4</th><th>Tương thích M2</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => { const scope = (policy.scope || "SESSION").toUpperCase(); const compatible = scope === "SESSION" && !policy.applications?.length && !policy.security_profile_id && policy.minimum_risk == null && policy.maximum_risk == null && ["ALLOW", "DROP", "REJECT"].includes(policy.action.toUpperCase()); return <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small className="field-hint">Ví dụ: tcp:80, tcp:443, udp:53</small></td><td><Badge tone={compatible ? "low" : "critical"}>{compatible ? "Compatible" : "Validate sẽ từ chối"}</Badge></td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{scope}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>; })}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>Thứ tự</th><th>Policy</th><th>Source → Destination</th><th>Service / App</th><th>Milestone</th><th>Action</th><th>Scope</th><th>Trạng thái</th><th/></tr></thead><tbody>{policies.map((policy) => { const scope = (policy.scope || "SESSION").toUpperCase(); const profile = config?.candidate.security_profiles.find((item) => item.id === policy.security_profile_id); const m2Compatible = scope === "SESSION" && !policy.applications?.length && !policy.security_profile_id && policy.minimum_risk == null && policy.maximum_risk == null && ["ALLOW", "DROP", "REJECT"].includes(policy.action.toUpperCase()); const m3Compatible = scope === "SESSION" && policy.minimum_risk == null && policy.maximum_risk == null && (!policy.security_profile_id || Boolean(profile?.inspection)); return <tr key={policy.id} className={!policy.enabled ? "disabled-row" : ""}><td><span className="priority-box">{policy.priority}</span></td><td><strong>{policy.name}</strong><small className="mono">{policy.id}</small></td><td><span className="zone-route"><span>{policy.source_zones?.join(", ") || "any"}</span><span>→</span><span>{policy.destination_zones?.join(", ") || "any"}</span></span></td><td><strong>{policy.services?.join(", ") || "any"}</strong><small className="field-hint">Ví dụ: tcp:80, tcp:443, udp:53</small><small className="field-hint">{policy.applications?.length ? `Apps: ${policy.applications.join(", ")} · async restrict` : "Không giới hạn application"}</small></td><td><Badge tone={m2Compatible || m3Compatible ? "low" : "critical"}>{m2Compatible ? "M2" : m3Compatible ? `M3 ${profile?.inspection?.mode ?? "L3/L4"}` : "Invalid"}</Badge></td><td><Badge tone={policy.action === "ALLOW" ? "low" : "critical"}>{policy.action}</Badge></td><td>{scope}</td><td><button className={cx("toggle", policy.enabled && "on")} aria-label={policy.enabled ? "Tắt policy" : "Bật policy"} disabled={busy === policy.id} onClick={() => void togglePolicy(policy)}><i/></button></td><td><div className="row-actions"><button className="icon-button" title="Sửa" onClick={() => setEditing(policy)}><Icon name="edit" size={15}/></button><button className="icon-button danger-hover" title="Xóa" onClick={() => void deletePolicy(policy)}><Icon name="trash" size={15}/></button></div></td></tr>; })}{!policies.length && <tr><td colSpan={9}><EmptyState icon="policy" title="Chưa có policy" description="Thêm rule đầu tiên; traffic liên zone vẫn theo default action."/></td></tr>}</tbody></table></div>
     </section>
-    <section className="panel"><div className="panel-heading"><div><h2>Security profiles</h2><p>{config?.candidate.security_profiles.length ?? 0} định nghĩa được lưu cho milestone sau; M2 không chạy DPI, IDS, ML, TLS inspection hoặc risk engine.</p></div><Badge tone="medium">Unavailable in M2</Badge></div></section>
-    {editing && <PolicyEditor value={editing} zones={config?.candidate.zones.map((zone) => zone.id) ?? []} profiles={config?.candidate.security_profiles.map((profile) => profile.id) ?? []} busy={busy === "save"} onClose={() => setEditing(null)} onSave={savePolicy}/>} 
+    <section className="panel"><div className="panel-heading"><div><h2>M3 inspection profiles</h2><p>IDS sao chép traffic qua NFLOG; IPS dùng NFQUEUE fail-open. DPI, ML, WAF và TLS decryption chưa thuộc M3.</p></div>{onSaveProfiles && <Button variant="ghost" icon="plus" onClick={() => setEditingProfile(defaultProfile)}>Thêm profile M3</Button>}</div><div className="setting-list">{config?.candidate.security_profiles.filter((profile) => profile.inspection).map((profile) => <div key={profile.id}><span><strong>{profile.name}</strong><small>{profile.id} · {profile.inspection?.ruleset_id}</small></span><span><Badge tone={profile.inspection?.mode === "IPS" ? "critical" : "blue"}>{profile.inspection?.mode}</Badge> <button className="icon-button" title="Sửa profile" onClick={() => setEditingProfile(profile)}><Icon name="edit" size={14}/></button></span></div>)}{!config?.candidate.security_profiles.some((profile) => profile.inspection) && <p className="muted">Chưa có M3 inspection profile trong Candidate.</p>}</div></section>
+    {editing && <PolicyEditor value={editing} zones={config?.candidate.zones.map((zone) => zone.id) ?? []} profiles={config?.candidate.security_profiles ?? []} capabilities={capabilities} busy={busy === "save"} onClose={() => setEditing(null)} onSave={savePolicy}/>} 
+    {editingProfile && <InspectionProfileEditor value={editingProfile} capabilities={capabilities} busy={busy === "profile-save"} onClose={() => setEditingProfile(null)} onSave={saveProfile}/>} 
   </div>;
 }
 
 export function ConfigStatusBar({ config, dirty, comment, onComment, busy, onValidate, onCommit, onRollback }: { config: ConfigExport | null; dirty: boolean; comment: string; onComment: (value: string) => void; busy: string; onValidate: () => Promise<void>; onCommit: () => Promise<void>; onRollback: () => Promise<void> }) {
-  const validationReady = !!config?.candidate_valid && (!config.candidate_validation_state || config.candidate_validation_state === "VALID");
+  // Fail closed when talking to an older API that does not expose the
+  // candidate validation state. A structural `candidate_valid` flag alone
+  // cannot prove that the current effective policy set passed duplicate,
+  // reachability and M2 compatibility checks.
+  const validationReady = !!config?.candidate_valid && config.candidate_validation_state === "VALID";
   const commitDisabled = !dirty || !validationReady || busy === "commit";
   const commitTitle = !dirty
     ? "Candidate đã đồng bộ với Running; không có thay đổi để commit"
     : !validationReady
-      ? config?.candidate_validation_state === "STALE" || config?.candidate_validation_state === "NOT_RUN"
+      ? config?.candidate_valid && config.candidate_validation_state !== "INVALID"
         ? "Candidate chưa được Validate sau thay đổi; hãy chạy Validate"
         : "Candidate chưa hợp lệ; hãy sửa lỗi và Validate"
       : "Kích hoạt Candidate thành Running và áp dụng dataplane";
-  const validationLabel = !config?.candidate_valid ? "Validation: không hợp lệ" : config.candidate_validation_state === "VALID" || !config.candidate_validation_state ? "Validation: hợp lệ" : `Validation: ${config.candidate_validation_state.toLowerCase()}`;
+  const validationLabel = !config?.candidate_valid
+    ? "Validation: không hợp lệ"
+    : config.candidate_validation_state === "VALID"
+      ? "Validation: hợp lệ"
+      : `Validation: ${config.candidate_validation_state?.toLowerCase() || "chưa chạy"}`;
   return <section className={cx("config-bar", dirty && "dirty")}><div className="config-state"><span className="config-version" aria-label={`Running version ${config?.version.version ?? 0}`}>Running<br/>v{config?.version.version ?? 0}</span><div><strong>{dirty ? "Candidate changed — chưa Commit" : "Candidate synced với Running · không có thay đổi để commit"}</strong><small>{validationLabel}{config?.version.author ? ` · Running commit bởi ${config.version.author}` : ""}</small></div></div><div className="commit-controls"><input aria-label="Ghi chú commit" placeholder="Ghi chú cho commit…" value={comment} onChange={(event) => onComment(event.target.value)}/><Button icon="check" busy={busy === "validate"} title="Chỉ kiểm tra Candidate; không áp dụng dataplane" onClick={() => void onValidate()}>Validate</Button><Button variant="ghost" busy={busy === "rollback"} title="Khôi phục previous known-good theo backend và áp dụng lại dataplane" onClick={() => void onRollback()}>Rollback</Button><Button variant="primary" icon="shield" busy={busy === "commit"} disabled={commitDisabled} title={commitTitle} onClick={() => void onCommit()}>Commit</Button></div></section>;
 }
 
-export function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: string[]; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
+export function PolicyEditor({ value, zones, profiles, capabilities, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: Array<string | SecurityProfile>; capabilities?: InspectionCapabilities | null; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
   const [draft, setDraft] = useState<SecurityPolicy>(() => ({ ...value, source_zones: [...(value.source_zones ?? [])], destination_zones: [...(value.destination_zones ?? [])], services: [...(value.services ?? [])], applications: [...(value.applications ?? [])] }));
   const [servicesText, setServicesText] = useState(() => (value.services ?? []).join(", "));
   const [applicationsText, setApplicationsText] = useState(() => (value.applications ?? []).join(", "));
   const [priorityText, setPriorityText] = useState(() => String(value.priority ?? ""));
   const [priorityError, setPriorityError] = useState("");
   const [serviceError, setServiceError] = useState("");
+  const [applicationError, setApplicationError] = useState("");
+  const profileOptions = profiles.map((profile) => typeof profile === "string" ? { id: profile, mode: "" } : { id: profile.id, mode: profile.inspection?.mode ?? "" });
   const isNew = !value.id;
   function toggleZone(field: "source_zones" | "destination_zones", zone: string) {
     const current = draft[field] ?? [];
@@ -939,15 +991,38 @@ export function PolicyEditor({ value, zones, profiles, busy, onClose, onSave }: 
       return;
     }
     setServiceError("");
-    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services, applications: applicationsText.split(",").map((item) => item.trim()).filter(Boolean) });
+	const applications = [...new Set(applicationsText.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean))];
+	const supportedApplications = capabilities?.applications ?? ["HTTP", "TLS", "DNS", "SSH"];
+	if (applications.some((app) => !supportedApplications.includes(app))) {
+	  setApplicationError(`Ứng dụng hỗ trợ trong M3: ${supportedApplications.join(", ")}.`);
+	  return;
+	}
+	const selectedProfile = profileOptions.find((profile) => profile.id === draft.security_profile_id);
+	if (applications.length && selectedProfile?.mode && selectedProfile.mode !== "IPS") {
+	  setApplicationError("Application restriction cần profile IPS; IDS chỉ cảnh báo và không chặn session.");
+	  return;
+	}
+	setApplicationError("");
+	void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services, applications, application_match_mode: applications.length ? "RESTRICT_L3_ALLOW" : undefined });
   }
   return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal policy-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CANDIDATE POLICY</span><h2>{isNew ? "Thêm policy" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body">
     <div className="form-row"><label>ID<input required disabled={!isNew} pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input aria-label="Policy priority" type="number" min="0" aria-required="true" aria-invalid={Boolean(priorityError)} value={priorityText} onChange={(event) => { setPriorityText(event.target.value); if (priorityError) setPriorityError(""); }}/>{priorityError && <small className="field-error" role="alert">{priorityError}</small>}</label></div>
     <div className="form-row two"><fieldset><legend>Source zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.source_zones?.includes(zone) ?? false} onChange={() => toggleZone("source_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset><fieldset><legend>Destination zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.destination_zones?.includes(zone) ?? false} onChange={() => toggleZone("destination_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset></div>
-    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input aria-label="Services" aria-invalid={Boolean(serviceError)} value={servicesText} onChange={(event) => { setServicesText(event.target.value); if (serviceError) setServiceError(""); }} placeholder="tcp:80, tcp:443"/>{serviceError && <small className="field-error" role="alert">{serviceError}</small>}</label><label>Applications <small>M3+; phải để trống để tương thích M2</small><input aria-label="Applications" value={applicationsText} onChange={(event) => setApplicationsText(event.target.value)} placeholder="Không khả dụng trong M2"/></label></div>
-    <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>SESSION</option></select><small>M2 chỉ hỗ trợ SESSION scope.</small></label><label>Security profile <small>M3+; phải để trống trong M2</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label></div>
+    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input aria-label="Services" aria-invalid={Boolean(serviceError)} value={servicesText} onChange={(event) => { setServicesText(event.target.value); if (serviceError) setServiceError(""); }} placeholder="tcp:80, tcp:443"/>{serviceError && <small className="field-error" role="alert">{serviceError}</small>}</label><label>Applications <small>M3 whitelist: HTTP, TLS, DNS, SSH. Restriction áp dụng bất đồng bộ sau L3 ALLOW; UNKNOWN fail-open.</small><input aria-label="Applications" aria-invalid={Boolean(applicationError)} value={applicationsText} onChange={(event) => { setApplicationsText(event.target.value); if (applicationError) setApplicationError(""); }} placeholder="HTTP, TLS"/>{applicationError && <small className="field-error" role="alert">{applicationError}</small>}</label></div>
+    <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>SESSION</option></select><small>M2/M3 connectivity dùng SESSION scope.</small></label><label>Security profile <small>Chọn IDS để quan sát; IPS để inline drop/app restriction.</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profileOptions.map((profile) => <option key={profile.id} value={profile.id}>{profile.id}{profile.mode ? ` (${profile.mode})` : ""}</option>)}</select></label></div>
     <div className="form-row"><label>Minimum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
   </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
+}
+
+export function InspectionProfileEditor({ value, capabilities, busy, onClose, onSave }: { value: SecurityProfile; capabilities?: InspectionCapabilities | null; busy: boolean; onClose: () => void; onSave: (profile: SecurityProfile) => Promise<void> }) {
+  const [draft, setDraft] = useState<SecurityProfile>(() => ({ ...value, inspection: value.inspection ? { ...value.inspection } : { mode: "IDS", fail_mode: "OPEN", ruleset_id: capabilities?.rulesets[0] ?? "m3-builtin-v1" } }));
+  const isNew = !value.id;
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (busy || !draft.inspection) return;
+    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), ids_ips_enabled: true, dpi_enabled: false, dns_security_enabled: false, url_filtering_enabled: false, threat_intel_enabled: false, behavior_enabled: false, ml_detection_enabled: false, inspection_required: false, inspection_failure_action: "ALLOW", inspection: { ...draft.inspection, fail_mode: "OPEN" } });
+  }
+  return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">M3 INSPECTION PROFILE</span><h2>{isNew ? "Thêm profile" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body"><div className="form-row"><label>ID<input required disabled={!isNew} value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })}/></label><label>Tên<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>Mode<select value={draft.inspection?.mode ?? "IDS"} onChange={(event) => setDraft({ ...draft, inspection: { ...draft.inspection!, mode: event.target.value } })}>{(capabilities?.modes ?? ["IDS", "IPS"]).map((mode) => <option key={mode}>{mode}</option>)}</select></label></div><div className="form-row two"><label>Fail mode<input readOnly value="OPEN"/><small>M3 chỉ hỗ trợ fail-open; sensor lỗi không được biến thành CLEAN.</small></label><label>Ruleset<select value={draft.inspection?.ruleset_id ?? ""} onChange={(event) => setDraft({ ...draft, inspection: { ...draft.inspection!, ruleset_id: event.target.value } })}>{(capabilities?.rulesets ?? ["m3-builtin-v1"]).map((ruleset) => <option key={ruleset}>{ruleset}</option>)}</select></label></div><p className="muted">IDS dùng NFLOG và chỉ báo alert. IPS dùng NFQUEUE packet verdict. TLS decryption, WAF, ML và risk engine chưa được bật bởi profile này.</p></div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
 }
 
 function NetworkPage({ config, onNavigate }: { config: ConfigExport | null; onNavigate: (page: Page) => void }) {

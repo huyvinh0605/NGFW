@@ -36,16 +36,31 @@ func parseM1ServiceSelector(value string) (policyServiceSelector, error) {
 // restart with a legacy running configuration that contains a redundant rule.
 // Management and commit paths use it before accepting a new Candidate.
 func UnreachablePolicyErrors(policies []domain.SecurityPolicy) []string {
+	return unreachablePolicyErrors(nil, policies)
+}
+
+// M3UnreachablePolicyErrors applies first-match L3 semantics before any
+// application restriction. Thus two rules with identical L3 selectors are
+// still shadowed even when their allowed application lists differ.
+func M3UnreachablePolicyErrors(c domain.Config) []string {
+	return unreachablePolicyErrors(&c, c.Policies)
+}
+
+func UnreachablePolicyErrorsForConfig(c domain.Config) []string {
+	return M3UnreachablePolicyErrors(c)
+}
+
+func unreachablePolicyErrors(c *domain.Config, policies []domain.SecurityPolicy) []string {
 	ordered := append([]domain.SecurityPolicy(nil), policies...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Priority < ordered[j].Priority })
 	var errs []string
 	for laterIndex, later := range ordered {
-		if !isL3L4FirstMatchPolicy(later) {
+		if !isL3L4FirstMatchPolicyForConfig(c, later) {
 			continue
 		}
 		for earlierIndex := 0; earlierIndex < laterIndex; earlierIndex++ {
 			earlier := ordered[earlierIndex]
-			if earlier.Priority >= later.Priority || !isL3L4FirstMatchPolicy(earlier) {
+			if earlier.Priority >= later.Priority || !isL3L4FirstMatchPolicyForConfig(c, earlier) {
 				continue
 			}
 			if policyMatchCovers(earlier, later) {
@@ -55,6 +70,35 @@ func UnreachablePolicyErrors(policies []domain.SecurityPolicy) []string {
 		}
 	}
 	return errs
+}
+
+func isL3L4FirstMatchPolicyForConfig(c *domain.Config, policy domain.SecurityPolicy) bool {
+	if c == nil {
+		return isL3L4FirstMatchPolicy(policy)
+	}
+	if !policy.Enabled {
+		return false
+	}
+	if policy.Scope != "" && !strings.EqualFold(strings.TrimSpace(policy.Scope), "SESSION") {
+		return false
+	}
+	switch policy.Action {
+	case domain.DecisionAllow, domain.DecisionDrop, domain.DecisionReject:
+	default:
+		return false
+	}
+	if policy.MinimumRisk != nil || policy.MaximumRisk != nil {
+		return false
+	}
+	// M3 application fields restrict an already selected ALLOW; they do not
+	// create a second first-match L7 policy.
+	if len(policy.Applications) > 0 && policy.Action != domain.DecisionAllow {
+		return false
+	}
+	if policy.ApplicationMatchMode != "" && !strings.EqualFold(policy.ApplicationMatchMode, "RESTRICT_L3_ALLOW") {
+		return false
+	}
+	return true
 }
 
 func isL3L4FirstMatchPolicy(policy domain.SecurityPolicy) bool {

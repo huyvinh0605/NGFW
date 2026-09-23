@@ -17,6 +17,14 @@ func TestRuntimeEventRingIsBoundedAndReportsGap(t *testing.T) {
 	}
 }
 
+func TestRuntimeEventRingHasPerBootStreamIdentity(t *testing.T) {
+	first := NewRuntimeEventRing(2)
+	second := NewRuntimeEventRing(2)
+	if first.StreamID() == "" || second.StreamID() == "" || first.StreamID() == second.StreamID() {
+		t.Fatalf("runtime event stream identities are not distinct: %q %q", first.StreamID(), second.StreamID())
+	}
+}
+
 func TestRuntimeEventRingClassifiesLifecycleAndPolicyEvents(t *testing.T) {
 	ring := NewRuntimeEventRing(4)
 	lifecycle := ring.Publish(domain.RuntimeEvent{Kind: domain.EventSessionCreated, SessionID: "s1"})

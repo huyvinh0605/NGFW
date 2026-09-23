@@ -1,0 +1,1 @@
+{"timestamp":"2026-09-23T02:15:03Z","flow_id":11,"tx_id":2,"event_type":"http","src_ip":"192.168.10.20","src_port":51000,"dest_ip":"10.20.0.10","dest_port":80,"proto":"TCP","app_proto":"http","http":{"hostname":"dmz.example.test","url":"/health?secret=removed","http_method":"GET"}}

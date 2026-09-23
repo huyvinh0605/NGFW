@@ -31,8 +31,9 @@ test("effective policy comparison ignores identity, priority and selector order"
 test("candidate commit readiness requires the current validated revision", () => {
   const running = { max_sessions: 1 } as never;
   const candidate = { max_sessions: 2 } as never;
-  const base = { running, candidate, version: { version: 1, author: "", timestamp: "", comment: "", checksum: "" }, candidate_valid: true } as never;
+  const base = { running, candidate, version: { version: 1, author: "", timestamp: "", comment: "", checksum: "" }, candidate_valid: true, candidate_validation_state: "VALID" } as never;
   assert.equal(canCommit(base), true);
   assert.equal(canCommit({ ...base, candidate_validation_state: "STALE" }), false);
   assert.equal(canCommit({ ...base, candidate_validation_state: "VALID" }), true);
+  assert.equal(canCommit({ ...base, candidate_validation_state: undefined }), false);
 });

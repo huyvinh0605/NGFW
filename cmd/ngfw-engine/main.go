@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +20,10 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 	"github.com/kltngfw/ngfw/internal/engine"
 	"github.com/kltngfw/ngfw/internal/engineipc"
+	"github.com/kltngfw/ngfw/internal/flow"
+	"github.com/kltngfw/ngfw/internal/inspection"
+	"github.com/kltngfw/ngfw/internal/inspection/eve"
+	sensorpkg "github.com/kltngfw/ngfw/internal/inspection/sensor"
 	"github.com/kltngfw/ngfw/internal/session"
 )
 
@@ -62,7 +68,7 @@ func main() {
 	if epochErr != nil {
 		logger.Error("kernel cache epoch unavailable; M2 will run in safe no-cache mode", "error", epochErr)
 	}
-	applyM2 := func(applyContext context.Context, desired domain.Config) error {
+	compileOptions := func(desired domain.Config) dataplane.M2CompileOptions {
 		zoneSlots := makeZoneSlots(desired)
 		epoch := uint16(0)
 		if epochAllocator != nil {
@@ -73,11 +79,33 @@ func main() {
 				epoch = allocated
 			}
 		}
-		options := dataplane.M2CompileOptions{Epoch: epoch, ZoneSlots: zoneSlots, CacheEnabled: epoch > 0 && len(zoneSlots) > 0 && len(zoneSlots) <= dataplane.MaxZoneSlots}
-		return controller.ApplyM2(applyContext, desired, options)
+		return dataplane.M2CompileOptions{Epoch: epoch, ZoneSlots: zoneSlots, CacheEnabled: epoch > 0 && len(zoneSlots) > 0 && len(zoneSlots) <= dataplane.MaxZoneSlots}
+	}
+	validateInspectionArtifacts := func(desired domain.Config) error {
+		if !domain.UsesM3(desired) {
+			return nil
+		}
+		manifestPath, managedRoot := inspectionManifestPaths()
+		_, validateErr := sensorpkg.ValidateActivationArtifacts(
+			manifestPath,
+			managedRoot,
+			requestedInspectionModes(desired),
+			map[string]struct{}{config.BuiltinM3RulesetID: {}},
+		)
+		return validateErr
+	}
+	applyDataplane := func(applyContext context.Context, desired domain.Config, targetGeneration uint64) error {
+		options := compileOptions(desired)
+		return controller.ApplyRuntimePrepared(applyContext, desired, options, targetGeneration)
 	}
 	startupContext, cancelStartup := context.WithTimeout(ctx, 60*time.Second)
-	if err := applyM2(startupContext, m.Running()); err != nil {
+	startupGeneration := m.Version().Version
+	if err := validateInspectionArtifacts(m.Running()); err != nil {
+		cancelStartup()
+		logger.Error("running M3 configuration references unavailable or modified inspection artifacts", "error", err)
+		os.Exit(1)
+	}
+	if err := applyDataplane(startupContext, m.Running(), startupGeneration); err != nil {
 		cancelStartup()
 		logger.Error("startup dataplane reconciliation failed", "error", err)
 		os.Exit(1)
@@ -88,7 +116,8 @@ func main() {
 		logger.Warn("conntrack accounting/events/timestamps unavailable; session metadata may be partial", "error", err)
 	}
 
-	program, programErr := connectivity.CompileM2(m.Running(), m.Version().Version)
+	generation := m.Version().Version
+	program, programErr := connectivity.CompileForCapabilities(m.Running(), generation, connectivity.Capabilities{Inspection: true})
 	if programErr != nil {
 		logger.Error("M2 connectivity program failed", "error", programErr)
 		os.Exit(1)
@@ -120,9 +149,145 @@ func main() {
 			logger.Error("conntrack resync failed; forwarding remains active with degraded session tracking", "error", err)
 		}
 	}
-	service := engine.NewRuntimeServiceAdapter(runtimeEngine, m, func(applyContext context.Context, desired domain.Config) error {
-		return applyM2(applyContext, desired)
-	})
+	if domain.UsesM3(m.Running()) || recoveringActivation {
+		if err := nftables.ClearInspectionRuntimeState(ctx); err != nil {
+			logger.Warn("could not clear stale M3 guards/leases", "error", err)
+		}
+	}
+	var inspectionMu sync.Mutex
+	var leaseCancel context.CancelFunc
+	var leaseDone chan struct{}
+	var activeInspectionLimits domain.InspectionLimits
+	var activeInspectionModes uint8
+	var inspectionStatusMu sync.RWMutex
+	var activeIPSRuntime *engine.InspectionRuntime
+	var activeIPSLease *dataplane.IPSLeaseManager
+	var ipsRequested bool
+	configureInspection := func(value domain.Config) error {
+		inspectionMu.Lock()
+		defer inspectionMu.Unlock()
+		targetIPS := runningUsesIPS(value)
+		inspectionStatusMu.Lock()
+		ipsRequested = targetIPS
+		activeIPSRuntime = nil
+		activeIPSLease = nil
+		inspectionStatusMu.Unlock()
+		if leaseCancel != nil {
+			leaseCancel()
+			leaseCancel = nil
+			if leaseDone != nil {
+				select {
+				case <-leaseDone:
+				case <-time.After(3 * time.Second):
+					return errors.New("timed out stopping previous IPS lease manager")
+				}
+			}
+			leaseDone = nil
+		}
+		current := runtimeEngine.InspectionRuntime()
+		if domain.UsesM3(value) || current != nil {
+			leaseCtx, cancelLeaseStop := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = dataplane.StopIPSLease(leaseCtx, nftables)
+			cancelLeaseStop()
+		}
+		if !domain.UsesM3(value) {
+			if current != nil {
+				current.Stop()
+				runtimeEngine.SetInspectionRuntime(nil)
+			}
+			return nil
+		}
+		limits := domain.EffectiveInspectionConfig(value).Limits
+		requestedModes := requestedInspectionModes(value)
+		modeMask := inspectionModeMask(requestedModes)
+		if current != nil && (limits != activeInspectionLimits || modeMask != activeInspectionModes) {
+			current.Stop()
+			runtimeEngine.SetInspectionRuntime(nil)
+			current = nil
+		}
+		if current == nil {
+			inspectionSources := loadInspectionSources(logger, stateDir, limits, value)
+			current = engine.NewInspectionRuntimeWithScope(runtimeEngine, limits, inspectionSources, flow.Scope{NetworkNamespace: os.Getenv("NGFW_NETWORK_NAMESPACE")})
+			current.SetExecutor(dataplane.NewInspectionGuardManager(nftables, 10000))
+			runtimeEngine.SetInspectionRuntime(current)
+			if err := current.Start(ctx); err != nil {
+				logger.Warn("M3 inspection runtime degraded", "error", err)
+			}
+			for _, active := range runtimeEngine.Store.List() {
+				current.OnSessionChanged(active)
+			}
+			activeInspectionLimits = limits
+			activeInspectionModes = modeMask
+		}
+		if targetIPS {
+			var leaseCtx context.Context
+			leaseCtx, leaseCancel = context.WithCancel(ctx)
+			leaseDone = make(chan struct{})
+			lease := dataplane.NewIPSLeaseManager(nftables)
+			inspectionStatusMu.Lock()
+			activeIPSRuntime = current
+			activeIPSLease = lease
+			inspectionStatusMu.Unlock()
+			go func(active *engine.InspectionRuntime, done chan struct{}) {
+				defer close(done)
+				lease.Run(leaseCtx, func() bool {
+					return active.CaptureLive("ips", time.Now().UTC())
+				})
+			}(current, leaseDone)
+		}
+		return nil
+	}
+	startupInspectionErr := configureInspection(m.Running())
+	if startupInspectionErr != nil {
+		logger.Warn("inspection runtime configuration failed", "error", startupInspectionErr)
+	} else {
+		finalizeContext, finalizeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if finalizeErr := controller.FinalizeActivation(finalizeContext, m.Running(), m.Version().Version); finalizeErr != nil {
+			logger.Warn("startup activation journal remains pending", "error", finalizeErr)
+		}
+		finalizeCancel()
+	}
+	defer func() {
+		inspectionMu.Lock()
+		if leaseCancel != nil {
+			leaseCancel()
+			if leaseDone != nil {
+				select {
+				case <-leaseDone:
+				case <-time.After(3 * time.Second):
+					logger.Warn("timed out stopping IPS lease manager")
+				}
+			}
+		}
+		if current := runtimeEngine.InspectionRuntime(); current != nil {
+			current.Stop()
+		}
+		inspectionMu.Unlock()
+	}()
+	service := engine.NewRuntimeServiceAdapter(runtimeEngine, m, nil)
+	service.ApplyGeneration = applyDataplane
+	service.FinalizeActivation = controller.FinalizeActivation
+	service.BeforeActivate = func(_ context.Context, desired domain.Config, _ uint64) error {
+		return validateInspectionArtifacts(desired)
+	}
+	service.InspectionQueueStatus = func() domain.InspectionQueueStatus {
+		inspectionStatusMu.RLock()
+		requested, active, lease := ipsRequested, activeIPSRuntime, activeIPSLease
+		inspectionStatusMu.RUnlock()
+		result := domain.InspectionQueueStatus{Requested: requested}
+		if active != nil {
+			result.Configured = active.HasSource("ips")
+			result.CaptureLive = active.CaptureLive("ips", time.Now().UTC())
+		}
+		if lease != nil {
+			state := lease.State()
+			result.LeaseActive = state.Active
+			result.LastRenewal = state.LastRenewal
+			result.LastError = state.LastError
+		}
+		return result
+	}
+	service.AfterActivate = func(_ context.Context, value domain.Config, _ uint64) error { return configureInspection(value) }
 	ipcServer := engineipc.NewRuntimeServer(engineipc.DefaultSocketPath(stateDir), service)
 	ipcErrors := make(chan error, 1)
 	go func() { ipcErrors <- ipcServer.Serve(ctx) }()
@@ -147,6 +312,83 @@ func main() {
 			runtimeEngine.SweepBlocks(now)
 		}
 	}
+}
+
+func inspectionModeMask(modes map[domain.InspectionMode]bool) uint8 {
+	var result uint8
+	if modes[domain.InspectionModeIDS] {
+		result |= 1
+	}
+	if modes[domain.InspectionModeIPS] {
+		result |= 2
+	}
+	return result
+}
+
+func runningUsesIPS(value domain.Config) bool {
+	return requestedInspectionModes(value)[domain.InspectionModeIPS]
+}
+
+func requestedInspectionModes(value domain.Config) map[domain.InspectionMode]bool {
+	result := map[domain.InspectionMode]bool{}
+	if !domain.UsesM3(value) {
+		return result
+	}
+	profiles := make(map[string]domain.InspectionMode, len(value.Profiles))
+	for _, profile := range value.Profiles {
+		if profile.Inspection != nil {
+			profiles[profile.ID] = profile.Inspection.Mode
+		}
+	}
+	for _, policy := range value.Policies {
+		if !policy.Enabled {
+			continue
+		}
+		if mode := profiles[policy.SecurityProfileID]; mode == domain.InspectionModeIDS || mode == domain.InspectionModeIPS {
+			result[mode] = true
+		}
+	}
+	return result
+}
+
+func loadInspectionSources(logger *slog.Logger, stateDir string, limits domain.InspectionLimits, running domain.Config) []inspection.EventSource {
+	manifestPath, root := inspectionManifestPaths()
+	manifest, err := sensorpkg.LoadManifest(manifestPath, root)
+	if err != nil {
+		logger.Warn("inspection manifest unavailable; M3 metadata is degraded", "path", manifestPath, "error", err)
+		return nil
+	}
+	sources := make([]inspection.EventSource, 0, len(manifest.Sensors))
+	requestedModes := requestedInspectionModes(running)
+	for _, definition := range manifest.Sensors {
+		if !requestedModes[definition.Mode] {
+			continue
+		}
+		position := inspection.SourcePosition{SensorID: definition.ID, SensorEpoch: definition.Epoch, SensorConfigHash: definition.ConfigHash, RulesetID: definition.RulesetID, Mode: definition.Mode}
+		checkpoint := eve.FileCheckpointStore{Path: filepath.Join(stateDir, "inspection-"+definition.ID+".checkpoint.json")}
+		reader := eve.NewReader(definition.EVEPath, position, checkpoint)
+		reader.LineBytes = limits.WithDefaults().EVELineBytes
+		reader.NormalizedBytes = limits.WithDefaults().NormalizedEventBytes
+		reader.EpochPath = definition.EpochPath
+		reader.DiscoverySIDs = map[uint32]struct{}{}
+		for _, sid := range definition.DiscoverySIDs {
+			reader.DiscoverySIDs[sid] = struct{}{}
+		}
+		sources = append(sources, sensorpkg.NewMonitoredSource(definition.ID, reader, definition.ControlSocket))
+	}
+	return sources
+}
+
+func inspectionManifestPaths() (string, string) {
+	manifestPath := os.Getenv("NGFW_INSPECTION_MANIFEST")
+	if manifestPath == "" {
+		manifestPath = "/etc/ngfw/inspection/manifest.json"
+	}
+	root := os.Getenv("NGFW_INSPECTION_ROOT")
+	if root == "" {
+		root = "/var/lib/ngfw/inspection"
+	}
+	return manifestPath, root
 }
 
 func makeZoneSlots(config domain.Config) map[string]uint8 {

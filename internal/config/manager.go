@@ -313,6 +313,7 @@ func (Validator) Validate(c domain.Config) []string {
 	if c.MaxSessions <= 0 || c.MaxEventsQueue <= 0 || c.MaxHTTPBodyInspection <= 0 || c.MaxHTTPHeaderSize <= 0 || c.MaxURLLength <= 0 || c.MaxMLInputLength <= 0 || c.MLTimeoutMillis <= 0 || c.RequestInspectionTimeoutMillis <= 0 {
 		errs = append(errs, "resource limits must be positive")
 	}
+	errs = append(errs, ValidateInspection(c)...)
 	return errs
 }
 
@@ -451,6 +452,18 @@ func (m *Manager) Running() domain.Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return cloneConfig(m.running)
+}
+
+// RollbackTarget returns a detached copy of the previous known-good running
+// configuration.  It is read-only preparation data; publishing still goes
+// through RollbackWithGeneration under the activation lock.
+func (m *Manager) RollbackTarget() (domain.Config, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.previous == nil {
+		return domain.Config{}, false
+	}
+	return cloneConfig(*m.previous), true
 }
 func (m *Manager) Candidate() domain.Config {
 	m.mu.RLock()
@@ -612,7 +625,7 @@ func (m *Manager) Commit(author, comment string, expected uint64) (domain.Config
 	if len(validationErrors) > 0 {
 		return current, fmt.Errorf("invalid candidate: %s", strings.Join(validationErrors, "; "))
 	}
-	semanticErrors := append(ExactDuplicatePolicyErrors(candidate.Policies), UnreachablePolicyErrors(candidate.Policies)...)
+	semanticErrors := append(ExactDuplicatePolicyErrorsForConfig(candidate), UnreachablePolicyErrorsForConfig(candidate)...)
 	if len(semanticErrors) > 0 {
 		return current, fmt.Errorf("invalid candidate: %s", strings.Join(semanticErrors, "; "))
 	}
@@ -641,6 +654,18 @@ func (m *Manager) Commit(author, comment string, expected uint64) (domain.Config
 // version. If persistence fails after activation, apply must be able to restore
 // the old snapshot; this keeps the kernel and management view aligned.
 func (m *Manager) CommitWithApply(ctx context.Context, author, comment string, expected uint64, apply func(context.Context, domain.Config) error) (domain.ConfigVersion, error) {
+	var applyGeneration func(context.Context, domain.Config, uint64) error
+	if apply != nil {
+		applyGeneration = func(ctx context.Context, value domain.Config, _ uint64) error { return apply(ctx, value) }
+	}
+	return m.CommitWithGeneration(ctx, author, comment, expected, applyGeneration)
+}
+
+// CommitWithGeneration is the privileged activation contract used by M3.  It
+// gives the dataplane the exact target generation and, if persistence fails,
+// restores the previous kernel snapshot with the previous generation.  This
+// avoids pairing an old Config with the target conntrack epoch/generation.
+func (m *Manager) CommitWithGeneration(ctx context.Context, author, comment string, expected uint64, apply func(context.Context, domain.Config, uint64) error) (domain.ConfigVersion, error) {
 	m.activationMu.Lock()
 	defer m.activationMu.Unlock()
 	m.mu.RLock()
@@ -655,7 +680,7 @@ func (m *Manager) CommitWithApply(ctx context.Context, author, comment string, e
 	if len(validationErrors) > 0 {
 		return current, fmt.Errorf("invalid candidate: %s", strings.Join(validationErrors, "; "))
 	}
-	semanticErrors := append(ExactDuplicatePolicyErrors(candidate.Policies), UnreachablePolicyErrors(candidate.Policies)...)
+	semanticErrors := append(ExactDuplicatePolicyErrorsForConfig(candidate), UnreachablePolicyErrorsForConfig(candidate)...)
 	if len(semanticErrors) > 0 {
 		return current, fmt.Errorf("invalid candidate: %s", strings.Join(semanticErrors, "; "))
 	}
@@ -668,14 +693,14 @@ func (m *Manager) CommitWithApply(ctx context.Context, author, comment string, e
 		return current, err
 	}
 	if apply != nil {
-		if err := apply(ctx, candidate); err != nil {
-			return current, restoreApplied(apply, old, fmt.Errorf("activation failed: %w", err))
+		if err := apply(ctx, candidate, next); err != nil {
+			return current, restoreAppliedGeneration(apply, old, current.Version, fmt.Errorf("activation failed: %w", err))
 		}
 	}
 	v := domain.ConfigVersion{Version: next, Author: author, Timestamp: time.Now().UTC(), Comment: comment, Checksum: sum}
 	if err := m.persist(candidate, v, &old); err != nil {
 		if apply != nil {
-			return current, restoreApplied(apply, old, fmt.Errorf("persist running configuration: %w", err))
+			return current, restoreAppliedGeneration(apply, old, current.Version, fmt.Errorf("persist running configuration: %w", err))
 		}
 		return current, err
 	}
@@ -696,12 +721,31 @@ func (m *Manager) Rollback(author, comment string) (domain.ConfigVersion, error)
 // RollbackWithApply restores the previous configuration through the same
 // privileged activation path used by commit before publishing running.json.
 func (m *Manager) RollbackWithApply(ctx context.Context, author, comment string, apply func(context.Context, domain.Config) error) (domain.ConfigVersion, error) {
+	var applyGeneration func(context.Context, domain.Config, uint64) error
+	if apply != nil {
+		applyGeneration = func(ctx context.Context, value domain.Config, _ uint64) error { return apply(ctx, value) }
+	}
+	return m.RollbackWithGeneration(ctx, author, comment, applyGeneration)
+}
+
+// RollbackWithGeneration restores the previous known-good config as a new
+// monotonic generation while retaining the exact old generation for any
+// compensation required before the running snapshot is published.
+func (m *Manager) RollbackWithGeneration(ctx context.Context, author, comment string, apply func(context.Context, domain.Config, uint64) error) (domain.ConfigVersion, error) {
 	m.activationMu.Lock()
 	defer m.activationMu.Unlock()
-	return m.rollbackLocked(ctx, author, comment, apply)
+	return m.rollbackGenerationLocked(ctx, author, comment, apply)
 }
 
 func (m *Manager) rollbackLocked(ctx context.Context, author, comment string, apply func(context.Context, domain.Config) error) (domain.ConfigVersion, error) {
+	var applyGeneration func(context.Context, domain.Config, uint64) error
+	if apply != nil {
+		applyGeneration = func(ctx context.Context, value domain.Config, _ uint64) error { return apply(ctx, value) }
+	}
+	return m.rollbackGenerationLocked(ctx, author, comment, applyGeneration)
+}
+
+func (m *Manager) rollbackGenerationLocked(ctx context.Context, author, comment string, apply func(context.Context, domain.Config, uint64) error) (domain.ConfigVersion, error) {
 	m.mu.RLock()
 	if m.previous == nil {
 		current := m.version
@@ -723,13 +767,13 @@ func (m *Manager) rollbackLocked(ctx context.Context, author, comment string, ap
 	}
 	v.Checksum = sum
 	if apply != nil {
-		if err := apply(ctx, target); err != nil {
-			return current, restoreApplied(apply, old, fmt.Errorf("rollback activation failed: %w", err))
+		if err := apply(ctx, target, next); err != nil {
+			return current, restoreAppliedGeneration(apply, old, current.Version, fmt.Errorf("rollback activation failed: %w", err))
 		}
 	}
 	if err := m.persist(target, v, &old); err != nil {
 		if apply != nil {
-			return current, restoreApplied(apply, old, fmt.Errorf("persist rollback configuration: %w", err))
+			return current, restoreAppliedGeneration(apply, old, current.Version, fmt.Errorf("persist rollback configuration: %w", err))
 		}
 		return current, err
 	}
@@ -751,6 +795,18 @@ func restoreApplied(apply func(context.Context, domain.Config) error, previous d
 	defer cancel()
 	if err := apply(rollbackContext, previous); err != nil {
 		return errors.Join(cause, fmt.Errorf("restore previous applied configuration: %w", err))
+	}
+	return cause
+}
+
+func restoreAppliedGeneration(apply func(context.Context, domain.Config, uint64) error, previous domain.Config, generation uint64, cause error) error {
+	if apply == nil {
+		return cause
+	}
+	rollbackContext, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := apply(rollbackContext, previous, generation); err != nil {
+		return errors.Join(cause, fmt.Errorf("restore previous applied configuration generation %d: %w", generation, err))
 	}
 	return cause
 }
@@ -872,6 +928,16 @@ func cloneConfig(value domain.Config) domain.Config {
 		}
 	}
 	clone.Profiles = append([]domain.SecurityProfile(nil), value.Profiles...)
+	if value.Inspection != nil {
+		inspection := *value.Inspection
+		clone.Inspection = &inspection
+	}
+	for index := range clone.Profiles {
+		if value.Profiles[index].Inspection != nil {
+			inspection := *value.Profiles[index].Inspection
+			clone.Profiles[index].Inspection = &inspection
+		}
+	}
 	return clone
 }
 func (m *Manager) Export() map[string]any {

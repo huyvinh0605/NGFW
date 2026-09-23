@@ -1,0 +1,4 @@
+alert tcp any any -> any any (msg:"NGFW metadata HTTP"; app-layer-protocol:http; flow:established; flowbits:isnotset,ngfw.app.http; flowbits:set,ngfw.app.http; sid:9900001; rev:1;)
+alert tcp any any -> any any (msg:"NGFW metadata TLS"; app-layer-protocol:tls; flow:established; flowbits:isnotset,ngfw.app.tls; flowbits:set,ngfw.app.tls; sid:9900002; rev:1;)
+alert udp any any -> any any (msg:"NGFW metadata DNS"; app-layer-protocol:dns; flowbits:isnotset,ngfw.app.dns; flowbits:set,ngfw.app.dns; sid:9900003; rev:1;)
+alert tcp any any -> any any (msg:"NGFW metadata SSH"; app-layer-protocol:ssh; flow:established; flowbits:isnotset,ngfw.app.ssh; flowbits:set,ngfw.app.ssh; sid:9900004; rev:1;)

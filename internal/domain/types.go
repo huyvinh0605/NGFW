@@ -34,6 +34,7 @@ func (d Decision) Valid() bool {
 type Severity string
 
 const (
+	SeverityUnknown  Severity = "UNKNOWN"
 	SeverityInfo     Severity = "INFO"
 	SeverityLow      Severity = "LOW"
 	SeverityMedium   Severity = "MEDIUM"
@@ -319,6 +320,7 @@ type SecurityPolicy struct {
 	DestinationAddresses []string `json:"destination_addresses,omitempty"`
 	Services             []string `json:"services,omitempty"`
 	Applications         []string `json:"applications,omitempty"`
+	ApplicationMatchMode string   `json:"application_match_mode,omitempty"`
 	SecurityProfileID    string   `json:"security_profile_id,omitempty"`
 	MinimumRisk          *int     `json:"minimum_risk,omitempty"`
 	MaximumRisk          *int     `json:"maximum_risk,omitempty"`
@@ -330,20 +332,21 @@ type SecurityPolicy struct {
 }
 
 type SecurityProfile struct {
-	ID                      string   `json:"id"`
-	Name                    string   `json:"name"`
-	IDSIPSEnabled           bool     `json:"ids_ips_enabled"`
-	DPIEnabled              bool     `json:"dpi_enabled"`
-	DNSSecurityEnabled      bool     `json:"dns_security_enabled"`
-	URLFilteringEnabled     bool     `json:"url_filtering_enabled"`
-	ThreatIntelEnabled      bool     `json:"threat_intel_enabled"`
-	BehaviorEnabled         bool     `json:"behavior_enabled"`
-	MLDetectionEnabled      bool     `json:"ml_detection_enabled"`
-	TLSMode                 TLSMode  `json:"tls_mode"`
-	MinimumBlockRisk        int      `json:"minimum_block_risk"`
-	LoggingLevel            string   `json:"logging_level"`
-	InspectionRequired      bool     `json:"inspection_required"`
-	InspectionFailureAction Decision `json:"inspection_failure_action"`
+	ID                      string             `json:"id"`
+	Name                    string             `json:"name"`
+	IDSIPSEnabled           bool               `json:"ids_ips_enabled"`
+	DPIEnabled              bool               `json:"dpi_enabled"`
+	DNSSecurityEnabled      bool               `json:"dns_security_enabled"`
+	URLFilteringEnabled     bool               `json:"url_filtering_enabled"`
+	ThreatIntelEnabled      bool               `json:"threat_intel_enabled"`
+	BehaviorEnabled         bool               `json:"behavior_enabled"`
+	MLDetectionEnabled      bool               `json:"ml_detection_enabled"`
+	TLSMode                 TLSMode            `json:"tls_mode"`
+	MinimumBlockRisk        int                `json:"minimum_block_risk"`
+	LoggingLevel            string             `json:"logging_level"`
+	InspectionRequired      bool               `json:"inspection_required"`
+	InspectionFailureAction Decision           `json:"inspection_failure_action"`
+	Inspection              *InspectionProfile `json:"inspection,omitempty"`
 }
 
 type TemporaryBlock struct {
@@ -397,6 +400,7 @@ type Config struct {
 	MLTimeoutMillis                int               `json:"ml_timeout_millis"`
 	RequestInspectionTimeoutMillis int               `json:"request_inspection_timeout_millis"`
 	DefaultDeny                    bool              `json:"default_deny"`
+	Inspection                     *InspectionConfig `json:"inspection,omitempty"`
 }
 
 type ConfigVersion struct {

@@ -1,0 +1,1 @@
+{"timestamp":"2026-09-23T02:15:06Z","flow_id":14,"event_type":"ssh","src_ip":"192.168.10.50","src_port":55000,"dest_ip":"10.20.0.20","dest_port":22,"proto":"TCP","app_proto":"ssh","ssh":{"client":"SSH-2.0-OpenSSH_9.6","server":"SSH-2.0-OpenSSH_9.3"}}

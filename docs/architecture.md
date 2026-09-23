@@ -1,5 +1,15 @@
 # Runtime boundaries
 
+> The sections below describe the original M1 activation boundary. Current M2
+> running-configuration ownership is in `ngfw-engine` (`RuntimeServiceAdapter`),
+> as recorded in [ADR 0002](adr/0002-m2-runtime-and-cache.md).
+> The API owns candidate editing and proxies activation through engine IPC.
+> Planned M3 contracts and coding tasks are in
+> [M3_IMPLEMENTATION_PLAN.md](M3_IMPLEMENTATION_PLAN.md) and
+> [m3/CODING_TASKS.md](m3/CODING_TASKS.md). M3 is specified, not yet implemented
+> or accepted; the planned inspection paths must not be read as current runtime
+> capabilities.
+
 For M1, `ngfw-engine` is the only process that may invoke `ip` or `nft` and the
 only process that needs `CAP_NET_ADMIN`. The Linux adapters and transaction
 coordinator live in `internal/dataplane`. `ngfw-api` runs as the unprivileged

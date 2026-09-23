@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, isExpectedWebSocketProxyTeardown, reconnectDelay, type SocketLike } from "../src/wsLifecycle.ts";
+import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, isExpectedWebSocketProxyTeardown, reconnectDelay, requiresEventCatchup, type SocketLike } from "../src/wsLifecycle.ts";
 
 test("delays the initial dial long enough for the StrictMode effect probe", () => {
   assert.ok(INITIAL_WEBSOCKET_DIAL_DELAY_MS >= 100, "a zero-delay dial can race StrictMode cleanup and create a proxy EPIPE");
@@ -48,4 +48,11 @@ test("uses bounded exponential delay for reconnects", () => {
   assert.equal(reconnectDelay(1), 2000);
   assert.equal(reconnectDelay(5), 30000);
   assert.equal(reconnectDelay(50), 30000);
+});
+
+test("requests REST catch-up for an event gap or engine stream reset", () => {
+  assert.equal(requiresEventCatchup("gap"), true);
+  assert.equal(requiresEventCatchup("stream_reset"), true);
+  assert.equal(requiresEventCatchup("event"), false);
+  assert.equal(requiresEventCatchup(undefined), false);
 });

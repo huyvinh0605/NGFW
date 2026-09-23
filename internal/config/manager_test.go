@@ -113,6 +113,39 @@ func TestCommitApplyFailureRestoresOldConfigAndDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestCommitWithGenerationNeverRestoresOldConfigUsingTargetGeneration(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := manager.Candidate()
+	candidate.Zones = []domain.Zone{{ID: "lan"}}
+	if errs := manager.SetCandidate(candidate); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	type call struct {
+		generation uint64
+		zones      int
+	}
+	var calls []call
+	_, err = manager.CommitWithGeneration(context.Background(), "test", "failure", 0, func(_ context.Context, value domain.Config, generation uint64) error {
+		calls = append(calls, call{generation: generation, zones: len(value.Zones)})
+		if len(value.Zones) != 0 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected activation failure")
+	}
+	if len(calls) != 2 || calls[0].generation != 1 || calls[0].zones != 1 || calls[1].generation != 0 || calls[1].zones != 0 {
+		t.Fatalf("unexpected target/restore generations: %#v", calls)
+	}
+	if manager.Version().Version != 0 {
+		t.Fatal("failed activation advanced running generation")
+	}
+}
+
 func TestCandidateValidationIsBoundToCandidateChecksum(t *testing.T) {
 	m, err := NewManager(t.TempDir(), Defaults())
 	if err != nil {

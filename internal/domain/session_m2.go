@@ -76,41 +76,42 @@ type SessionQuality struct {
 // domain.Session remains as a compatibility DTO for M1 callers and is derived
 // from this object at the API boundary.
 type RuntimeSession struct {
-	SessionID           string            `json:"session_id"`
-	Identity            ConntrackIdentity `json:"identity"`
-	OriginalTuple       Tuple             `json:"original_tuple"`
-	ReplyTuple          *Tuple            `json:"reply_tuple,omitempty"`
-	TranslatedTuple     *Tuple            `json:"translated_tuple,omitempty"`
-	NAT                 NATInfo           `json:"nat"`
-	IPFamily            IPFamily          `json:"ip_family"`
-	Protocol            uint8             `json:"protocol"`
-	SourceZone          string            `json:"source_zone,omitempty"`
-	DestinationZone     string            `json:"destination_zone,omitempty"`
-	State               SessionState      `json:"state"`
-	CreatedAt           time.Time         `json:"created_at"`
-	LastSeen            time.Time         `json:"last_seen"`
-	LastObservedAt      time.Time         `json:"last_observed_at"`
-	ExpiresAt           *time.Time        `json:"expires_at,omitempty"`
-	ClosedAt            *time.Time        `json:"closed_at,omitempty"`
-	PacketsOriginal     uint64            `json:"packets_original"`
-	BytesOriginal       uint64            `json:"bytes_original"`
-	PacketsReply        uint64            `json:"packets_reply"`
-	BytesReply          uint64            `json:"bytes_reply"`
-	MatchedPolicyID     string            `json:"matched_policy_id,omitempty"`
-	PolicyGeneration    uint64            `json:"policy_generation"`
-	Decision            Decision          `json:"decision,omitempty"`
-	DecisionGeneration  uint64            `json:"decision_generation"`
-	DecisionReason      string            `json:"decision_reason,omitempty"`
-	CacheState          CacheState        `json:"cache_state"`
-	InvalidatedAt       *time.Time        `json:"invalidated_at,omitempty"`
-	InvalidationReason  string            `json:"invalidation_reason,omitempty"`
-	KernelEpoch         uint16            `json:"kernel_epoch,omitempty"`
-	KernelMark          uint32            `json:"kernel_mark,omitempty"`
-	KernelCacheVerified bool              `json:"kernel_cache_verified"`
-	EffectiveDecision   Decision          `json:"effective_decision,omitempty"`
-	Revoked             bool              `json:"revoked"`
-	Revision            uint64            `json:"revision"`
-	Quality             SessionQuality    `json:"quality"`
+	SessionID           string             `json:"session_id"`
+	Identity            ConntrackIdentity  `json:"identity"`
+	OriginalTuple       Tuple              `json:"original_tuple"`
+	ReplyTuple          *Tuple             `json:"reply_tuple,omitempty"`
+	TranslatedTuple     *Tuple             `json:"translated_tuple,omitempty"`
+	NAT                 NATInfo            `json:"nat"`
+	IPFamily            IPFamily           `json:"ip_family"`
+	Protocol            uint8              `json:"protocol"`
+	SourceZone          string             `json:"source_zone,omitempty"`
+	DestinationZone     string             `json:"destination_zone,omitempty"`
+	State               SessionState       `json:"state"`
+	CreatedAt           time.Time          `json:"created_at"`
+	LastSeen            time.Time          `json:"last_seen"`
+	LastObservedAt      time.Time          `json:"last_observed_at"`
+	ExpiresAt           *time.Time         `json:"expires_at,omitempty"`
+	ClosedAt            *time.Time         `json:"closed_at,omitempty"`
+	PacketsOriginal     uint64             `json:"packets_original"`
+	BytesOriginal       uint64             `json:"bytes_original"`
+	PacketsReply        uint64             `json:"packets_reply"`
+	BytesReply          uint64             `json:"bytes_reply"`
+	MatchedPolicyID     string             `json:"matched_policy_id,omitempty"`
+	PolicyGeneration    uint64             `json:"policy_generation"`
+	Decision            Decision           `json:"decision,omitempty"`
+	DecisionGeneration  uint64             `json:"decision_generation"`
+	DecisionReason      string             `json:"decision_reason,omitempty"`
+	CacheState          CacheState         `json:"cache_state"`
+	InvalidatedAt       *time.Time         `json:"invalidated_at,omitempty"`
+	InvalidationReason  string             `json:"invalidation_reason,omitempty"`
+	KernelEpoch         uint16             `json:"kernel_epoch,omitempty"`
+	KernelMark          uint32             `json:"kernel_mark,omitempty"`
+	KernelCacheVerified bool               `json:"kernel_cache_verified"`
+	EffectiveDecision   Decision           `json:"effective_decision,omitempty"`
+	Revoked             bool               `json:"revoked"`
+	Revision            uint64             `json:"revision"`
+	Quality             SessionQuality     `json:"quality"`
+	Inspection          *SessionInspection `json:"inspection,omitempty"`
 }
 
 func (s RuntimeSession) Clone() RuntimeSession {
@@ -137,5 +138,9 @@ func (s RuntimeSession) Clone() RuntimeSession {
 		c.NAT.TranslatedTuple = &v
 	}
 	c.Quality.MissingFields = append([]string(nil), s.Quality.MissingFields...)
+	if s.Inspection != nil {
+		v := s.Inspection.Clone()
+		c.Inspection = &v
+	}
 	return c
 }

@@ -39,6 +39,7 @@ function configExport(candidateChanged = true): ConfigExport {
       checksum: "abc123",
     },
     candidate_valid: true,
+    candidate_validation_state: "VALID",
   };
 }
 
@@ -203,6 +204,20 @@ test("Commit stays disabled when a previously valid Candidate becomes stale", as
   const commit = button(view, "Commit");
   assert.equal(commit.props.disabled, true);
   assert.match(commit.props.title, /chưa được Validate/);
+  view.unmount();
+});
+
+test("Commit fails closed when the API does not expose validation state", async () => {
+  const config = configExport(true);
+  delete config.candidate_validation_state;
+  let view!: ReactTestRenderer;
+  await act(async () => {
+    view = create(<ConfigStatusBar config={config} dirty={true} comment="" onComment={() => undefined} onValidate={async () => undefined} onCommit={async () => undefined} onRollback={async () => undefined}/>);
+  });
+  const commit = button(view, "Commit");
+  assert.equal(commit.props.disabled, true);
+  assert.match(commit.props.title, /chưa được Validate/);
+  assert.match(textOf(view.root.findByProps({ className: "config-state" })), /chưa chạy/);
   view.unmount();
 });
 
