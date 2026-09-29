@@ -31,6 +31,9 @@ func (r *RuntimeEventRing) Publish(ev domain.RuntimeEvent) domain.RuntimeEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.next++
+	if ev.SchemaVersion == 0 {
+		ev.SchemaVersion = 1
+	}
 	ev.Sequence = r.next
 	if ev.Class == "" {
 		if ev.Kind == domain.EventDecisionChanged || ev.Kind == domain.EventSessionInvalidated {

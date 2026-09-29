@@ -314,6 +314,7 @@ func (Validator) Validate(c domain.Config) []string {
 		errs = append(errs, "resource limits must be positive")
 	}
 	errs = append(errs, ValidateInspection(c)...)
+	errs = append(errs, ValidateRequestGate(c)...)
 	return errs
 }
 
@@ -932,10 +933,24 @@ func cloneConfig(value domain.Config) domain.Config {
 		inspection := *value.Inspection
 		clone.Inspection = &inspection
 	}
+	if value.RequestGate != nil {
+		gate := *value.RequestGate
+		clone.RequestGate = &gate
+	}
+	clone.TLSExclusions = append([]domain.TLSExclusion(nil), value.TLSExclusions...)
+	for index := range clone.TLSExclusions {
+		clone.TLSExclusions[index].Domains = append([]string(nil), value.TLSExclusions[index].Domains...)
+		clone.TLSExclusions[index].DestinationCIDRs = append([]string(nil), value.TLSExclusions[index].DestinationCIDRs...)
+		clone.TLSExclusions[index].Ports = append([]int(nil), value.TLSExclusions[index].Ports...)
+	}
 	for index := range clone.Profiles {
 		if value.Profiles[index].Inspection != nil {
 			inspection := *value.Profiles[index].Inspection
 			clone.Profiles[index].Inspection = &inspection
+		}
+		if value.Profiles[index].RequestGate != nil {
+			gate := *value.Profiles[index].RequestGate
+			clone.Profiles[index].RequestGate = &gate
 		}
 	}
 	return clone

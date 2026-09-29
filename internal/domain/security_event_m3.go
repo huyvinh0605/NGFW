@@ -46,16 +46,18 @@ type ThreatEvent struct {
 }
 
 type SecurityQuery struct {
-	SessionID     string           `json:"session_id,omitempty"`
-	SensorID      string           `json:"sensor_id,omitempty"`
-	Mode          InspectionMode   `json:"mode,omitempty"`
-	Severity      Severity         `json:"severity,omitempty"`
-	Verdict       LatestVerdict    `json:"verdict,omitempty"`
-	Correlation   CorrelationState `json:"correlation_state,omitempty"`
-	Application   string           `json:"application,omitempty"`
-	AfterSequence uint64           `json:"after_sequence,omitempty"`
-	StreamID      string           `json:"stream_id,omitempty"`
-	Limit         int              `json:"limit,omitempty"`
+	SessionID      string           `json:"session_id,omitempty"`
+	SensorID       string           `json:"sensor_id,omitempty"`
+	Mode           InspectionMode   `json:"mode,omitempty"`
+	Severity       Severity         `json:"severity,omitempty"`
+	Verdict        LatestVerdict    `json:"verdict,omitempty"`
+	Correlation    CorrelationState `json:"correlation_state,omitempty"`
+	Application    string           `json:"application,omitempty"`
+	SignatureID    uint32           `json:"signature_id,omitempty"`
+	HasSignatureID bool             `json:"has_signature_id,omitempty"`
+	AfterSequence  uint64           `json:"after_sequence,omitempty"`
+	StreamID       string           `json:"stream_id,omitempty"`
+	Limit          int              `json:"limit,omitempty"`
 }
 
 type SecurityEventPage struct {

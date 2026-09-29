@@ -113,14 +113,14 @@ if [[ $skip_apt -eq 0 ]]; then
     tcpdump
   )
   if [[ $with_inspection -eq 1 ]]; then
-    packages+=(suricata)
+    packages+=(python3 suricata)
   fi
   apt-get install -y --no-install-recommends "${packages[@]}"
 fi
 
 required_commands=(go ip nft sysctl systemctl curl jq tcpdump conntrack openssl)
 if [[ $with_inspection -eq 1 ]]; then
-  required_commands+=(suricata sha256sum)
+  required_commands+=(python3 suricata sha256sum)
 fi
 for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null 2>&1 || die "required command is missing: $command_name"
@@ -197,6 +197,7 @@ if [[ $with_inspection -eq 1 ]]; then
   install -o root -g root -m 0755 scripts/rotate-suricata-logs.sh /usr/local/libexec/ngfw/rotate-suricata-logs.sh
   install -o root -g root -m 0755 tests/integration/m3/probe-capabilities.sh /usr/local/lib/ngfw/probe-m3-capabilities.sh
   install -o root -g root -m 0755 tests/integration/m3/replay-suricata.sh /usr/local/lib/ngfw/replay-m3-suricata.sh
+  install -o root -g root -m 0755 tests/integration/m3/marker_http.py /usr/local/lib/ngfw/m3-marker-http.py
   install -o root -g root -m 0644 tests/fixtures/m3/marker-http.pcap tests/fixtures/m3/SHA256SUMS /usr/local/share/ngfw/inspection/
   if [[ -f scripts/verify-m3-linux.sh ]]; then
     install -o root -g root -m 0755 scripts/verify-m3-linux.sh /usr/local/lib/ngfw/verify-m3-linux.sh

@@ -126,6 +126,19 @@ export type SecurityEvent = {
   enforcement?: EnforcementResult;
 };
 
+export type SecurityEventPage = {
+  items: SecurityEvent[];
+  stream_id: string;
+  gap_from?: number;
+  next_sequence: number;
+  next_cursor: string;
+  has_more: boolean;
+  oldest_sequence: number;
+  gap: boolean;
+  reset_required: boolean;
+  evicted_count: number;
+};
+
 export type ApplicationIdentity = {
   name: string;
   raw_name?: string;
@@ -173,7 +186,15 @@ export type InspectionHealth = {
   generation: number;
   sources: Record<string, {
     sensor_id: string;
+    sensor_enabled: boolean;
+    sensor_epoch?: string;
+    config_hash?: string;
+    ruleset_id?: string;
     mode?: string;
+    reader_active: boolean;
+    process_reachable: boolean;
+    capture_live: boolean;
+    heartbeat_age_ms?: number;
     state: string;
     reason?: string;
     last_read?: string;
@@ -194,6 +215,11 @@ export type InspectionCapabilities = {
   rulesets: string[];
   application_match_modes: string[];
   limitations: string[];
+  runtime_ipc_version: number;
+  build_version: string;
+  semantics: string;
+  ruleset_hashes: Record<string, string>;
+  limits: Record<string, unknown>;
 };
 
 export type TemporaryBlock = {

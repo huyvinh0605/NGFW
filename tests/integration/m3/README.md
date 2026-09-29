@@ -1,9 +1,8 @@
-# M3 Linux integration runbook — đặc tả cho test runner
+# M3 Linux integration runbook
 
-Đây là runbook chuẩn bị cho agent viết M3. Chưa có kết quả traffic test.
-`scripts/verify-m3-linux.sh` và `probe-capabilities.sh` là sản phẩm T29/T01,
-**chưa có ở thời điểm tài liệu này được tạo**. Không chạy command của các script
-chưa implement rồi báo sản phẩm lỗi cài đặt.
+Các runner và fixture M3 đã có trong source tree. Tài liệu này mô tả cách chạy
+chúng trên Ubuntu 24.04; chưa có kết quả traffic test từ VM trong repository.
+Preflight, unit test hay offline PCAP replay không thay thế packet-path acceptance.
 
 Đọc [master](../../../docs/M3_IMPLEMENTATION_PLAN.md),
 [task list](../../../docs/m3/CODING_TASKS.md),
@@ -32,7 +31,7 @@ nft/ip/conntrack/curl/jq/tcpdump/Suricata, test client/server, token quản tr�
 environment. Metadata traffic phải qua gateway thực, không curl từ chính
 appliance rồi suy ra forwarding được inspect.
 
-## 2. CLI bắt buộc mà agent phải implement
+## 2. CLI và hợp đồng topology
 
 ```bash
 # Read-only probe; no traffic/config mutations.
@@ -48,10 +47,47 @@ sudo --preserve-env=NGFW_API_TOKEN bash scripts/verify-m3-linux.sh \
   --scenario M3-11 --evidence-dir /tmp/ngfw-m3-run
 ```
 
-Arguments: --preflight (default), --traffic, --lab, --topology, --scenario
-(`all` chỉ khi explicit), --evidence-dir, --api-base, --help.
+Arguments: `--preflight` (default), `--traffic`, `--lab`, `--topology`,
+`--scenario M3-00..M3-37`, `--evidence-dir`, `--api-base`, `--help`.
 No topology/client ability → exit2 NOT_RUN; never emit success for merely
 checking `systemctl is-active`.
+
+Topology là JSON do người vận hành lab kiểm soát. Bốn key `wan`, `lan`, `dmz`,
+`mgmt` mô tả node/mạng. Mỗi scenario ngoài M3-00/01 phải có ít nhất một `steps`
+và một `assertions` độc lập:
+
+```json
+{
+  "wan": {"host": "wan-test"},
+  "lan": {"host": "lan-test"},
+  "dmz": {"host": "dmz-test"},
+  "mgmt": {"host": "192.168.100.1"},
+  "scenarios": {
+    "M3-29": {
+      "steps": [
+        {"name": "fetch-page", "argv": ["curl", "--fail", "{API_BASE}/api/v1/security/events?limit=2", "-o", "{EVIDENCE_DIR}/page.json"], "timeout_seconds": 10}
+      ],
+      "assertions": [
+        {"name": "bounded-page", "argv": ["jq", "-e", ".success == true and (.data.items | length) <= 2 and (.data.next_cursor | type == \"string\")", "{EVIDENCE_DIR}/page.json"]}
+      ]
+    }
+  },
+  "restore": [
+    {"name": "restore-lab", "argv": ["/opt/ngfw-lab/restore.sh"], "timeout_seconds": 120}
+  ]
+}
+```
+
+`argv` được chạy trực tiếp qua `timeout`, không qua `eval`. Các placeholder hợp lệ
+là `{EVIDENCE_DIR}`, `{API_BASE}` và `{SCENARIO}`. `expected_exit` mặc định là 0;
+`timeout_seconds` mặc định 30 và bị giới hạn. Runner ghi argv/exit code vào
+`commands.jsonl`, thu before/after evidence và luôn thử các lệnh `restore` khi đã
+bắt đầu traffic. Không đặt token trực tiếp trong topology; truyền
+`NGFW_API_TOKEN` qua environment.
+
+Fixture marker có tại `tests/integration/m3/marker_http.py` (hoặc bản cài đặt
+`/usr/local/lib/ngfw/m3-marker-http.py`): dùng `serve`, `send`, rồi `count` theo
+nonce để chứng minh chính xác marker có hoặc không đến server.
 
 Runner doesn't log auth header; jq extracts success/error envelope explicitly.
 `curl --fail-with-body` hoặc equivalent, request timeout; don't count HTTP200
@@ -59,7 +95,7 @@ health as proof policy activation. Response body phải được assert.
 
 ## 3. Before/after collection helpers
 
-Runner phải implement `collect_evidence(stage,scenario)` để ghi:
+Runner tự thu các bằng chứng sau cho từng giai đoạn:
 
 ```bash
 uname -a

@@ -1,6 +1,8 @@
 # Agent triển khai M3 bắt đầu tại đây
 
-Trạng thái: bộ đặc tả đã viết; **chưa có implementation M3**.
+Trạng thái: source M3 đã **IMPLEMENTED**, các gate Go cục bộ đã **UNIT TESTED**
+và **INTEGRATION TESTED**; kiểm thử packet path trên Ubuntu vẫn
+**ACCEPTANCE PENDING**. Xem [sổ trạng thái triển khai](IMPLEMENTATION_STATUS.md).
 
 ## Đọc theo thứ tự
 

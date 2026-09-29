@@ -33,6 +33,7 @@ type Program struct {
 	DefaultDeny                 bool
 	Generation                  uint64
 	Selections                  map[string]InspectionSelection
+	requestGates                map[string]RequestGatePlan
 	InspectionIncludeManagement bool
 	ManagementZones             map[string]struct{}
 	zonePrefixes                map[string][]netip.Prefix

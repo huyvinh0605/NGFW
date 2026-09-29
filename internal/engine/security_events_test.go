@@ -128,3 +128,19 @@ func TestSecurityEventStoreCursorAdvancesAcrossFilteredRecordsAndResetsOnNewStre
 		t.Fatalf("new engine stream was not reset safely: %#v", reset)
 	}
 }
+
+func TestSecurityEventStoreFiltersSignatureID(t *testing.T) {
+	store := NewSecurityEventStore(8, 1<<20)
+	for _, event := range []domain.ThreatEvent{
+		{EventID: "one", SignatureID: 1001, Severity: domain.SeverityInfo},
+		{EventID: "two", SignatureID: 2002, Severity: domain.SeverityCritical},
+	} {
+		if _, _, err := store.Add(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := store.Query(domain.SecurityQuery{SignatureID: 2002, HasSignatureID: true, Limit: 10})
+	if len(page.Items) != 1 || page.Items[0].EventID != "two" {
+		t.Fatalf("signature filter page=%#v", page)
+	}
+}

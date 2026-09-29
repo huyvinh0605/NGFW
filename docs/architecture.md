@@ -1,14 +1,9 @@
 # Runtime boundaries
 
-> The sections below describe the original M1 activation boundary. Current M2
-> running-configuration ownership is in `ngfw-engine` (`RuntimeServiceAdapter`),
-> as recorded in [ADR 0002](adr/0002-m2-runtime-and-cache.md).
-> The API owns candidate editing and proxies activation through engine IPC.
-> Planned M3 contracts and coding tasks are in
-> [M3_IMPLEMENTATION_PLAN.md](M3_IMPLEMENTATION_PLAN.md) and
-> [m3/CODING_TASKS.md](m3/CODING_TASKS.md). M3 is specified, not yet implemented
-> or accepted; the planned inspection paths must not be read as current runtime
-> capabilities.
+> M2 running-configuration/session ownership is in `ngfw-engine`, as recorded
+> in [ADR 0002](adr/0002-m2-runtime-and-cache.md). M3 inspection is implemented
+> according to [ADR 0003](adr/0003-m3-inspection-pipeline.md); Ubuntu capability
+> and traffic acceptance remain pending until the matrix has live evidence.
 
 For M1, `ngfw-engine` is the only process that may invoke `ip` or `nft` and the
 only process that needs `CAP_NET_ADMIN`. The Linux adapters and transaction
@@ -56,5 +51,56 @@ include configured zone interfaces, networks, protocol and ports.
    in `tests/integration/m1/README.md` while keeping raw kernel and packet
    evidence.
 
-UI, ML, DPI, IDS, TLS interception and M2 session features are outside the M1
-bring-up and acceptance scope.
+UI, M2 sessions and M3 inspection have their own gates and do not change the M1
+bring-up criteria. ML, DPI/nDPI and TLS interception remain outside M3.
+
+## M3 inspection runtime
+
+The engine creates EVE readers and sensor monitors only when the effective
+Running configuration uses an M3 inspection profile. The readers preserve
+Suricata flow IDs as strings, bind every record to a sensor epoch and source
+position, checkpoint complete lines, and survive rename/copytruncate within
+bounded catch-up limits. A new sensor epoch invalidates old Suricata flow
+bindings without deleting retained security history.
+
+```text
+NFLOG/NFQUEUE -> Suricata EVE readers -> bounded observation queue
+              -> NAT/session resolver -> inspection reducer
+              -> SessionInspection + SecurityEventStore
+              -> optional application-guard intent -> nftables readback
+```
+
+The resolver queries the existing M2 `RuntimeStore`; M3 has no second session
+database. It checks complete original/reply/translated tuples, conntrack zone and
+identity, observation time, closed-session bounds and ambiguity. An event is
+stored before correlation. Late correlation updates the same event revision and
+publishes `SecurityEventUpdated`, while a replayed physical record does not
+increment the session threat count again.
+
+The nftables inspection table has early selection and later enforcement chains.
+IDS-selected traffic logs to NFLOG group 100. IPS-selected traffic queues to
+NFQUEUE 100 only while the short-lived `ips_ready` lease is present. Queue
+bypass plus Suricata fail-open preserve the base M1/M2 connectivity result when
+inspection is unavailable. Hard block/revocation chains remain later and win
+over cached allow and an IPS allow verdict. Flowtable offload is disabled.
+
+Application restriction uses `RESTRICT_L3_ALLOW`: the first L3/L4 ALLOW policy
+selects a profile and optional whitelist. Strong App-ID outside that list in IPS
+mode installs a timeout guard scoped to conntrack zone, ID and full original
+IPv4 TCP/UDP tuple. The coordinator verifies identity before and after kernel IO,
+serializes guard mutation with activation, reads back the exact set element and
+updates the session only after success. Removing application guards never clears
+M2 manual/source blocks.
+
+Activation persists an `ActivationSnapshot` with exact compiler options,
+inspection plan and hashes for both target and previous state. Immutable sensor
+artifacts are validated before apply. Network/nft apply, runtime generation,
+sensor lifecycle and journal finalization are staged; compensation applies the
+previous snapshot. A failure after generation publication restores through a
+newer generation so generation numbers never move backward.
+
+Runtime IPC protocol v3 exposes sessions with inspection context, bounded
+security-event cursor pages, inspection health/capabilities and typed runtime
+notifications. WebSocket messages carry stream ID, sequence, schema version,
+kind and event class. A gap or engine restart is explicit so clients perform a
+REST catch-up instead of silently treating missing history as complete.

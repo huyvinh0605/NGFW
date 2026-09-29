@@ -122,10 +122,18 @@ func parseSecurityQuery(r *http.Request) (domain.SecurityQuery, error) {
 	if raw := values.Get("severity"); raw != "" {
 		result.Severity = domain.Severity(strings.ToUpper(raw))
 		switch result.Severity {
-		case domain.SeverityUnknown, domain.SeverityLow, domain.SeverityMedium, domain.SeverityHigh:
+		case domain.SeverityUnknown, domain.SeverityInfo, domain.SeverityLow, domain.SeverityMedium, domain.SeverityHigh, domain.SeverityCritical:
 		default:
 			return result, &filterError{"invalid severity"}
 		}
+	}
+	if raw := values.Get("signature_id"); raw != "" {
+		value, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil || value == 0 {
+			return result, &filterError{"signature_id must be an integer between 1 and 4294967295"}
+		}
+		result.SignatureID = uint32(value)
+		result.HasSignatureID = true
 	}
 	if raw := values.Get("verdict"); raw != "" {
 		result.Verdict = domain.LatestVerdict(strings.ToUpper(raw))

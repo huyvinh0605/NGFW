@@ -332,21 +332,22 @@ type SecurityPolicy struct {
 }
 
 type SecurityProfile struct {
-	ID                      string             `json:"id"`
-	Name                    string             `json:"name"`
-	IDSIPSEnabled           bool               `json:"ids_ips_enabled"`
-	DPIEnabled              bool               `json:"dpi_enabled"`
-	DNSSecurityEnabled      bool               `json:"dns_security_enabled"`
-	URLFilteringEnabled     bool               `json:"url_filtering_enabled"`
-	ThreatIntelEnabled      bool               `json:"threat_intel_enabled"`
-	BehaviorEnabled         bool               `json:"behavior_enabled"`
-	MLDetectionEnabled      bool               `json:"ml_detection_enabled"`
-	TLSMode                 TLSMode            `json:"tls_mode"`
-	MinimumBlockRisk        int                `json:"minimum_block_risk"`
-	LoggingLevel            string             `json:"logging_level"`
-	InspectionRequired      bool               `json:"inspection_required"`
-	InspectionFailureAction Decision           `json:"inspection_failure_action"`
-	Inspection              *InspectionProfile `json:"inspection,omitempty"`
+	ID                      string              `json:"id"`
+	Name                    string              `json:"name"`
+	IDSIPSEnabled           bool                `json:"ids_ips_enabled"`
+	DPIEnabled              bool                `json:"dpi_enabled"`
+	DNSSecurityEnabled      bool                `json:"dns_security_enabled"`
+	URLFilteringEnabled     bool                `json:"url_filtering_enabled"`
+	ThreatIntelEnabled      bool                `json:"threat_intel_enabled"`
+	BehaviorEnabled         bool                `json:"behavior_enabled"`
+	MLDetectionEnabled      bool                `json:"ml_detection_enabled"`
+	TLSMode                 TLSMode             `json:"tls_mode"`
+	MinimumBlockRisk        int                 `json:"minimum_block_risk"`
+	LoggingLevel            string              `json:"logging_level"`
+	InspectionRequired      bool                `json:"inspection_required"`
+	InspectionFailureAction Decision            `json:"inspection_failure_action"`
+	Inspection              *InspectionProfile  `json:"inspection,omitempty"`
+	RequestGate             *RequestGateProfile `json:"request_gate,omitempty"`
 }
 
 type TemporaryBlock struct {
@@ -385,22 +386,24 @@ type AuditEntry struct {
 }
 
 type Config struct {
-	Interfaces                     []Interface       `json:"interfaces"`
-	Zones                          []Zone            `json:"zones"`
-	Routes                         []Route           `json:"routes"`
-	NATRules                       []NATRule         `json:"nat_rules"`
-	Policies                       []SecurityPolicy  `json:"policies"`
-	Profiles                       []SecurityProfile `json:"security_profiles"`
-	MaxSessions                    int               `json:"max_sessions"`
-	MaxEventsQueue                 int               `json:"max_events_queue"`
-	MaxHTTPBodyInspection          int               `json:"max_http_body_inspection"`
-	MaxHTTPHeaderSize              int               `json:"max_http_header_size"`
-	MaxURLLength                   int               `json:"max_url_length"`
-	MaxMLInputLength               int               `json:"max_ml_input_length"`
-	MLTimeoutMillis                int               `json:"ml_timeout_millis"`
-	RequestInspectionTimeoutMillis int               `json:"request_inspection_timeout_millis"`
-	DefaultDeny                    bool              `json:"default_deny"`
-	Inspection                     *InspectionConfig `json:"inspection,omitempty"`
+	Interfaces                     []Interface        `json:"interfaces"`
+	Zones                          []Zone             `json:"zones"`
+	Routes                         []Route            `json:"routes"`
+	NATRules                       []NATRule          `json:"nat_rules"`
+	Policies                       []SecurityPolicy   `json:"policies"`
+	Profiles                       []SecurityProfile  `json:"security_profiles"`
+	MaxSessions                    int                `json:"max_sessions"`
+	MaxEventsQueue                 int                `json:"max_events_queue"`
+	MaxHTTPBodyInspection          int                `json:"max_http_body_inspection"`
+	MaxHTTPHeaderSize              int                `json:"max_http_header_size"`
+	MaxURLLength                   int                `json:"max_url_length"`
+	MaxMLInputLength               int                `json:"max_ml_input_length"`
+	MLTimeoutMillis                int                `json:"ml_timeout_millis"`
+	RequestInspectionTimeoutMillis int                `json:"request_inspection_timeout_millis"`
+	DefaultDeny                    bool               `json:"default_deny"`
+	Inspection                     *InspectionConfig  `json:"inspection,omitempty"`
+	RequestGate                    *RequestGateConfig `json:"request_gate,omitempty"`
+	TLSExclusions                  []TLSExclusion     `json:"tls_exclusions,omitempty"`
 }
 
 type ConfigVersion struct {

@@ -2,6 +2,8 @@ package domain
 
 import "time"
 
+const RuntimeIPCProtocolVersion uint16 = 3
+
 type SessionQuery struct {
 	SourceIP        string       `json:"source_ip,omitempty"`
 	DestinationIP   string       `json:"destination_ip,omitempty"`

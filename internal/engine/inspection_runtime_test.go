@@ -113,6 +113,19 @@ func TestInspectionRuntimeCorrelatesIntoSoleM2SessionAndAppliesGuard(t *testing.
 	if len(page.Items) != 1 || page.Items[0].SessionID != current.SessionID || page.Items[0].CorrelationState != domain.CorrelationCorrelated {
 		t.Fatalf("security event was not correlated to the runtime session: %#v", page)
 	}
+	notifications, _, _ := runtime.Events.Read(0, 200)
+	alerts, updates := 0, 0
+	for _, notification := range notifications {
+		switch notification.Kind {
+		case domain.EventSecurityAlert:
+			alerts++
+		case domain.EventSecurityEventUpdated:
+			updates++
+		}
+	}
+	if alerts != 1 || updates != 1 {
+		t.Fatalf("physical alert/update notifications=%d/%d, events=%#v", alerts, updates, notifications)
+	}
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
 	if len(executor.intents) != 1 || executor.intents[0].Kind != domain.IntentInstallAppGuard {
@@ -150,4 +163,30 @@ func TestInspectionSessionCallbackDoesNotBlockConntrackDuringActivation(t *testi
 		t.Fatal("conntrack session callback blocked on the inspection activation gate")
 	}
 	coordinator.EndActivation()
+}
+
+func TestInspectionRuntimePublishesHealthOnlyOnLogicalChange(t *testing.T) {
+	runtime := NewRuntime(nil, connectivity.Program{}, 1, session.RuntimeLimits{MaxSessions: 4, MaxEventQueue: 16})
+	coordinator := NewInspectionRuntime(runtime, domain.DefaultInspectionLimits(), nil)
+	coordinator.mu.Lock()
+	coordinator.health["ips"] = inspection.SourceHealth{SensorID: "ips", SensorEnabled: true, Mode: domain.InspectionModeIPS, ReaderActive: true, ProcessReachable: true, CaptureLive: true, State: "HEALTHY", SensorEpoch: "epoch-a"}
+	coordinator.mu.Unlock()
+	now := time.Now().UTC()
+	coordinator.publishHealthChanges(now)
+	coordinator.publishHealthChanges(now.Add(time.Second))
+	items, _, _ := runtime.Events.Read(0, 20)
+	if len(items) != 1 || items[0].Kind != domain.EventInspectionHealthChanged {
+		t.Fatalf("unchanged health emitted duplicate events: %#v", items)
+	}
+	coordinator.mu.Lock()
+	changed := coordinator.health["ips"]
+	changed.CaptureLive = false
+	changed.State = "DEGRADED"
+	coordinator.health["ips"] = changed
+	coordinator.mu.Unlock()
+	coordinator.publishHealthChanges(now.Add(2 * time.Second))
+	items, _, _ = runtime.Events.Read(0, 20)
+	if len(items) != 2 || items[1].Kind != domain.EventInspectionHealthChanged {
+		t.Fatalf("health transition was not emitted: %#v", items)
+	}
 }

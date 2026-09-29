@@ -24,6 +24,7 @@ const (
 )
 
 type RuntimeEvent struct {
+	SchemaVersion      uint16            `json:"schema_version"`
 	Sequence           uint64            `json:"sequence"`
 	Kind               RuntimeEventKind  `json:"kind"`
 	Class              RuntimeEventClass `json:"event_class"`

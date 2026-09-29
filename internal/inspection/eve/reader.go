@@ -35,18 +35,32 @@ type Reader struct {
 	oversize  atomic.Uint64
 	queueDrop atomic.Uint64
 	readerGap atomic.Uint64
+	active    atomic.Bool
 }
 
 func NewReader(path string, source inspection.SourcePosition, checkpoint CheckpointStore) *Reader {
-	return &Reader{Path: path, Source: source, Files: OSFileSource{}, Checkpoints: checkpoint, LineBytes: MaxDefaultLineBytes, NormalizedBytes: MaxNormalizedBytes, PollInterval: 200 * time.Millisecond, health: inspection.SourceHealth{SensorID: source.SensorID, Mode: source.Mode, State: "STARTING"}}
+	return &Reader{Path: path, Source: source, Files: OSFileSource{}, Checkpoints: checkpoint, LineBytes: MaxDefaultLineBytes, NormalizedBytes: MaxNormalizedBytes, PollInterval: 200 * time.Millisecond, health: inspection.SourceHealth{SensorID: source.SensorID, SensorEnabled: true, SensorEpoch: source.SensorEpoch, ConfigHash: source.SensorConfigHash, RulesetID: source.RulesetID, Mode: source.Mode, State: "STARTING"}}
 }
 
 func (r *Reader) Snapshot() inspection.SourceHealth {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result := r.health
+	result.SensorEpoch = r.Source.SensorEpoch
+	result.ReaderActive = r.active.Load()
 	result.ReaderStats = map[string]uint64{"parsed": r.parsed.Load(), "invalid": r.invalid.Load(), "ignored": r.ignored.Load(), "oversize": r.oversize.Load(), "queue_dropped": r.queueDrop.Load(), "reader_gap": r.readerGap.Load()}
 	return result
+}
+func (r *Reader) sourcePosition() inspection.SourcePosition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.Source
+}
+func (r *Reader) setSensorEpoch(epoch string) {
+	r.mu.Lock()
+	r.Source.SensorEpoch = epoch
+	r.health.SensorEpoch = epoch
+	r.mu.Unlock()
 }
 func (r *Reader) setHealth(state, reason string, read *time.Time) {
 	r.mu.Lock()
@@ -59,6 +73,10 @@ func (r *Reader) setHealth(state, reason string, read *time.Time) {
 }
 
 func (r *Reader) Run(ctx context.Context, sink inspection.ObservationSink) error {
+	if !r.active.CompareAndSwap(false, true) {
+		return errors.New("EVE reader is already running")
+	}
+	defer r.active.Store(false)
 	if r.Files == nil {
 		r.Files = OSFileSource{}
 	}
@@ -96,7 +114,7 @@ func (r *Reader) Run(ctx context.Context, sink inspection.ObservationSink) error
 		}
 		if epoch, epochErr := readSensorEpoch(r.EpochPath); epochErr != nil {
 			r.setHealth("DEGRADED", "sensor epoch unavailable: "+epochErr.Error(), nil)
-		} else if epoch != "" && epoch != r.Source.SensorEpoch {
+		} else if epoch != "" && epoch != r.sourcePosition().SensorEpoch {
 			// Drain the renamed old file using its original epoch before changing
 			// event identity. The launcher rotates EVE before publishing a new
 			// epoch, so records from separate sensor processes never share IDs.
@@ -107,7 +125,7 @@ func (r *Reader) Run(ctx context.Context, sink inspection.ObservationSink) error
 				_ = current.Close()
 				current = nil
 			}
-			r.Source.SensorEpoch = epoch
+			r.setSensorEpoch(epoch)
 			checkpoint = Checkpoint{}
 			generation, offset = "", 0
 			r.setHealth("STARTING", "sensor epoch changed; resynchronizing EVE", nil)
@@ -156,7 +174,7 @@ func (r *Reader) Run(ctx context.Context, sink inspection.ObservationSink) error
 			}
 			generation = observedGeneration
 			offset = 0
-			if checkpoint.FileGeneration == generation && checkpoint.SensorEpoch == r.Source.SensorEpoch && checkpoint.Offset <= info.Size() {
+			if checkpoint.FileGeneration == generation && checkpoint.SensorEpoch == r.sourcePosition().SensorEpoch && checkpoint.Offset <= info.Size() {
 				offset = checkpoint.Offset
 			} else if r.StartAtEnd && checkpoint.FileGeneration == "" {
 				offset = info.Size()
@@ -186,7 +204,7 @@ func (r *Reader) consumeAvailable(current OpenedFile, generation string, offset 
 		}
 		*offset = end
 		progressed = true
-		position := r.Source
+		position := r.sourcePosition()
 		position.FileGeneration = generation
 		position.ByteStart = start
 		position.ByteEnd = end
@@ -221,7 +239,7 @@ func (r *Reader) consumeAvailable(current OpenedFile, generation string, offset 
 			}
 		}
 		if r.Checkpoints != nil {
-			if saveErr := r.Checkpoints.Save(Checkpoint{FileGeneration: generation, Offset: *offset, SensorEpoch: r.Source.SensorEpoch}); saveErr != nil {
+			if saveErr := r.Checkpoints.Save(Checkpoint{FileGeneration: generation, Offset: *offset, SensorEpoch: r.sourcePosition().SensorEpoch}); saveErr != nil {
 				r.setHealth("DEGRADED", "checkpoint save failed: "+saveErr.Error(), nil)
 			}
 		}

@@ -10,7 +10,10 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
-type Capabilities struct{ Inspection bool }
+type Capabilities struct {
+	Inspection  bool
+	RequestGate bool
+}
 
 type InspectionSelection struct {
 	PolicyID                  string                `json:"policy_id"`
@@ -23,6 +26,21 @@ type InspectionSelection struct {
 }
 
 func CompileForCapabilities(c domain.Config, generation uint64, caps Capabilities) (Program, error) {
+	if domain.UsesM4(c) {
+		if !caps.RequestGate {
+			return Program{}, fmt.Errorf("configuration requires M4 request-gate capability")
+		}
+		if domain.UsesM3(c) && !caps.Inspection {
+			return Program{}, fmt.Errorf("configuration requires M3 inspection capability")
+		}
+		return CompileM4(c, generation)
+	}
+	if hasReferencedGateProfile(c) {
+		if domain.UsesM3(c) && !caps.Inspection {
+			return Program{}, fmt.Errorf("configuration requires M3 inspection capability")
+		}
+		return CompileM4(c, generation) // globally OFF: retain L3 policy, omit gate
+	}
 	if !domain.UsesM3(c) {
 		return CompileM2(c, generation)
 	}
@@ -117,6 +135,22 @@ func (p Program) Clone() Program {
 	for key, value := range p.Selections {
 		value.AllowedApps = append([]string(nil), value.AllowedApps...)
 		c.Selections[key] = value
+	}
+	c.requestGates = make(map[string]RequestGatePlan, len(p.requestGates))
+	clonedExclusions := make(map[*compiledTLSExclusions]*compiledTLSExclusions)
+	for key, value := range p.requestGates {
+		if value.exclusions != nil {
+			copy, ok := clonedExclusions[value.exclusions]
+			if !ok {
+				copy = &compiledTLSExclusions{rules: make([]TLSExclusionRule, len(value.exclusions.rules))}
+				for i, rule := range value.exclusions.rules {
+					copy.rules[i] = rule.Clone()
+				}
+				clonedExclusions[value.exclusions] = copy
+			}
+			value.exclusions = copy
+		}
+		c.requestGates[key] = value.Clone()
 	}
 	c.ManagementZones = cloneSet(p.ManagementZones)
 	c.zonePrefixes = make(map[string][]netip.Prefix, len(p.zonePrefixes))

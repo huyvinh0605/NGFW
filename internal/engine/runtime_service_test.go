@@ -204,3 +204,20 @@ func TestRuntimeServiceHoldsInspectionGateAcrossApplyAndReleasesBeforeLifecycleH
 		t.Fatalf("activation phases were not exercised: apply=%v hook=%v", applyChecked, hookChecked)
 	}
 }
+
+func TestRuntimeServiceInspectionCapabilitiesDescribeImplementedContract(t *testing.T) {
+	service := NewRuntimeServiceAdapter(nil, nil, nil)
+	capabilities, err := service.InspectionCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.Supported || capabilities.RuntimeIPCVersion != domain.RuntimeIPCProtocolVersion {
+		t.Fatalf("capabilities=%#v", capabilities)
+	}
+	if capabilities.Semantics != config.ApplicationMatchRestrictL3Allow || capabilities.BuildVersion == "" {
+		t.Fatalf("missing semantic/build identity: %#v", capabilities)
+	}
+	if capabilities.Limits.ObservationQueueItems <= 0 || len(capabilities.Modes) != 2 || len(capabilities.Rulesets) == 0 {
+		t.Fatalf("missing limits/modes/rulesets: %#v", capabilities)
+	}
+}

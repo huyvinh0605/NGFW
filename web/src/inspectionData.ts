@@ -4,6 +4,7 @@ import type {
   InspectionCapabilities,
   InspectionHealth,
   SecurityEvent,
+  SecurityEventPage,
   SessionInspection,
 } from "./types";
 
@@ -102,7 +103,15 @@ export function normalizeInspectionHealth(value: unknown): InspectionHealth | nu
     }
     sources[key] = {
       sensor_id: text(source.sensor_id, key),
+      sensor_enabled: bool(source.sensor_enabled),
+      sensor_epoch: text(source.sensor_epoch) || undefined,
+      config_hash: text(source.config_hash) || undefined,
+      ruleset_id: text(source.ruleset_id) || undefined,
       mode: enumValue(source.mode, ["IDS", "IPS"], "") || undefined,
+      reader_active: bool(source.reader_active),
+      process_reachable: bool(source.process_reachable),
+      capture_live: bool(source.capture_live),
+      heartbeat_age_ms: Number.isFinite(number(source.heartbeat_age_ms, Number.NaN)) ? Math.max(0, number(source.heartbeat_age_ms)) : undefined,
       state: text(source.state, "UNKNOWN").toUpperCase(),
       reason: text(source.reason) || undefined,
       last_read: timestamp(source.last_read) || undefined,
@@ -147,6 +156,11 @@ export function normalizeInspectionCapabilities(value: unknown): InspectionCapab
     rulesets: strings(input.rulesets),
     application_match_modes: strings(input.application_match_modes),
     limitations: strings(input.limitations),
+    runtime_ipc_version: Math.max(0, number(input.runtime_ipc_version)),
+    build_version: text(input.build_version, "unavailable"),
+    semantics: text(input.semantics, "unavailable"),
+    ruleset_hashes: Object.fromEntries(Object.entries(record(input.ruleset_hashes) ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+    limits: record(input.limits) ?? {},
   };
 }
 
@@ -200,7 +214,22 @@ export function normalizeThreatEvent(value: unknown, index = 0): SecurityEvent |
 }
 
 export function normalizeThreatEventPage(value: unknown): SecurityEvent[] {
+  return normalizeThreatEventPageData(value).items;
+}
+
+export function normalizeThreatEventPageData(value: unknown): SecurityEventPage {
   const input = record(value);
   const items = Array.isArray(value) ? value : Array.isArray(input?.items) ? input.items : [];
-  return items.map((item, index) => normalizeThreatEvent(item, index)).filter((item): item is SecurityEvent => item !== null);
+  return {
+    items: items.map((item, index) => normalizeThreatEvent(item, index)).filter((item): item is SecurityEvent => item !== null),
+    stream_id: text(input?.stream_id),
+    gap_from: Number.isFinite(number(input?.gap_from, Number.NaN)) ? Math.max(0, number(input?.gap_from)) : undefined,
+    next_sequence: Math.max(0, number(input?.next_sequence)),
+    next_cursor: text(input?.next_cursor),
+    has_more: bool(input?.has_more),
+    oldest_sequence: Math.max(0, number(input?.oldest_sequence)),
+    gap: bool(input?.gap),
+    reset_required: bool(input?.reset_required),
+    evicted_count: Math.max(0, number(input?.evicted_count)),
+  };
 }

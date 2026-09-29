@@ -116,7 +116,12 @@ func (m *MonitoredSource) Snapshot() inspection.SourceHealth {
 	result := m.Health.HealthSnapshot()
 	if m.Source != nil {
 		reader := m.Source.Snapshot()
+		result.SensorEnabled = reader.SensorEnabled
+		result.SensorEpoch = reader.SensorEpoch
+		result.ConfigHash = reader.ConfigHash
+		result.RulesetID = reader.RulesetID
 		result.Mode = reader.Mode
+		result.ReaderActive = reader.ReaderActive
 		result.Counters = reader.Counters
 		result.ReaderStats = cloneStats(reader.ReaderStats)
 		if result.LastRead == nil {
@@ -127,6 +132,7 @@ func (m *MonitoredSource) Snapshot() inspection.SourceHealth {
 			result.Reason = reader.Reason
 		}
 	}
+	result.CaptureLive = m.Health.CaptureLive(time.Now().UTC())
 	return result
 }
 

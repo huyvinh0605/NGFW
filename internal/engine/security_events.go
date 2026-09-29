@@ -252,6 +252,7 @@ func matchesSecurityQuery(event domain.ThreatEvent, query domain.SecurityQuery) 
 		(query.Severity == "" || event.Severity == query.Severity) &&
 		(query.Verdict == "" || event.Verdict == query.Verdict) &&
 		(query.Correlation == "" || event.CorrelationState == query.Correlation) &&
+		(!query.HasSignatureID || event.SignatureID == query.SignatureID) &&
 		(query.Application == "" || strings.EqualFold(event.Application.Name, query.Application))
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -456,7 +457,15 @@ func (s *RuntimeServiceAdapter) InspectionHealth(context.Context) (domain.Inspec
 		health.Reason = "no configured inspection sensor source"
 	}
 	for id, value := range sources {
-		health.Sources[id] = domain.InspectionSourceStatus{SensorID: value.SensorID, Mode: value.Mode, State: value.State, Reason: value.Reason, LastRead: value.LastRead, LastHeartbeat: value.LastHeartbeat, Counters: sourceCounters(value.Counters), ReaderStats: cloneReaderStats(value.ReaderStats)}
+		var heartbeatAge *int64
+		if value.LastHeartbeat != nil {
+			age := time.Since(*value.LastHeartbeat).Milliseconds()
+			if age < 0 {
+				age = 0
+			}
+			heartbeatAge = &age
+		}
+		health.Sources[id] = domain.InspectionSourceStatus{SensorID: value.SensorID, SensorEnabled: value.SensorEnabled, SensorEpoch: value.SensorEpoch, ConfigHash: value.ConfigHash, RulesetID: value.RulesetID, Mode: value.Mode, ReaderActive: value.ReaderActive, ProcessReachable: value.ProcessReachable, CaptureLive: value.CaptureLive, HeartbeatAgeMillis: heartbeatAge, State: value.State, Reason: value.Reason, LastRead: value.LastRead, LastHeartbeat: value.LastHeartbeat, Counters: sourceCounters(value.Counters), ReaderStats: cloneReaderStats(value.ReaderStats)}
 		if value.State != "HEALTHY" && value.State != "DISABLED" {
 			health.Status = "degraded"
 		}
@@ -486,7 +495,45 @@ func cloneReaderStats(value map[string]uint64) map[string]uint64 {
 	return result
 }
 func (s *RuntimeServiceAdapter) InspectionCapabilities(context.Context) (domain.InspectionCapabilities, error) {
-	return domain.InspectionCapabilities{Supported: true, Modes: []domain.InspectionMode{domain.InspectionModeIDS, domain.InspectionModeIPS}, Applications: []string{"HTTP", "TLS", "DNS", "SSH"}, FailModes: []string{"OPEN"}, Rulesets: []string{config.BuiltinM3RulesetID}, ApplicationMatchModes: []string{config.ApplicationMatchRestrictL3Allow}, Limitations: []string{"asynchronous application classification", "no TLS decryption", "no HTTP/3 inspection", "IPS fail-open only"}}, nil
+	hashes := map[string]string{}
+	limits := domain.DefaultInspectionLimits()
+	if s.Runtime != nil {
+		if coordinator := s.Runtime.InspectionRuntime(); coordinator != nil {
+			for id, source := range coordinator.Health() {
+				if source.ConfigHash != "" {
+					key := id
+					if source.RulesetID != "" {
+						key += ":" + source.RulesetID
+					}
+					hashes[key] = source.ConfigHash
+				}
+			}
+		}
+	}
+	return domain.InspectionCapabilities{Supported: true, Modes: []domain.InspectionMode{domain.InspectionModeIDS, domain.InspectionModeIPS}, Applications: []string{"HTTP", "TLS", "DNS", "SSH"}, FailModes: []string{"OPEN"}, Rulesets: []string{config.BuiltinM3RulesetID}, ApplicationMatchModes: []string{config.ApplicationMatchRestrictL3Allow}, Limitations: []string{"asynchronous application classification", "no TLS decryption", "no HTTP/3 inspection", "IPS fail-open only"}, RuntimeIPCVersion: domain.RuntimeIPCProtocolVersion, BuildVersion: runtimeBuildVersion(), Semantics: config.ApplicationMatchRestrictL3Allow, RulesetHashes: hashes, Limits: limits}, nil
+}
+
+func runtimeBuildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unavailable"
+	}
+	version := info.Main.Version
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" && setting.Value != "" {
+			if len(setting.Value) > 12 {
+				setting.Value = setting.Value[:12]
+			}
+			if version == "" || version == "(devel)" {
+				return "devel+" + setting.Value
+			}
+			return version + "+" + setting.Value
+		}
+	}
+	if version == "" {
+		return "unavailable"
+	}
+	return version
 }
 func (s *RuntimeServiceAdapter) ListSecurityEvents(_ context.Context, query domain.SecurityQuery) (domain.SecurityEventPage, error) {
 	if s.Runtime == nil || s.Runtime.InspectionRuntime() == nil {

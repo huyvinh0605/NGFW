@@ -91,6 +91,71 @@ collect_evidence() {
   fi
 }
 
+redact_text() {
+  jq -Rrs --arg token "${NGFW_API_TOKEN:-}" 'if $token == "" then . else split($token) | join("[REDACTED]") end' -r
+}
+
+record_command() {
+  local name=$1 section=$2 started=$3 ended=$4 status=$5 expected=$6
+  shift 6
+  local argv_json
+  argv_json=$(printf '%s\0' "$@" | jq -Rs --arg token "${NGFW_API_TOKEN:-}" 'split("\u0000")[:-1] | map(if $token != "" and . == $token then "[REDACTED]" else . end)')
+  jq -cn --arg name "$name" --arg section "$section" --arg started "$started" --arg ended "$ended" --argjson exit_code "$status" --argjson expected_exit "$expected" --argjson argv "$argv_json" '{name:$name,section:$section,started_at:$started,ended_at:$ended,exit_code:$exit_code,expected_exit:$expected_exit,argv:$argv}' >>"$evidence_dir/commands.jsonl"
+}
+
+run_topology_entry() {
+  local section=$1 index=$2 id=$3
+  local entry name seconds expected started ended status safe_name
+  entry=$(jq -cer --arg id "$id" --arg section "$section" --argjson index "$index" '.scenarios[$id][$section][$index] | select(.argv | type == "array" and length > 0 and all(.[]; type == "string"))' "$topology") || fail "$id" "invalid $section[$index] argv contract"
+  name=$(jq -r '.name // "unnamed"' <<<"$entry")
+  seconds=$(jq -r '.timeout_seconds // 30' <<<"$entry")
+  expected=$(jq -r '.expected_exit // 0' <<<"$entry")
+  [[ "$seconds" =~ ^[0-9]+$ && $seconds -ge 1 && $seconds -le 1800 ]] || fail "$id" "$section[$index] timeout must be 1..1800 seconds"
+  [[ "$expected" =~ ^[0-9]+$ && $expected -le 255 ]] || fail "$id" "$section[$index] expected_exit must be 0..255"
+  mapfile -t argv < <(jq -r '.argv[]' <<<"$entry")
+  for index_arg in "${!argv[@]}"; do
+    argv[$index_arg]=${argv[$index_arg]//\{EVIDENCE_DIR\}/$evidence_dir}
+    argv[$index_arg]=${argv[$index_arg]//\{API_BASE\}/$api_base}
+    argv[$index_arg]=${argv[$index_arg]//\{SCENARIO\}/$id}
+  done
+  safe_name=$(printf '%s' "$name" | tr -cs 'A-Za-z0-9_.-' '_')
+  started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  set +e
+  timeout --signal=TERM --kill-after=5 "$seconds" "${argv[@]}" > >(redact_text >"$evidence_dir/${section}-${index}-${safe_name}.out") 2> >(redact_text >"$evidence_dir/${section}-${index}-${safe_name}.err")
+  status=$?
+  set -e
+  ended=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  record_command "$name" "$section" "$started" "$ended" "$status" "$expected" "${argv[@]}"
+  [[ $status -eq $expected ]] || fail "$id" "$section[$index] $name exited $status, expected $expected"
+}
+
+run_restore_entries() {
+  [[ -n "$topology" && -r "$topology" ]] || return 0
+  local count status=0
+  count=$(jq -r '.restore // [] | length' "$topology" 2>/dev/null || printf '0')
+  for ((index=0; index<count; index++)); do
+    local entry name seconds safe_name result
+    entry=$(jq -cer --argjson index "$index" '.restore[$index] | select(.argv | type == "array" and length > 0 and all(.[]; type == "string"))' "$topology") || { status=1; continue; }
+    name=$(jq -r '.name // "restore"' <<<"$entry")
+    seconds=$(jq -r '.timeout_seconds // 30' <<<"$entry")
+    [[ "$seconds" =~ ^[0-9]+$ && $seconds -ge 1 && $seconds -le 1800 ]] || { status=1; continue; }
+    mapfile -t argv < <(jq -r '.argv[]' <<<"$entry")
+    for index_arg in "${!argv[@]}"; do
+      argv[$index_arg]=${argv[$index_arg]//\{EVIDENCE_DIR\}/$evidence_dir}
+      argv[$index_arg]=${argv[$index_arg]//\{API_BASE\}/$api_base}
+      argv[$index_arg]=${argv[$index_arg]//\{SCENARIO\}/RESTORE}
+    done
+    safe_name=$(printf '%s' "$name" | tr -cs 'A-Za-z0-9_.-' '_')
+    set +e
+    timeout --signal=TERM --kill-after=5 "$seconds" "${argv[@]}" > >(redact_text >"$evidence_dir/restore-${index}-${safe_name}.out") 2> >(redact_text >"$evidence_dir/restore-${index}-${safe_name}.err")
+    result=$?
+    set -e
+    (( result == 0 )) || status=1
+  done
+  jq -n --arg status "$([[ $status -eq 0 ]] && printf PASS || printf FAIL)" '{restore:$status}' >"$evidence_dir/restore.json"
+  return "$status"
+}
+
 fail() {
   local id=$1 reason=$2
   jq -n --arg id "$id" --arg reason "$reason" '{id:$id,status:"FAIL",reason:$reason}' >"$evidence_dir/assertion-$id.json"
@@ -108,6 +173,31 @@ not_run() {
   printf 'NOT_RUN %s: %s\n' "$id" "$reason" >&2
   exit 2
 }
+
+traffic_started=0
+finalizing=0
+finalize_run() {
+  local exit_status=$?
+  [[ $finalizing -eq 0 ]] || exit "$exit_status"
+  finalizing=1
+  trap - EXIT
+  if [[ $traffic_started -eq 1 ]]; then
+    collect_evidence after-scenario || true
+    run_restore_entries || true
+    collect_evidence after-restore || true
+  else
+    collect_evidence after || true
+  fi
+  local assertions=("$evidence_dir"/assertion-*.json)
+  if [[ -e "${assertions[0]}" ]]; then
+    jq -s --arg run_id "$run_id" --arg started_at "$started_at" --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{schema_version:1,run_id:$run_id,started_at:$started_at,finished_at:$finished_at,results:.}' "${assertions[@]}" >"$evidence_dir/summary.json" || true
+  else
+    jq -n --arg run_id "$run_id" --arg started_at "$started_at" --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{schema_version:1,run_id:$run_id,started_at:$started_at,finished_at:$finished_at,results:[]}' >"$evidence_dir/summary.json" || true
+  fi
+  jq -n --arg run_id "$run_id" --arg started_at "$started_at" --arg api_base "$api_base" --arg scenario "${scenario:-M3-PREFLIGHT}" --arg mode "$mode" '{schema_version:1,run_id:$run_id,started_at:$started_at,api_base:$api_base,scenario:$scenario,mode:$mode}' >"$evidence_dir/manifest.json" || true
+  exit "$exit_status"
+}
+trap finalize_run EXIT
 
 collect_evidence before
 systemctl is-active --quiet ngfw-engine || fail M3-PREFLIGHT 'ngfw-engine is not active'
@@ -132,7 +222,6 @@ fi
 pass M3-PREFLIGHT 'engine IPC v3, REST contracts and M3 runtime state are readable'
 
 if [[ "$mode" == preflight ]]; then
-  collect_evidence after
   printf 'Preflight completed. This is not packet-path acceptance. Evidence: %s\n' "$evidence_dir"
   exit 0
 fi
@@ -141,6 +230,7 @@ fi
 [[ -n "$scenario" ]] || not_run M3-TRAFFIC '--scenario is required; all is never implicit'
 [[ -n "$topology" && -r "$topology" ]] || not_run "$scenario" 'topology JSON is missing'
 jq -e 'type == "object" and (.wan != null) and (.lan != null) and (.dmz != null) and (.mgmt != null)' "$topology" >/dev/null || not_run "$scenario" 'topology must define wan, lan, dmz and mgmt'
+traffic_started=1
 
 case "$scenario" in
   M3-00)
@@ -148,9 +238,30 @@ case "$scenario" in
     /usr/local/lib/ngfw/verify-m2-linux.sh >"$evidence_dir/m2-baseline.txt" 2>&1 || fail M3-00 'M2 baseline verification failed'
     pass M3-00 'M1/M2 non-traffic baseline remains healthy'
     ;;
+  M3-01)
+    probe=${NGFW_M3_PROBE:-/usr/local/lib/ngfw/probe-m3-capabilities.sh}
+    [[ -x "$probe" ]] || not_run M3-01 "capability probe is unavailable: $probe"
+    "$probe" --isolated --evidence-dir "$evidence_dir/capability-probe" >"$evidence_dir/capability-probe.out" 2>"$evidence_dir/capability-probe.err" || fail M3-01 'isolated NFLOG/NFQUEUE/nft capability probe failed'
+    jq -e '.status == "PASS"' "$evidence_dir/capability-probe/compatibility.json" >/dev/null || fail M3-01 'capability probe did not produce a PASS compatibility manifest'
+    pass M3-01 'isolated Linux capability probe passed with raw evidence'
+    ;;
+  M3-0[2-9]|M3-1[0-9]|M3-2[0-9]|M3-3[0-7])
+    scenario_exists=$(jq -r --arg id "$scenario" '.scenarios[$id] != null' "$topology")
+    [[ "$scenario_exists" == true ]] || not_run "$scenario" "topology has no .scenarios[\"$scenario\"] harness"
+    step_count=$(jq -r --arg id "$scenario" '.scenarios[$id].steps // [] | length' "$topology")
+    assertion_count=$(jq -r --arg id "$scenario" '.scenarios[$id].assertions // [] | length' "$topology")
+    (( step_count > 0 )) || not_run "$scenario" 'scenario has no traffic/action steps'
+    (( assertion_count > 0 )) || not_run "$scenario" 'scenario has no observable assertions; commands alone cannot be marked PASS'
+    for ((index=0; index<step_count; index++)); do
+      run_topology_entry steps "$index" "$scenario"
+    done
+    collect_evidence assertion-input
+    for ((index=0; index<assertion_count; index++)); do
+      run_topology_entry assertions "$index" "$scenario"
+    done
+    pass "$scenario" "$step_count lab steps and $assertion_count independent assertions passed; see commands.jsonl and raw evidence"
+    ;;
   *)
-    not_run "$scenario" 'scenario needs the external LAN/WAN/DMZ traffic harness described in tests/integration/m3/README.md; no packet was generated, so it cannot be marked PASS'
+    not_run "$scenario" 'unknown acceptance ID; expected M3-00 through M3-37'
     ;;
 esac
-
-collect_evidence after

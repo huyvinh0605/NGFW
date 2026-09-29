@@ -1340,7 +1340,7 @@ func (a *API) wsEvents(conn *websocket.Conn) {
 				return
 			}
 			if streamID != "" && page.StreamID != "" && page.StreamID != streamID {
-				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "stream_reset", "stream_id": page.StreamID, "data": map[string]any{"previous_stream_id": streamID, "next_sequence": page.NextSequence}}); err != nil {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "schema_version": 1, "type": "stream_reset", "kind": "StreamReset", "event_class": "runtime", "stream_id": page.StreamID, "timestamp": time.Now().UTC(), "data": map[string]any{"previous_stream_id": streamID, "next_sequence": page.NextSequence}}); err != nil {
 					return
 				}
 				streamID = page.StreamID
@@ -1351,18 +1351,18 @@ func (a *API) wsEvents(conn *websocket.Conn) {
 				streamID = page.StreamID
 			}
 			if page.GapFrom != 0 {
-				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "gap", "stream_id": streamID, "data": map[string]any{"gap_from": page.GapFrom, "next_sequence": page.NextSequence}}); err != nil {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "schema_version": 1, "type": "gap", "kind": "EventGap", "event_class": "runtime", "stream_id": streamID, "sequence": page.NextSequence, "timestamp": time.Now().UTC(), "data": map[string]any{"gap_from": page.GapFrom, "next_sequence": page.NextSequence}}); err != nil {
 					return
 				}
 			}
 			for _, event := range page.Items {
 				cursor = event.Sequence
-				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "event", "stream_id": streamID, "data": event}); err != nil {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "schema_version": event.SchemaVersion, "type": "event", "kind": event.Kind, "event_class": event.Class, "stream_id": streamID, "sequence": event.Sequence, "timestamp": event.Timestamp, "payload": event, "data": event}); err != nil {
 					return
 				}
 			}
 			if len(page.Items) == 0 && (lastHeartbeat.IsZero() || time.Since(lastHeartbeat) >= 15*time.Second) {
-				if err := a.writeWebSocket(conn, map[string]any{"success": true, "type": "heartbeat", "data": nil, "timestamp": time.Now().UTC()}); err != nil {
+				if err := a.writeWebSocket(conn, map[string]any{"success": true, "schema_version": 1, "type": "heartbeat", "kind": "Heartbeat", "event_class": "runtime", "stream_id": streamID, "sequence": page.NextSequence, "data": nil, "timestamp": time.Now().UTC()}); err != nil {
 					return
 				}
 				lastHeartbeat = time.Now()

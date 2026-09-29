@@ -139,7 +139,8 @@ dữ liệu console. Dấu chấm cạnh **Cấu hình** nghĩa là candidate kh
 
 - **Tiêu đề và phụ đề**: cho biết màn hình hiện tại và mục đích của màn hình.
 - **Candidate chưa commit**: có thay đổi chưa áp dụng.
-- **Runtime healthy**: API và engine báo runtime M1/M2 healthy.
+- **Runtime healthy**: API và engine báo runtime M1/M2 healthy; sức khỏe M3 phải
+  đọc thêm ở panel **M3 inspection**, vì runtime healthy không tự chứng minh sensor live.
 - **Runtime suy giảm**: session runtime không còn healthy đầy đủ.
 - **Đang kết nối**: chưa nhận được health hợp lệ.
 - **Làm mới**: tải lại live data và config; vòng xoay nghĩa là request đang chạy.
@@ -170,7 +171,7 @@ khi session hoặc running config tạm thời không đọc được.
 
 ### 5.1. Risk score
 
-Risk Engine thuộc milestone M3+ và **chưa khả dụng trong M2**. Vì vậy Sessions
+Risk Engine không thuộc M3 và hiện **chưa khả dụng**. Vì vậy Sessions
 hiển thị `Unavailable`, không coi field thiếu là risk `0`. Thang 0–100 dưới đây
 chỉ là quy ước cho dữ liệu thật khi Risk Engine được triển khai:
 
@@ -178,10 +179,10 @@ chỉ là quy ước cho dữ liệu thật khi Risk Engine được triển kha
 |---:|---|---|
 | 0–29 | `LOW` | Chưa có dấu hiệu đáng kể theo dữ liệu hiện có. |
 | 30–59 | `MEDIUM` | Có tín hiệu cần theo dõi. |
-| 60–79 | `HIGH` | Cần xem xét khi Risk Engine M3+ cung cấp dữ liệu. |
+| 60–79 | `HIGH` | Cần xem xét khi milestone Risk Engine sau M3 cung cấp dữ liệu. |
 | 80–100 | `CRITICAL` | Ưu tiên điều tra và kiểm tra action/policy. |
 
-M2 không có thẻ hoặc bộ lọc risk. Không dùng số mặc định để kết luận session an
+Ứng dụng hiện không có thẻ hoặc bộ lọc risk. Không dùng số mặc định để kết luận session an
 toàn hay nguy hiểm.
 
 ### 5.2. Event severity
@@ -197,8 +198,8 @@ Confidence được hiển thị dưới dạng phần trăm:
 confidence hiển thị = confidence API × 100, làm tròn
 ```
 
-Nếu field severity thiếu hoặc không hợp lệ, frontend chuẩn hóa thành `INFO` để
-bản ghi không làm sập trang; đây không phải là bằng chứng event an toàn.
+Nếu field severity thiếu hoặc không hợp lệ, frontend chuẩn hóa thành `UNKNOWN`
+để bản ghi không làm sập trang; đây không phải là bằng chứng event an toàn.
 
 ### 5.3. Byte và packet
 
@@ -214,7 +215,7 @@ bản ghi không làm sập trang; đây không phải là bằng chứng event 
 
 Màn hình Tổng quan là nơi kiểm tra nhanh, không thay thế điều tra chi tiết.
 
-### 6.1. Luồng M1/M2
+### 6.1. Luồng M1/M2/M3
 
 Chuỗi trên hero panel gồm:
 
@@ -230,7 +231,9 @@ Traffic → Conntrack → Session → L3/L4 Policy → Linux
   service.
 - **Linux**: nftables/routing/NAT thực thi running configuration.
 
-DPI, App-ID, IDS/IPS, ML, TLS inspection và Risk Engine chưa thuộc M2.
+Khi Running bật M3, traffic được chọn thêm vào NFLOG IDS hoặc NFQUEUE IPS;
+Suricata EVE cập nhật App-ID/alert cho chính session M2. M3 không cung cấp DPI,
+ML, Risk Engine hoặc giải mã TLS.
 
 ### 6.2. Vòng Runtime health
 
@@ -299,11 +302,39 @@ Status thường gặp:
 Panel đếm `ok` và `healthy` là đang hoạt động; luôn đọc message để biết phạm vi
 được đo.
 
-### 6.6. Ứng dụng trong session
+### 6.6. M3 inspection và ứng dụng trong session
 
-Panel hiển thị rõ **App-ID chưa khả dụng trong M2**. `Unavailable (M2)` không
-nghĩa traffic bị block và không được suy diễn application từ port. App-ID/DPI
-thuộc M3+.
+Panel **M3 inspection** hiển thị generation, từng sensor IDS/IPS, reader,
+process/control socket, capture liveness và IPS kernel lease. `HEALTHY` chỉ có
+ý nghĩa trong phạm vi các phép đo đó. `DEGRADED`/`UNAVAILABLE` không được đổi
+thành “không có tấn công”.
+
+Panel **Nhận diện ứng dụng M3** đếm HTTP/TLS/DNS/SSH từ evidence Suricata.
+`UNKNOWN` nghĩa chưa đủ evidence; giao diện không suy diễn HTTPS từ port 443.
+TLS chỉ là metadata quan sát được, không phải HTTP đã giải mã.
+
+Các trường M3 health:
+
+| Trường | Cách đọc |
+|---|---|
+| `Generation` | policy/config generation mà inspection runtime đang dùng. |
+| `sensor enabled` | Running yêu cầu sensor đó; không đồng nghĩa process đang sống. |
+| `sensor epoch` | định danh một lần chạy Suricata; đổi sau restart để flow ID cũ không bị tái sử dụng nhầm. |
+| `config hash` / `ruleset` | artifact đã đăng ký; dùng để đối chiếu đúng cấu hình/rule. |
+| `reader active` | engine đang chạy EVE reader. |
+| `process reachable` | control socket/process probe trả lời. |
+| `capture live` | có bằng chứng capture path đang tiến triển; traffic im lặng không tự làm sensor down. |
+| `heartbeat age` | tuổi của stats heartbeat gần nhất, tính bằng mili giây. |
+| `captured packets` | counter Suricata; số 0 là measured zero, không phải sensor chết. |
+| `capture/NFQUEUE drops` | loss do capture/queue báo; tăng nghĩa coverage có thể thiếu. |
+| `IPS requested` | Running có traffic/profile yêu cầu IPS. |
+| `IPS configured` | nftables/NFQUEUE selection đã được cấu hình. |
+| `IPS capture live` | listener có bằng chứng capture; khác với chỉ thấy process. |
+| `kernel lease active` | lease ngắn hạn còn tồn tại; hết lease làm queue selection fail-open. |
+
+Status `DISABLED` là không được Running yêu cầu. `UNAVAILABLE` là thiếu thành
+phần bắt buộc. `DEGRADED` là còn chạy nhưng evidence/reader/control/counter có
+vấn đề. Các trạng thái này không nói packet trước đó đã sạch.
 
 ### 6.7. Policy posture
 
@@ -344,9 +375,9 @@ tổng session trong toàn appliance.
 |---|---|
 | Client | client/source IP và source port. |
 | Server | server/destination IP và destination port. |
-| App / Protocol | M2 hiển thị `Unavailable (M2)` cho application; protocol và TCP state vẫn lấy từ conntrack. |
+| App / Protocol | M3 hiển thị App-ID khi có evidence; `UNKNOWN`/`Unavailable` khi chưa có. Protocol và TCP state lấy từ conntrack. |
 | Zones | source zone → destination zone. |
-| Risk | `Unavailable` trong M2 vì Risk Engine chưa được triển khai. |
+| Risk | `Unavailable` vì Risk Engine không thuộc M3. |
 | Decision | action đã evaluate, `INVALIDATED`, hoặc `UNAVAILABLE`; UI không đổi giá trị thiếu thành ALLOW. |
 | Path | `Fast` chỉ khi backend xác minh provenance kernel mark; nếu chưa xác minh thì `Unavailable`, không mặc định thành `Inspect`. |
 | `×` | yêu cầu kết thúc/revoke session, cần quyền ghi. |
@@ -357,7 +388,7 @@ Bấm một dòng để mở drawer. Drawer gồm các nhóm:
 
 #### Risk summary
 
-- vòng risk: `—` trong M2;
+- vòng risk: `—` vì Risk Engine chưa được triển khai;
 - badge decision;
 - trạng thái Risk Engine chưa khả dụng;
 - policy reason hoặc policy ID đã match.
@@ -382,18 +413,34 @@ counter từ kernel dump; giá trị `0` chỉ có nghĩa measured zero khi fiel
 #### Security context
 
 - **Policy**: matched policy ID;
-- **Scope**: `SESSION` trong M2;
-- **ML**: predicted class và confidence nếu ML available;
-- **TLS**: TLS version/metadata nếu quan sát được;
+- **Scope**: `SESSION` trong M2/M3;
+- **ML**: `Unavailable` trong M3;
+- **TLS**: metadata quan sát được nếu Suricata cung cấp; không có nội dung giải mã;
 - **Signals**: số security signal gắn với context.
 
-Nếu context chưa có, UI dùng `Unavailable` hoặc giá trị mặc định an toàn. M2 API
+Nếu context chưa có, UI dùng `Unavailable` hoặc giá trị mặc định an toàn. API
 có thể trả original, reply và translated tuple; drawer hiện ưu tiên client/server
 được map từ original tuple. Muốn kiểm tra đầy đủ NAT alias/reply tuple, xem
 response session qua API.
 
 Risk contributions chỉ xuất hiện khi backend tương lai cung cấp dữ liệu thật;
-M2 không tạo contribution giả.
+M3 không tạo contribution giả.
+
+#### M3 inspection
+
+| Trường | Ý nghĩa |
+|---|---|
+| Mode / state | `OFF`, `IDS`, `IPS` và trạng thái `QUEUED`, `INSPECTING`, `DEGRADED`, `ERROR` hoặc `COMPLETE`. |
+| Application | HTTP/TLS/DNS/SSH/OTHER/UNKNOWN; tooltip cho biết source, confidence và evidence conflict. |
+| App policy | `PENDING`, `MATCHED`, `MISMATCH`, `UNKNOWN_ALLOWED` hoặc `NOT_APPLICABLE`. |
+| Coverage | `NONE`, `OBSERVED`, `PARTIAL`, `UNAVAILABLE`; không có giá trị `CLEAN`. |
+| Threat events | số physical security event đã gắn vào session; replay cùng event ID không được cộng lại. |
+| Latest verdict | alert verdict gần nhất, tách với connectivity decision. |
+| Enforcement | mechanism và status. `FAILED`/`UNAVAILABLE` không được trình bày là đã block. |
+| Reason | giải thích timeout, detector thiếu, application match/mismatch hoặc kết quả enforcement. |
+
+`HIGH`/`VERIFIED` ở Application là confidence của nhận diện ứng dụng, không phải
+threat severity. `TLS` không được đổi nhãn thành `HTTPS` nếu chưa giải mã HTTP.
 
 ### 7.4. Kết thúc session
 
@@ -433,7 +480,10 @@ Bấm event để mở drawer.
 
 #### Event drawer
 
-- **Nguồn sự kiện**: class, producer, signature và recommended action nếu có;
+- **Nguồn sự kiện**: class, producer, capture mode, signature và recommended action nếu có;
+- **Verdict và enforcement**: correlation, alert verdict, packet verdict và
+  `mechanism / scope / status`; `REPORTED/PACKET` không đồng nghĩa
+  `APPLIED/SESSION`;
 - **Liên kết**: source, destination và session ID;
 - **Evidence**: bằng chứng dạng text nếu backend cung cấp;
 - **Metadata**: object JSON nếu backend cung cấp;
@@ -441,6 +491,11 @@ Bấm event để mở drawer.
 
 `Uncorrelated` hoặc session trống nghĩa event chưa ghép được với session. Không
 được gán event cho session khác chỉ vì hai IP trùng nhau.
+
+Nếu UI báo **Security event stream có khoảng trống**, engine đã evict history
+cũ hoặc stream ID đổi sau restart. Con số evicted là số record bị loại khỏi
+bounded store, không phải số tấn công. Nút **Tải thêm security events** dùng
+`next_cursor`; một trang lỗi không được làm mất những bản ghi đã tải.
 
 ### 8.2. Tab Temporary blocks
 
@@ -470,7 +525,7 @@ reputation indicator và khác với policy candidate.
 Danh sách hiển thị score, indicator, type, category, source và trạng thái
 `enabled/disabled`. Nút **Xóa** xóa indicator.
 
-Trong M2 đây chỉ là registry quản trị. Nó chưa nối vào Risk Engine hoặc
+Trong M3 đây vẫn chỉ là registry quản trị. Nó chưa nối vào Risk Engine hoặc
 enforcement, không phải temporary block và không chặn traffic.
 
 ### 8.4. Tab Audit log
@@ -521,7 +576,7 @@ không lưu, validate hay commit. Khi mở từ đây, trang JSON có nút
 | Policy | tên hiển thị và ID duy nhất. |
 | Source → Destination | zone nguồn và zone đích; `any` khi không chọn. |
 | Service L3/L4 | service bắt buộc có protocol, ví dụ `tcp:80`, `udp:53`. |
-| Tương thích M2 | `Compatible` hoặc cảnh báo Validate sẽ từ chối field M3+. |
+| Tương thích M3 | `Compatible` khi rule dùng semantics M3 được backend hỗ trợ; Validate vẫn là nguồn quyết định cuối. |
 | Action | quyết định khi rule match. |
 | Scope | phạm vi áp dụng của decision. |
 | Trạng thái | công tắc enabled/disabled. |
@@ -541,11 +596,14 @@ Các trường trong modal:
 - **Destination zones**: tương tự source zones;
 - **Services**: danh sách cách nhau bởi dấu phẩy, ví dụ `tcp:80, tcp:443`;
   chỉ nhập `80` là sai cú pháp;
-- **Applications**: M3+, phải để trống để policy tương thích M2;
+- **Applications**: whitelist M3 gồm HTTP/TLS/DNS/SSH, cách nhau bằng dấu phẩy;
+  chỉ có hiệu lực khi người dùng chọn rõ và backend lưu
+  `application_match_mode=RESTRICT_L3_ALLOW`;
 - **Action**: action khi tất cả matcher của rule phù hợp;
-- **Scope**: M2 chỉ hỗ trợ `SESSION`;
-- **Security profile**: M3+, phải để trống trong policy M2;
-- **Minimum risk/Maximum risk**: M3+, phải để trống trong policy M2;
+- **Scope**: M2/M3 chỉ hỗ trợ `SESSION` cho connectivity policy;
+- **Security profile**: chọn IDS để quan sát hoặc IPS để inline verdict/app guard;
+  application restriction yêu cầu profile IPS;
+- **Minimum risk/Maximum risk**: chưa thuộc M3, phải để trống;
 - **Policy được bật**: enable/disable;
 - **Log khi bắt đầu/kết thúc**: tạo log tại các mốc session.
 
@@ -561,23 +619,33 @@ bắt buộc một packet vừa có port 80 vừa port 443. Các nhóm matcher k
 | `ALLOW` | cho phép theo scope của rule. |
 | `DROP` | bỏ traffic im lặng theo enforcement. |
 | `REJECT` | từ chối có phản hồi phù hợp action. |
-| `RATE_LIMIT` | chưa hỗ trợ trong policy M2; dùng sẽ bị validation từ chối. |
-| `RESET_SESSION` | chưa hỗ trợ trong policy M2; revoke session là API runtime riêng. |
-| `TEMP_BLOCK` | chưa hỗ trợ như policy action M2; temporary block là API runtime riêng. |
+| `RATE_LIMIT` | chưa hỗ trợ trong connectivity policy M3; dùng sẽ bị validation từ chối. |
+| `RESET_SESSION` | chưa hỗ trợ như policy M3; revoke session là API runtime riêng. |
+| `TEMP_BLOCK` | chưa hỗ trợ như policy action M3; temporary block là API runtime riêng. |
 
 | Scope | Đối tượng bị tác động |
 |---|---|
 | `SESSION` | toàn connection/session. |
 
-`PACKET`, `REQUEST` và `SOURCE_INDICATOR` thuộc phạm vi sau M2. Endpoint
-**Validate** chạy cả validation cấu trúc lẫn `CompileM2`, nên phải báo lỗi trước
-Commit nếu candidate dùng các scope hoặc matcher chưa hỗ trợ.
+`PACKET`, `REQUEST` và `SOURCE_INDICATOR` không phải scope của connectivity
+policy M3. Endpoint **Validate** chọn compiler M2 hoặc M3 theo Candidate và phải
+báo lỗi trước Commit nếu dùng scope/matcher chưa hỗ trợ.
 
 ### 9.5. Security profile cards
 
-Trang chỉ hiển thị số định nghĩa profile được lưu và badge
-`Unavailable in M2`. Các profile dành cho milestone sau; gắn profile vào policy
-M2 sẽ làm Validate thất bại.
+Mỗi profile M3 có:
+
+- **Mode `IDS`**: chọn traffic vào NFLOG, báo alert nhưng không tạo deny intent;
+- **Mode `IPS`**: chọn traffic vào NFQUEUE khi capture/lease live; Suricata có
+  thể drop packet và application mismatch có thể tạo session guard;
+- **Fail mode `OPEN`**: lựa chọn duy nhất trong M3; thiếu inspection phải hiện
+  degraded/unavailable, không được báo CLEAN;
+- **Ruleset**: artifact đã đăng ký (mặc định `m3-builtin-v1`), được engine kiểm
+  checksum trước activation.
+
+Nút thêm/sửa profile chỉ lưu Candidate. Đổi nội dung profile làm validation cũ
+thành stale dù policy vẫn tham chiếu cùng profile ID. IDS/IPS profile không bật
+ML, WAF, TLS decryption, DNS security hay Risk Engine.
 
 ### 9.6. Quy trình commit policy
 
@@ -826,13 +894,15 @@ tại, hãy đăng nhập lại để kiểm tra token/session.
 
 ## 13. Quy trình sử dụng thường gặp
 
-### 13.1. Kiểm tra runtime M1/M2
+### 13.1. Kiểm tra runtime M1/M2/M3
 
 1. Mở **Tổng quan**.
 2. Kiểm tra nhãn **Runtime healthy**.
 3. Kiểm tra vòng **Runtime health** và đọc message từng thành phần.
 4. Kiểm tra `Management API ONLINE` ở **Hệ thống**.
 5. Nếu có `Suy giảm`, đọc message component thay vì chỉ nhìn phần trăm.
+6. Nếu Running dùng profile M3, kiểm tra riêng panel **M3 inspection**: sensor
+   enabled, reader active, process reachable, capture live và IPS lease.
 
 ### 13.2. Điều tra session và decision
 
@@ -878,6 +948,32 @@ tại, hãy đăng nhập lại để kiểm tra token/session.
 2. Tìm action `COMMIT`, `ROLLBACK`, `UPDATE`, `REVOKE`, `CREATE` hoặc `DELETE`.
 3. Đối chiếu actor/role, resource ID, message và thời gian.
 
+### 13.7. Điều tra alert IDS/IPS
+
+1. Mở **Sự kiện & kiểm soát → Events**, chọn class `security`.
+2. Mở event và kiểm tra `capture_mode`, SID, sensor/ruleset, correlation và
+   session ID. `UNCORRELATED` vẫn là alert thật nhưng chưa đủ điều kiện gắn/enforce.
+3. Với IDS, mong đợi verdict `ALERT`; traffic vẫn có thể tới server.
+4. Với IPS packet drop, tìm `SURICATA_NFQUEUE / PACKET / REPORTED` và
+   `packet_verdict=drop`. Đây là báo cáo packet, không phải session guard.
+5. Với application mismatch, tìm `NFT_SESSION_GUARD / SESSION / APPLIED` trong
+   session inspection. Chỉ trạng thái APPLIED sau readback mới chứng minh guard.
+6. Đối chiếu tuple/NAT của session, timestamp và policy generation; không gán
+   thủ công một event ambiguous vào session gần giống.
+
+### 13.8. Tạo policy M3
+
+1. Tạo/sửa **Security profile**, chọn `IDS` hoặc `IPS`, `OPEN` và ruleset backend
+   quảng bá trong capabilities.
+2. Tạo policy L3/L4 ALLOW, chọn profile. Nếu cần application whitelist, chọn
+   profile IPS và nhập HTTP/TLS/DNS/SSH.
+3. Hiểu rằng whitelist chỉ hạn chế L3 ALLOW sau khi evidence đến. UNKNOWN được
+   fail-open sau deadline; nó không biến thành MATCHED.
+4. Lưu Candidate, Validate, đọc lỗi duplicate/shadow. Hai rule cùng selector
+   L3 nhưng khác application có thể khiến rule sau unreachable theo first-match.
+5. Commit, rồi kiểm tra generation, inspection health, nft selection counters và
+   traffic thật. Toast thành công một mình không phải packet-path acceptance.
+
 ## 14. Trạng thái và lỗi thường gặp
 
 ### `Đang kết nối` kéo dài
@@ -888,8 +984,8 @@ thống kiểm tra service. Nút refresh chỉ thử lại request, không sửa
 ### `Suy giảm`
 
 Ít nhất một component health không healthy hoặc một nguồn live data lỗi. Mở
-Hệ thống để đọc message. Runtime health không chứng minh DPI/IDS/ML đang chạy;
-các thành phần đó chưa thuộc M2.
+Hệ thống để đọc message. Runtime health không chứng minh Suricata đang capture;
+đọc panel M3 inspection. DPI/ML/Risk/TLS decryption không thuộc M3.
 
 ### `Candidate chưa commit`
 
@@ -898,7 +994,7 @@ thành công.
 
 ### `Validation: hợp lệ` nhưng Commit không thành công
 
-Validation kiểm tra cấu trúc và khả năng tương thích runtime M2 tại thời điểm đó.
+Validation kiểm tra cấu trúc và compiler M2/M3 phù hợp Candidate tại thời điểm đó.
 Commit vẫn còn phụ thuộc version conflict, engine IPC, interface/route/nft apply
 và khả năng rollback. Đọc toast, refresh config và xem Audit log.
 
@@ -938,14 +1034,18 @@ WebSocket lỗi không tự động đồng nghĩa policy hoặc session bị m�
 - UI chỉ hiển thị endpoint và field đã được backend cung cấp.
 - `Unavailable` nghĩa không quan sát được; không được đổi thành `ALLOW`, `CLEAN`
   hoặc `0` khi phân tích sự cố.
-- Risk score chưa khả dụng trong M2; severity chỉ là threat severity cho
+- Risk score chưa khả dụng trong M3; severity chỉ là threat severity cho
   `event_class=security`.
 - Runtime health không phải tỷ lệ packet được kiểm tra.
 - Sessions hoạt động và `ALLOW` trên Overview có thể lấy từ các nguồn/cửa sổ dữ
   liệu khác nhau; không cộng/trừ chúng như cùng một mẫu thống kê.
 - Filter trong Sessions/Events áp dụng trên dữ liệu đã tải vào browser.
-- DPI/App-ID/IDS/IPS/ML/TLS inspection/Risk Engine chưa được triển khai trong
-  M2; `Unavailable` là trạng thái đúng.
+- App-ID và IDS/IPS đã có trong M3 khi profile/sensor tương ứng được bật. DPI,
+  ML, TLS decryption, WAF và Risk Engine chưa có; `Unavailable` là trạng thái đúng.
+- M3 App-ID/alert là bất đồng bộ. Bytes đầu connection có thể đi trước evidence
+  hoặc session guard; M3 không tuyên bố chặn toàn bộ HTTP request trước server.
+- IPS fail-open giữ connectivity base khi sensor/queue không đáng tin. Health
+  phải hiện degraded/unavailable; không được đọc sự im lặng là CLEAN.
 - Network page hiển thị candidate; chỉ running sau commit mới là cấu hình đang
   áp dụng.
 - Temporary block là enforcement tạm thời; reputation là tín hiệu, không phải

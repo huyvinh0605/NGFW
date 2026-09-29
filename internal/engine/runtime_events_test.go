@@ -33,4 +33,7 @@ func TestRuntimeEventRingClassifiesLifecycleAndPolicyEvents(t *testing.T) {
 	if lifecycle.Class != domain.EventClassRuntime || policy.Class != domain.EventClassPolicy || security.Class != domain.EventClassSecurity {
 		t.Fatalf("classes=%q,%q,%q", lifecycle.Class, policy.Class, security.Class)
 	}
+	if lifecycle.SchemaVersion != 1 || policy.SchemaVersion != 1 || security.SchemaVersion != 1 {
+		t.Fatalf("schema versions=%d,%d,%d", lifecycle.SchemaVersion, policy.SchemaVersion, security.SchemaVersion)
+	}
 }

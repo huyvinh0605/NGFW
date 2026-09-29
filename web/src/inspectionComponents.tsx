@@ -31,7 +31,7 @@ export function InspectionHealthPanel({ health }: { health: InspectionHealth | n
       <div><span>Capture live / kernel lease</span><strong>{health.ips_queue.capture_live ? "LIVE" : "UNAVAILABLE"} / {health.ips_queue.lease_active ? "ACTIVE" : "INACTIVE"}</strong></div>
       {health.ips_queue.last_error && <div><span>IPS lease error</span><strong>{health.ips_queue.last_error}</strong></div>}
     </div>
-    <div className="component-list">{Object.entries(health.sources).map(([id, source]) => <div className="component-row" key={id}><span className={`component-dot ${source.state.toLowerCase()}`}/><div><strong>{source.sensor_id.toUpperCase()} {source.mode ?? ""}</strong><small>{source.reason || `Heartbeat ${source.last_heartbeat || "unavailable"}`}</small></div><span>{source.state}</span></div>)}</div>
+    <div className="component-list">{Object.entries(health.sources).map(([id, source]) => <div className="component-row" key={id}><span className={`component-dot ${source.state.toLowerCase()}`}/><div><strong>{source.sensor_id.toUpperCase()} {source.mode ?? ""}</strong><small>{source.reason || `reader ${source.reader_active ? "active" : "inactive"} · process ${source.process_reachable ? "reachable" : "unavailable"} · capture ${source.capture_live ? "live" : "unverified"}`}</small><small>{source.ruleset_id || "ruleset unavailable"}{source.sensor_epoch ? ` · epoch ${source.sensor_epoch}` : ""}{source.heartbeat_age_ms !== undefined ? ` · heartbeat ${source.heartbeat_age_ms} ms` : ""}</small></div><span>{source.sensor_enabled ? source.state : "DISABLED"}</span></div>)}</div>
     {!Object.keys(health.sources).length && <p className="muted">Chưa có sensor source được cấu hình. L3/L4 forwarding vẫn hoạt động theo fail-open.</p>}
   </section>;
 }

@@ -3,14 +3,22 @@ package domain
 import "time"
 
 type InspectionSourceStatus struct {
-	SensorID      string            `json:"sensor_id"`
-	Mode          InspectionMode    `json:"mode,omitempty"`
-	State         string            `json:"state"`
-	Reason        string            `json:"reason,omitempty"`
-	LastRead      *time.Time        `json:"last_read,omitempty"`
-	LastHeartbeat *time.Time        `json:"last_heartbeat,omitempty"`
-	Counters      SensorCounters    `json:"counters"`
-	ReaderStats   map[string]uint64 `json:"reader_stats,omitempty"`
+	SensorID           string            `json:"sensor_id"`
+	SensorEnabled      bool              `json:"sensor_enabled"`
+	SensorEpoch        string            `json:"sensor_epoch,omitempty"`
+	ConfigHash         string            `json:"config_hash,omitempty"`
+	RulesetID          string            `json:"ruleset_id,omitempty"`
+	Mode               InspectionMode    `json:"mode,omitempty"`
+	ReaderActive       bool              `json:"reader_active"`
+	ProcessReachable   bool              `json:"process_reachable"`
+	CaptureLive        bool              `json:"capture_live"`
+	HeartbeatAgeMillis *int64            `json:"heartbeat_age_ms,omitempty"`
+	State              string            `json:"state"`
+	Reason             string            `json:"reason,omitempty"`
+	LastRead           *time.Time        `json:"last_read,omitempty"`
+	LastHeartbeat      *time.Time        `json:"last_heartbeat,omitempty"`
+	Counters           SensorCounters    `json:"counters"`
+	ReaderStats        map[string]uint64 `json:"reader_stats,omitempty"`
 }
 
 // SensorCounters uses pointers so an unavailable kernel/sensor counter is
@@ -47,11 +55,16 @@ type InspectionHealth struct {
 }
 
 type InspectionCapabilities struct {
-	Supported             bool             `json:"supported"`
-	Modes                 []InspectionMode `json:"modes"`
-	Applications          []string         `json:"applications"`
-	FailModes             []string         `json:"fail_modes"`
-	Rulesets              []string         `json:"rulesets"`
-	ApplicationMatchModes []string         `json:"application_match_modes"`
-	Limitations           []string         `json:"limitations"`
+	Supported             bool              `json:"supported"`
+	Modes                 []InspectionMode  `json:"modes"`
+	Applications          []string          `json:"applications"`
+	FailModes             []string          `json:"fail_modes"`
+	Rulesets              []string          `json:"rulesets"`
+	ApplicationMatchModes []string          `json:"application_match_modes"`
+	Limitations           []string          `json:"limitations"`
+	RuntimeIPCVersion     uint16            `json:"runtime_ipc_version"`
+	BuildVersion          string            `json:"build_version"`
+	Semantics             string            `json:"semantics"`
+	RulesetHashes         map[string]string `json:"ruleset_hashes"`
+	Limits                InspectionLimits  `json:"limits"`
 }

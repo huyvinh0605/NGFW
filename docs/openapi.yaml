@@ -113,8 +113,11 @@ paths:
     get:
       summary: M3 modes and policy values implemented by this engine build
       responses:
-        '200': {description: Supported IDS/IPS, applications, OPEN fail mode and rulesets}
+        '200':
+          description: Supported IDS/IPS, applications, OPEN fail mode, runtime IPC/build identity and ruleset hashes
+          content: {application/json: {schema: {$ref: '#/components/schemas/InspectionCapabilitiesEnvelope'}}}
         '503': {description: Engine IPC unavailable}
+        '504': {description: Engine IPC timed out}
   /security/events:
     get:
       summary: Bounded M3 Suricata security-event stream
@@ -126,19 +129,34 @@ paths:
         - {name: verdict, in: query, schema: {type: string, enum: [UNKNOWN, ALERT, DROP, ERROR]}}
         - {name: correlation_state, in: query, schema: {type: string, enum: [CORRELATED, UNCORRELATED, AMBIGUOUS]}}
         - {name: application, in: query, schema: {type: string}}
-        - {name: after, in: query, schema: {type: integer, format: int64, minimum: 0}}
-        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 100}}
+        - {name: signature_id, in: query, schema: {type: integer, format: int64, minimum: 1, maximum: 4294967295}}
+        - {name: after_sequence, in: query, schema: {type: integer, format: int64, minimum: 0}}
+        - {name: stream_id, in: query, schema: {type: string, maxLength: 256}}
+        - {name: cursor, in: query, description: Opaque next_cursor returned by the previous page; mutually exclusive with stream_id/after_sequence, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
       responses:
-        '200': {description: SecurityEventPage; gap_from reports evicted history}
+        '200':
+          description: Bounded SecurityEventPage; gap/reset_required explicitly report evicted history or a new engine stream
+          content: {application/json: {schema: {$ref: '#/components/schemas/SecurityEventPageEnvelope'}}}
         '400': {description: Invalid filter}
         '503': {description: Engine IPC or inspection runtime unavailable}
+        '504': {description: Engine IPC timed out}
   /security/events/{id}:
     get:
       summary: One M3 security event
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
-        '200': {description: ThreatEvent with capture, correlation, packet verdict and enforcement kept distinct}
+        '200':
+          description: ThreatEvent with capture, correlation, packet verdict and enforcement kept distinct
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties: {success: {type: boolean}, data: {$ref: '#/components/schemas/ThreatEvent'}}
         '404': {description: Unknown or evicted event}
+        '503': {description: Engine IPC or inspection runtime unavailable}
+        '504': {description: Engine IPC timed out}
   /events:
     get:
       parameters:
@@ -249,6 +267,62 @@ components:
         reason: {type: string}
         observed_at: {type: string, format: date-time}
         operation_id: {type: string}
+    ThreatEvent:
+      type: object
+      required: [event_id, sequence, ingested_at, event_class, source, capture_mode, correlation_state, correlation_revision, severity, application, verdict, enforcement]
+      properties:
+        event_id: {type: string}
+        sequence: {type: integer, format: int64, minimum: 1}
+        observed_at: {type: string, format: date-time}
+        ingested_at: {type: string, format: date-time}
+        event_class: {type: string, enum: [security]}
+        source: {type: string}
+        sensor_id: {type: string, enum: [ids, ips]}
+        sensor_epoch: {type: string}
+        sensor_config_hash: {type: string}
+        ruleset_id: {type: string}
+        capture_mode: {type: string, enum: [IDS, IPS]}
+        suricata_flow_id: {type: string, description: Kept as a decimal string so uint64 values remain exact in JavaScript}
+        transaction_id: {type: string}
+        observed_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        flow_tuple: {$ref: '#/components/schemas/SessionTuple'}
+        protocol_raw: {type: string}
+        session_id: {type: string}
+        policy_id: {type: string}
+        policy_generation: {type: integer, format: int64}
+        correlation_state: {type: string, enum: [CORRELATED, UNCORRELATED, AMBIGUOUS]}
+        correlation_reason: {type: string}
+        correlation_revision: {type: integer, format: int64}
+        signature_id: {type: integer, format: int64, minimum: 1, maximum: 4294967295}
+        signature_revision: {type: integer, format: int64}
+        signature: {type: string}
+        category: {type: string}
+        source_severity: {type: integer}
+        severity: {type: string, enum: [UNKNOWN, INFO, LOW, MEDIUM, HIGH, CRITICAL]}
+        application: {$ref: '#/components/schemas/ApplicationIdentity'}
+        signature_action: {type: string}
+        packet_verdict: {type: string}
+        verdict: {type: string, enum: [UNKNOWN, ALERT, DROP, ERROR]}
+        enforcement: {$ref: '#/components/schemas/EnforcementResult'}
+    SecurityEventPageEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [items, stream_id, next_sequence, next_cursor, has_more, oldest_sequence, gap, evicted_count]
+          properties:
+            items: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/ThreatEvent'}}
+            stream_id: {type: string}
+            gap_from: {type: integer, format: int64}
+            next_sequence: {type: integer, format: int64}
+            next_cursor: {type: string}
+            has_more: {type: boolean}
+            oldest_sequence: {type: integer, format: int64}
+            gap: {type: boolean}
+            reset_required: {type: boolean}
+            evicted_count: {type: integer, format: int64}
     SessionInspection:
       type: object
       required: [generation, revision, mode, state, coverage, application, app_policy_state, threat_count, max_severity, latest_verdict, enforcement]
@@ -283,9 +357,61 @@ components:
             status: {type: string, enum: [disabled, healthy, degraded]}
             reason: {type: string}
             generation: {type: integer, format: int64}
-            sources: {type: object, additionalProperties: {type: object}}
+            sources: {type: object, additionalProperties: {$ref: '#/components/schemas/InspectionSourceStatus'}}
+            ips_queue: {$ref: '#/components/schemas/IPSQueueStatus'}
             stats: {type: object, additionalProperties: {type: integer, format: int64}}
             updated_at: {type: string, format: date-time}
+    InspectionSourceStatus:
+      type: object
+      required: [sensor_id, sensor_enabled, reader_active, process_reachable, capture_live, state, counters, reader_stats]
+      properties:
+        sensor_id: {type: string}
+        sensor_enabled: {type: boolean}
+        sensor_epoch: {type: string}
+        config_hash: {type: string}
+        ruleset_id: {type: string}
+        mode: {type: string, enum: [IDS, IPS]}
+        reader_active: {type: boolean}
+        process_reachable: {type: boolean}
+        capture_live: {type: boolean}
+        heartbeat_age_ms: {type: integer, format: int64, minimum: 0}
+        state: {type: string, enum: [DISABLED, HEALTHY, DEGRADED, UNAVAILABLE]}
+        reason: {type: string}
+        last_read: {type: string, format: date-time}
+        last_heartbeat: {type: string, format: date-time}
+        counters: {type: object, additionalProperties: true}
+        reader_stats: {type: object, additionalProperties: {type: integer, format: int64}}
+    IPSQueueStatus:
+      type: object
+      required: [requested, configured, capture_live, lease_active]
+      properties:
+        requested: {type: boolean}
+        configured: {type: boolean}
+        capture_live: {type: boolean}
+        lease_active: {type: boolean}
+        last_renewal: {type: string, format: date-time}
+        last_error: {type: string}
+    InspectionCapabilitiesEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [supported, modes, applications, fail_modes, rulesets, application_match_modes, limitations, runtime_ipc_version, build_version, semantics, ruleset_hashes, limits]
+          properties:
+            supported: {type: boolean}
+            modes: {type: array, items: {type: string, enum: [IDS, IPS]}}
+            applications: {type: array, items: {type: string, enum: [HTTP, TLS, DNS, SSH]}}
+            fail_modes: {type: array, items: {type: string, enum: [OPEN]}}
+            rulesets: {type: array, items: {type: string}}
+            application_match_modes: {type: array, items: {type: string, enum: [RESTRICT_L3_ALLOW]}}
+            limitations: {type: array, items: {type: string}}
+            runtime_ipc_version: {type: integer, minimum: 3}
+            build_version: {type: string}
+            semantics: {type: string, enum: [RESTRICT_L3_ALLOW]}
+            ruleset_hashes: {type: object, additionalProperties: {type: string}}
+            limits: {type: object, additionalProperties: true}
     Config:
       type: object
       required: [interfaces, zones, routes, nat_rules, policies, security_profiles]

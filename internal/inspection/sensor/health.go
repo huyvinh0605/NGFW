@@ -21,7 +21,7 @@ func NewHealthReducer(sensorID string, enabled bool) *HealthReducer {
 	if enabled {
 		state = "STARTING"
 	}
-	return &HealthReducer{enabled: enabled, snapshot: inspection.SourceHealth{SensorID: sensorID, State: state}}
+	return &HealthReducer{enabled: enabled, snapshot: inspection.SourceHealth{SensorID: sensorID, SensorEnabled: enabled, State: state}}
 }
 
 func (h *HealthReducer) RecordProbe(now time.Time, ok bool, reason string) {
@@ -32,6 +32,7 @@ func (h *HealthReducer) RecordProbe(now time.Time, ok bool, reason string) {
 		return
 	}
 	if ok {
+		h.snapshot.ProcessReachable = true
 		h.successes++
 		h.snapshot.LastHeartbeat = timePointer(now)
 		if h.successes >= 2 {
@@ -39,6 +40,7 @@ func (h *HealthReducer) RecordProbe(now time.Time, ok bool, reason string) {
 			h.snapshot.Reason = ""
 		}
 	} else {
+		h.snapshot.ProcessReachable = false
 		h.successes = 0
 		h.snapshot.State = "DEGRADED"
 		h.snapshot.Reason = reason
@@ -73,7 +75,10 @@ func (h *HealthReducer) SetBacklog(value bool) { h.mu.Lock(); h.backlog = value;
 func (h *HealthReducer) CaptureLive(now time.Time) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if !h.enabled {
+	return h.captureLiveLocked(now)
+}
+func (h *HealthReducer) captureLiveLocked(now time.Time) bool {
+	if !h.enabled || !h.snapshot.ProcessReachable {
 		return false
 	}
 	if h.backlog && h.lastProgress != nil && now.Sub(*h.lastProgress) > 6*time.Second {
@@ -88,6 +93,7 @@ func (h *HealthReducer) HealthSnapshot() inspection.SourceHealth {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	result := h.snapshot
+	result.CaptureLive = h.captureLiveLocked(time.Now().UTC())
 	result.Counters = cloneCounters(h.snapshot.Counters)
 	return result
 }

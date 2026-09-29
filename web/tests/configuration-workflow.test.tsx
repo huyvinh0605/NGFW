@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
-import { ConfigurationPage, ConfigStatusBar, PolicyEditor, PolicyPage } from "../src/App.tsx";
+import { ConfigurationPage, ConfigStatusBar, InspectionProfileEditor, PolicyEditor, PolicyPage } from "../src/App.tsx";
 import type { ConfigExport, NGFWConfig, SecurityPolicy } from "../src/types.ts";
 
 function baseConfig(): NGFWConfig {
@@ -320,4 +320,51 @@ test("Policy save adds one Candidate row and does not commit", async () => {
   assert.equal(calls.commit, 0);
   assert.equal(config.candidate.policies.length, 1);
   view.unmount();
+});
+
+test("M3 profile and application restriction round-trip through both editors", async () => {
+  const capabilities = {
+    supported: true,
+    modes: ["IDS", "IPS"],
+    applications: ["HTTP", "TLS", "DNS", "SSH"],
+    fail_modes: ["OPEN"],
+    rulesets: ["m3-builtin-v1"],
+    application_match_modes: ["RESTRICT_L3_ALLOW"],
+    limitations: [],
+    runtime_ipc_version: 3,
+    build_version: "test",
+    semantics: "RESTRICT_L3_ALLOW",
+    ruleset_hashes: {},
+    limits: {},
+  };
+  const profile = { ...baseConfig().security_profiles[0], id: "ips-web", name: "IPS web", ids_ips_enabled: true, dpi_enabled: false, dns_security_enabled: false, url_filtering_enabled: false, threat_intel_enabled: false, behavior_enabled: false, ml_detection_enabled: false, tls_mode: "METADATA_ONLY", minimum_block_risk: 80, logging_level: "INFO", inspection_required: false, inspection_failure_action: "ALLOW", inspection: { mode: "IPS", fail_mode: "OPEN", ruleset_id: "m3-builtin-v1" } };
+  let savedProfile = undefined as typeof profile | undefined;
+  let profileView!: ReactTestRenderer;
+  await act(async () => {
+    profileView = create(<InspectionProfileEditor value={profile} capabilities={capabilities} busy={false} onClose={() => undefined} onSave={async (value) => { savedProfile = value as typeof profile; }}/>);
+  });
+  await act(async () => {
+    profileView.root.findByType("form").props.onSubmit({ preventDefault() {} });
+    await Promise.resolve();
+  });
+  assert.equal(savedProfile?.inspection?.mode, "IPS");
+  assert.equal(savedProfile?.inspection?.fail_mode, "OPEN");
+  assert.equal(savedProfile?.inspection?.ruleset_id, "m3-builtin-v1");
+  profileView.unmount();
+
+  const policy: SecurityPolicy = { id: "web-app", name: "Web app", priority: 40, source_zones: ["lan"], destination_zones: ["wan"], services: ["tcp:80", "tcp:443"], applications: ["HTTP", "TLS"], application_match_mode: "RESTRICT_L3_ALLOW", security_profile_id: "ips-web", action: "ALLOW", scope: "SESSION", log_start: true, log_end: true, enabled: true };
+  let savedPolicy: SecurityPolicy | undefined;
+  let policyView!: ReactTestRenderer;
+  await act(async () => {
+    policyView = create(<PolicyEditor value={policy} zones={["lan", "wan"]} profiles={[savedProfile!]} capabilities={capabilities} busy={false} onClose={() => undefined} onSave={async (value) => { savedPolicy = value; }}/>);
+  });
+  assert.equal(policyView.root.findByProps({ "aria-label": "Applications" }).props.value, "HTTP, TLS");
+  await act(async () => {
+    policyView.root.findByType("form").props.onSubmit({ preventDefault() {} });
+    await Promise.resolve();
+  });
+  assert.deepEqual(savedPolicy?.applications, ["HTTP", "TLS"]);
+  assert.equal(savedPolicy?.application_match_mode, "RESTRICT_L3_ALLOW");
+  assert.equal(savedPolicy?.security_profile_id, "ips-web");
+  policyView.unmount();
 });

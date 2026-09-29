@@ -33,6 +33,7 @@ func TestLinuxShellScriptsParse(t *testing.T) {
 		"scripts/rotate-suricata-logs.sh",
 		"scripts/verify-m3-linux.sh",
 		"tests/integration/m3/probe-capabilities.sh",
+		"tests/integration/m3/replay-suricata.sh",
 	}
 	args := []string{"-n"}
 	for _, path := range paths {
@@ -120,3 +121,55 @@ func TestSensorLauncherUsesLiveCaptureModeAndNotPCAPSocketMode(t *testing.T) {
 }
 
 func argsAsLines(payload []byte) string { return "\n" + strings.TrimSpace(string(payload)) + "\n" }
+
+func TestM3DeploymentContractsAreExplicitAndLeastPrivilege(t *testing.T) {
+	root := repositoryRoot(t)
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	apiUnit := read("deploy/ngfw-api.service")
+	if strings.Contains(apiUnit, "CAP_NET_ADMIN") || strings.Contains(apiUnit, "ngfw-inspect") {
+		t.Fatalf("management API gained dataplane/sensor privilege:\n%s", apiUnit)
+	}
+	for _, path := range []string{"deploy/ngfw-suricata-ids.service", "deploy/ngfw-suricata-ips.service"} {
+		unit := read(path)
+		for _, expected := range []string{"User=ngfw-inspect", "NoNewPrivileges=true", "ProtectSystem=strict", "ReadOnlyPaths=/etc/ngfw/inspection", "CapabilityBoundingSet=CAP_NET_ADMIN"} {
+			if !strings.Contains(unit, expected) {
+				t.Fatalf("%s missing %q", path, expected)
+			}
+		}
+		if strings.Contains(unit, "/var/lib/ngfw/management") || strings.Contains(unit, "/run/ngfw/engine.sock") {
+			t.Fatalf("%s can access management/engine-owned state", path)
+		}
+	}
+	ids := read("deploy/inspection/ids.yaml")
+	ips := read("deploy/inspection/ips.yaml")
+	if !strings.Contains(ids, "group: 100") || !strings.Contains(ids, "stream:\n  inline: no") {
+		t.Fatal("IDS config does not select NFLOG group 100 in passive mode")
+	}
+	for _, expected := range []string{"fail-open: yes", "stream:\n  inline: yes", "filename: /var/lib/ngfw/inspection/ips/control.sock"} {
+		if !strings.Contains(ips, expected) {
+			t.Fatalf("IPS config missing %q", expected)
+		}
+	}
+	installer := read("scripts/install-linux.sh")
+	if strings.Contains(installer, "ngfw-proxy.service") {
+		t.Fatal("M3 installer must not install or start the later HTTP/TLS proxy")
+	}
+	for _, expected := range []string{"--with-inspection", "suricata -T", "replay-m3-suricata.sh", "m3-marker-http.py", "install -o root -g root -m 0755 scripts/verify-m3-linux.sh"} {
+		if !strings.Contains(installer, expected) {
+			t.Fatalf("installer missing %q", expected)
+		}
+	}
+	retention := read("scripts/rotate-suricata-logs.sh")
+	for _, expected := range []string{"33554432", "268435456", "retention_days=${NGFW_INSPECTION_RETENTION_DAYS:-1}", "rotation_grace_seconds=${NGFW_EVE_ROTATION_GRACE_SECONDS:-120}"} {
+		if !strings.Contains(retention, expected) {
+			t.Fatalf("retention script missing %q", expected)
+		}
+	}
+}

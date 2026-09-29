@@ -17,7 +17,7 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
-const RuntimeProtocolVersion uint16 = 3
+const RuntimeProtocolVersion uint16 = domain.RuntimeIPCProtocolVersion
 
 type RuntimeService interface {
 	GetRunningConfig(context.Context) (domain.Config, domain.ConfigVersion, error)
@@ -117,15 +117,8 @@ func (c *RuntimeClient) call(ctx context.Context, operation string, value any, o
 	if maxResponse <= 0 {
 		maxResponse = 8 << 20
 	}
-	encoded, err := io.ReadAll(io.LimitReader(connection, maxResponse+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(encoded)) > maxResponse {
-		return errors.New("runtime IPC response exceeds configured byte limit")
-	}
 	var response runtimeResponse
-	if err := json.Unmarshal(bytes.TrimSpace(encoded), &response); err != nil {
+	if err := readRuntimeJSONLine(connection, maxResponse, &response); err != nil {
 		return fmt.Errorf("decode runtime response: %w", err)
 	}
 	if response.Version != RuntimeProtocolVersion || response.RequestID != requestID {
@@ -328,6 +321,10 @@ func (s *RuntimeServer) handle(parent context.Context, connection net.Conn) {
 }
 
 func readRuntimeRequest(reader io.Reader, maxBytes int64, out *runtimeRequest) error {
+	return readRuntimeJSONLine(reader, maxBytes, out)
+}
+
+func readRuntimeJSONLine(reader io.Reader, maxBytes int64, out any) error {
 	if maxBytes <= 0 {
 		maxBytes = 8 << 20
 	}
@@ -364,7 +361,7 @@ func readRuntimeRequest(reader io.Reader, maxBytes int64, out *runtimeRequest) e
 	if tooLarge {
 		return errors.New("runtime IPC request exceeds configured byte limit")
 	}
-	if err := json.Unmarshal(encoded.Bytes(), out); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(encoded.Bytes()), out); err != nil {
 		return err
 	}
 	return nil

@@ -20,7 +20,7 @@ import {
   normalizeStats,
 } from "./runtimeData";
 import { normalizeServiceList } from "./policy";
-import { normalizeInspectionCapabilities, normalizeInspectionHealth, normalizeThreatEventPage } from "./inspectionData";
+import { normalizeInspectionCapabilities, normalizeInspectionHealth, normalizeThreatEventPageData } from "./inspectionData";
 import { ApplicationBadge, InspectionBadge, InspectionHealthPanel, SessionInspectionDetails } from "./inspectionComponents";
 import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay, requiresEventCatchup } from "./wsLifecycle";
 import type {
@@ -180,9 +180,14 @@ type LiveData = {
   ml: MLStatus | null;
   inspection: InspectionHealth | null;
   inspectionCapabilities: InspectionCapabilities | null;
+  securityStreamID: string;
+  securityNextCursor: string;
+  securityHasMore: boolean;
+  securityGap: boolean;
+  securityEvicted: number;
 };
 
-const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null, inspection: null, inspectionCapabilities: null };
+const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null, inspection: null, inspectionCapabilities: null, securityStreamID: "", securityNextCursor: "", securityHasMore: false, securityGap: false, securityEvicted: 0 };
 
 export default function App() {
   const initialNavigation = useRef(readConsoleNavigation(window.location.hash, window.history.state)).current;
@@ -204,6 +209,8 @@ export default function App() {
   const liveError = useRef("");
   const configError = useRef("");
   const commitInFlight = useRef(false);
+  const securityCursor = useRef("");
+  const securityLoading = useRef(false);
 
   const refreshConnectionError = useCallback(() => {
     setConnectionError(liveError.current || configError.current);
@@ -235,7 +242,7 @@ export default function App() {
         api<unknown>("/api/v1/reputation"),
         api<unknown>("/api/v1/audit?limit=250"),
 		api<unknown>("/api/v1/inspection/health"),
-		api<unknown>("/api/v1/security/events?limit=200"),
+		api<unknown>(`/api/v1/security/events?limit=200${securityCursor.current ? `&cursor=${encodeURIComponent(securityCursor.current)}` : ""}`),
 		api<unknown>("/api/v1/inspection/capabilities"),
       ]);
       const read = <T,>(index: number, previous: T, normalize: (value: unknown) => T | null): T => {
@@ -251,8 +258,16 @@ export default function App() {
       };
       setLive((current) => {
 		const runtimeEvents = read(2, current.events.filter((event) => event.event_class !== "security"), (value) => normalizeEventPage(value));
-		const securityEvents = read(9, current.events.filter((event) => event.event_class === "security"), (value) => normalizeThreatEventPage(value));
-		const mergedEvents = [...securityEvents, ...runtimeEvents].filter((event, index, values) => values.findIndex((candidate) => candidate.event_id === event.event_id) === index).slice(0, 10000);
+		const securityResult = results[9];
+		let page: ReturnType<typeof normalizeThreatEventPageData> | null = null;
+		if (securityResult.status === "fulfilled") {
+		  try { page = normalizeThreatEventPageData(securityResult.value); } catch { page = null; }
+		}
+		const replaceSecurity = Boolean(page?.reset_required || (page?.stream_id && current.securityStreamID && page.stream_id !== current.securityStreamID));
+		const priorSecurity = replaceSecurity ? [] : current.events.filter((event) => event.event_class === "security");
+		const securityEvents = page ? [...priorSecurity, ...page.items] : priorSecurity;
+		const mergedEvents = [...securityEvents, ...runtimeEvents].filter((event, index, values) => values.findIndex((candidate) => candidate.event_id === event.event_id) === index).slice(-10000);
+		if (page?.next_cursor) securityCursor.current = page.next_cursor;
 		return {
 		  health: read(0, current.health, normalizeHealth),
 		  sessions: read(1, current.sessions, (value) => normalizeSessionPage(value)),
@@ -264,6 +279,11 @@ export default function App() {
 		  audit: read(7, current.audit, (value) => normalizeAuditPage(value)),
 		  inspection: read(8, current.inspection, normalizeInspectionHealth),
 		  inspectionCapabilities: read(10, current.inspectionCapabilities, normalizeInspectionCapabilities),
+		  securityStreamID: page?.stream_id || current.securityStreamID,
+		  securityNextCursor: page?.next_cursor || current.securityNextCursor,
+		  securityHasMore: page?.has_more ?? current.securityHasMore,
+		  securityGap: page ? page.gap || page.reset_required : current.securityGap,
+		  securityEvicted: page?.evicted_count ?? current.securityEvicted,
 		};
 	  });
       const failures = results.flatMap((result, index) => result.status === "rejected" ? [`${endpointLabels[index]}: ${errorMessage(result.reason)}`] : []);
@@ -276,6 +296,36 @@ export default function App() {
       setRefreshing(false);
     }
   }, [refreshConnectionError]);
+
+  const loadMoreSecurity = useCallback(async () => {
+    if (securityLoading.current) return;
+    securityLoading.current = true;
+    try {
+      const cursor = securityCursor.current;
+      const page = normalizeThreatEventPageData(await api<unknown>(`/api/v1/security/events?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`));
+      setLive((current) => {
+        const replace = Boolean(page.reset_required || (page.stream_id && current.securityStreamID && page.stream_id !== current.securityStreamID));
+        const runtimeEvents = current.events.filter((event) => event.event_class !== "security");
+        const securityEvents = [...(replace ? [] : current.events.filter((event) => event.event_class === "security")), ...page.items]
+          .filter((event, index, values) => values.findIndex((candidate) => candidate.event_id === event.event_id) === index)
+          .slice(-10000);
+        if (page.next_cursor) securityCursor.current = page.next_cursor;
+        return {
+          ...current,
+          events: [...securityEvents, ...runtimeEvents],
+          securityStreamID: page.stream_id || current.securityStreamID,
+          securityNextCursor: page.next_cursor || current.securityNextCursor,
+          securityHasMore: page.has_more,
+          securityGap: page.gap || page.reset_required,
+          securityEvicted: page.evicted_count,
+        };
+      });
+    } catch (error) {
+      notify("error", `Không tải được trang security event tiếp theo: ${errorMessage(error)}`);
+    } finally {
+      securityLoading.current = false;
+    }
+  }, [notify]);
 
   const loadConfig = useCallback(async () => {
     if (configLoading.current) return;
@@ -638,7 +688,7 @@ export default function App() {
         {initialLoading && !live.health ? <div className="page-loading"><span className="spinner large"/><p>Đang kết nối tới appliance…</p></div> : <>
           {page === "overview" && <OverviewPage live={live} config={config} lastUpdated={lastUpdated} onNavigate={navigate}/>} 
           {page === "sessions" && <SessionsPage sessions={live.sessions} onTerminate={terminateSession} onNeedAccess={() => setAccessOpen(true)}/>} 
-          {page === "threats" && <ThreatsPage events={live.events} blocks={live.blocks} reputation={live.reputation} audit={live.audit} onAddBlock={addBlock} onDeleteBlock={deleteBlock} onAddReputation={addReputation} onDeleteReputation={deleteReputation}/>} 
+          {page === "threats" && <ThreatsPage events={live.events} blocks={live.blocks} reputation={live.reputation} audit={live.audit} securityHasMore={live.securityHasMore} securityGap={live.securityGap} securityEvicted={live.securityEvicted} onLoadMoreSecurity={loadMoreSecurity} onAddBlock={addBlock} onDeleteBlock={deleteBlock} onAddReputation={addReputation} onDeleteReputation={deleteReputation}/>} 
 		  {page === "policy" && <PolicyPage
 			config={config}
 			capabilities={live.inspectionCapabilities}
@@ -786,7 +836,7 @@ function SessionDrawer({ detail, loading, onClose, onTerminate }: { detail: Sess
   const context = detail?.security_context;
   return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng chi tiết" onClick={onClose}/><aside className="drawer" aria-label="Chi tiết session"><div className="drawer-header"><div><span className="eyebrow">SESSION DETAIL</span><h2>{session?.application || "Đang tải…"}</h2></div><button className="icon-button" aria-label="Đóng" onClick={onClose}><Icon name="close"/></button></div>
     {loading || !session || !context ? <div className="drawer-loading"><span className="spinner large"/></div> : <div className="drawer-body">
-      <div className="risk-summary"><div className={cx("risk-orb", session.risk_available && riskClass(session.risk_score))}><strong>{session.risk_available ? session.risk_score : "—"}</strong><span>RISK</span></div><div><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge><h3>{session.risk_available ? context.risk.level || "Unknown risk" : "Risk engine chưa có trong M2"}</h3><p>{context.policy.reason || session.decision_reason || session.policy_id || "Decision chưa khả dụng"}</p></div></div>
+      <div className="risk-summary"><div className={cx("risk-orb", session.risk_available && riskClass(session.risk_score))}><strong>{session.risk_available ? session.risk_score : "—"}</strong><span>RISK</span></div><div><Badge tone={session.decision === "ALLOW" ? "low" : session.decision ? "critical" : "medium"}>{session.decision || (session.decision_status === "INVALIDATED" ? "INVALIDATED" : "UNAVAILABLE")}</Badge><h3>{session.risk_available ? context.risk.level || "Unknown risk" : "Risk engine chưa thuộc M3"}</h3><p>{context.policy.reason || session.decision_reason || session.policy_id || "Decision chưa khả dụng"}</p></div></div>
       <DetailSection title="Kết nối"><DetailPair label="Client" value={`${session.client_ip}:${session.client_port}`}/><DetailPair label="Server" value={`${session.server_ip}:${session.server_port}`}/><DetailPair label="Zone" value={`${session.source_zone} → ${session.destination_zone}`}/><DetailPair label="Protocol" value={`${session.protocol?.toUpperCase()} · ${session.tcp_state || "—"}`}/><DetailPair label="Bắt đầu" value={formatDate(session.start_time)}/><DetailPair label="Lần cuối" value={relativeTime(session.last_seen)}/></DetailSection>
       <DetailSection title="Lưu lượng">{session.counters_available ? <div className="traffic-pair"><div><span>↑ Original</span><strong>{formatBytes(session.bytes_up)}</strong><small>{formatNumber(session.packets_up)} packets</small></div><div><span>↓ Reply</span><strong>{formatBytes(session.bytes_down)}</strong><small>{formatNumber(session.packets_down)} packets</small></div></div> : <p className="muted">Unavailable: conntrack chưa cung cấp counters cho session này.</p>}</DetailSection>
 	  <DetailSection title="Security context"><DetailPair label="Policy" value={context.policy.matched_policy_id || session.policy_id || "default"}/><DetailPair label="Scope" value={context.policy.scope || "SESSION"}/><DetailPair label="ML" value={context.ml.available ? `${context.ml.predicted_class || "BENIGN"} · ${Math.round(context.ml.confidence * 100)}%` : "Unavailable"}/><DetailPair label="TLS" value={String(context.tls.available ? context.tls.tls_version || "Observed" : "Unavailable")}/><DetailPair label="Signals" value={String(context.signals?.length ?? 0)}/></DetailSection>
@@ -801,11 +851,15 @@ function DetailSection({ title, children }: { title: string; children: ReactNode
 function DetailPair({ label, value }: { label: string; value: string }) { return <div className="detail-pair"><span>{label}</span><strong>{value}</strong></div>; }
 
 type ThreatTab = "events" | "blocks" | "reputation" | "audit";
-function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBlock, onAddReputation, onDeleteReputation }: {
+function ThreatsPage({ events, blocks, reputation, audit, securityHasMore, securityGap, securityEvicted, onLoadMoreSecurity, onAddBlock, onDeleteBlock, onAddReputation, onDeleteReputation }: {
   events: SecurityEvent[];
   blocks: TemporaryBlock[];
   reputation: ReputationEntry[];
   audit: AuditEntry[];
+  securityHasMore: boolean;
+  securityGap: boolean;
+  securityEvicted: number;
+  onLoadMoreSecurity: () => Promise<void>;
   onAddBlock: (input: { indicator: string; reason: string; minutes: number; source_event?: string }) => Promise<boolean>;
   onDeleteBlock: (id: string) => Promise<boolean>;
   onAddReputation: (entry: ReputationEntry) => Promise<boolean>;
@@ -846,8 +900,10 @@ function ThreatsPage({ events, blocks, reputation, audit, onAddBlock, onDeleteBl
     <section className="subnav panel compact"><button className={cx(tab === "events" && "active")} onClick={() => setTab("events")}>Events <Badge>{events.length}</Badge></button><button className={cx(tab === "blocks" && "active")} onClick={() => setTab("blocks")}>Temporary blocks <Badge>{blocks.length}</Badge></button><button className={cx(tab === "reputation" && "active")} onClick={() => setTab("reputation")}>Reputation <Badge>{reputation.length}</Badge></button><button className={cx(tab === "audit" && "active")} onClick={() => setTab("audit")}>Audit log <Badge>{audit.length}</Badge></button></section>
 
     {tab === "events" && <>
+      {securityGap && <div className="connection-banner"><Icon name="warning"/><div><strong>Security event stream có khoảng trống</strong><span>Engine đã loại bỏ {formatNumber(securityEvicted)} bản ghi cũ hoặc vừa khởi động lại. Danh sách được đồng bộ lại từ phần lịch sử còn giữ.</span></div></div>}
       <section className="toolbar panel compact"><div className="search-box"><Icon name="search" size={16}/><input placeholder="Tìm loại event, session, detector hoặc IP…" value={query} onChange={(event) => setQuery(event.target.value)}/></div><select aria-label="Lọc loại event" value={eventClass} onChange={(event) => setEventClass(event.target.value)}><option value="ALL">Mọi loại event</option><option value="runtime">Runtime</option><option value="policy">Policy</option><option value="security">Security</option></select><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="ALL">Mọi severity</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select><span className="result-count">{orderedEvents.length} events</span></section>
       <section className="panel table-panel"><div className="table-scroll"><table><thead><tr><th>Thời gian</th><th>Loại</th><th>Sự kiện</th><th>Session</th><th>Severity</th><th>Chi tiết</th></tr></thead><tbody>{orderedEvents.map((event) => <tr className="clickable-row" key={event.event_id} onClick={() => setSelected(event)}><td><time>{relativeTime(event.timestamp)}</time><small>{formatDate(event.timestamp)}</small></td><td><Badge tone={event.event_class === "security" ? "critical" : event.event_class === "policy" ? "medium" : "blue"}>{event.event_class}</Badge></td><td><strong>{event.category || "Unknown"}</strong><small>{event.detector}{event.signature_id ? ` · ${event.signature_id}` : ""}</small></td><td className="mono">{event.session_id || "—"}</td><td><Badge tone={severityClass(event.severity)}>{event.severity}</Badge></td><td>{event.evidence || "—"}</td></tr>)}{!orderedEvents.length && <tr><td colSpan={6}><EmptyState icon="check" title="Không có event phù hợp" description="Hệ thống chưa ghi nhận sự kiện theo bộ lọc hiện tại."/></td></tr>}</tbody></table></div></section>
+      {securityHasMore && <div className="panel-actions"><Button variant="ghost" onClick={() => void onLoadMoreSecurity()}>Tải thêm security events</Button></div>}
     </>}
 
     {tab === "blocks" && <div className="split-grid">

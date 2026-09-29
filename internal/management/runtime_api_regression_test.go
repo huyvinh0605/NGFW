@@ -738,3 +738,20 @@ func TestRuntimeAPIWebSocketReconnectRepeatedDisconnectAndShutdown(t *testing.T)
 		t.Fatalf("connection remained readable after API shutdown: %#v", afterShutdown)
 	}
 }
+
+func TestParseSecurityQueryAcceptsFullSeverityRangeAndSignature(t *testing.T) {
+	for _, severity := range []string{"UNKNOWN", "INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/security/events?severity="+severity+"&signature_id=4294967295", nil)
+		query, err := parseSecurityQuery(request)
+		if err != nil {
+			t.Fatalf("severity %s rejected: %v", severity, err)
+		}
+		if string(query.Severity) != severity || !query.HasSignatureID || query.SignatureID != ^uint32(0) {
+			t.Fatalf("severity %s query=%#v", severity, query)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/security/events?signature_id=0", nil)
+	if _, err := parseSecurityQuery(request); err == nil {
+		t.Fatal("zero signature ID was accepted")
+	}
+}

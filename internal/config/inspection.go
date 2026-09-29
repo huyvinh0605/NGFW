@@ -130,7 +130,7 @@ func ValidateInspection(c domain.Config) []string {
 		if profile.DNSSecurityEnabled || profile.URLFilteringEnabled || profile.ThreatIntelEnabled || profile.BehaviorEnabled || profile.MLDetectionEnabled {
 			errs = append(errs, fmt.Sprintf("profile %s enables a feature outside M3", profile.ID))
 		}
-		if profile.TLSMode == domain.TLSDecrypt {
+		if profile.TLSMode == domain.TLSDecrypt && !(domain.UsesM4(c) && profile.RequestGate != nil && profile.RequestGate.Enabled) {
 			errs = append(errs, fmt.Sprintf("profile %s TLS DECRYPT is unsupported in M3", profile.ID))
 		}
 		if profile.InspectionRequired || profile.InspectionFailureAction == domain.DecisionDrop || profile.InspectionFailureAction == domain.DecisionReject {

@@ -59,6 +59,7 @@ type InspectionRuntime struct {
 	wg            sync.WaitGroup
 	executor      InspectionIntentExecutor
 	health        map[string]inspection.SourceHealth
+	healthVersion map[string]string
 }
 
 func NewInspectionRuntime(runtime *Runtime, limits domain.InspectionLimits, sources []inspection.EventSource) *InspectionRuntime {
@@ -89,7 +90,7 @@ func NewInspectionRuntimeWithScope(runtime *Runtime, limits domain.InspectionLim
 	if sessionItems > 50000 {
 		sessionItems = 50000
 	}
-	value := &InspectionRuntime{runtime: runtime, sources: append([]inspection.EventSource(nil), sources...), security: NewSecurityEventStore(limits.SecurityEvents, limits.SecurityEventBytes), queue: make(chan queuedObservation, queueItems), sessionQueue: make(chan sessionChange, sessionItems), intentQueue: make(chan domain.InspectionIntent, intentItems), maxQueueBytes: int64(maxBytes), appTimeout: time.Duration(limits.AppDetectionTimeoutMillis) * time.Millisecond, pending: correlation.NewPendingCorrelations(limits.CorrelationPending, time.Duration(limits.CorrelationWaitMillis)*time.Millisecond), deduper: eve.NewDeduper(20000, 4<<20, 10*time.Minute), health: map[string]inspection.SourceHealth{}}
+	value := &InspectionRuntime{runtime: runtime, sources: append([]inspection.EventSource(nil), sources...), security: NewSecurityEventStore(limits.SecurityEvents, limits.SecurityEventBytes), queue: make(chan queuedObservation, queueItems), sessionQueue: make(chan sessionChange, sessionItems), intentQueue: make(chan domain.InspectionIntent, intentItems), maxQueueBytes: int64(maxBytes), appTimeout: time.Duration(limits.AppDetectionTimeoutMillis) * time.Millisecond, pending: correlation.NewPendingCorrelations(limits.CorrelationPending, time.Duration(limits.CorrelationWaitMillis)*time.Millisecond), deduper: eve.NewDeduper(20000, 4<<20, 10*time.Minute), health: map[string]inspection.SourceHealth{}, healthVersion: map[string]string{}}
 	if runtime != nil {
 		value.resolver = correlation.NewResolver(runtime.Store, scope, 10000)
 	}
@@ -219,8 +220,27 @@ func (r *InspectionRuntime) loop(ctx context.Context) {
 			r.retryPending(ctx, now)
 		case now := <-deadlineTicker.C:
 			r.sweepAppDeadlines(now, 512)
+			r.publishHealthChanges(now)
 		case now := <-renewTicker.C:
 			r.renewAppGuards(now, 512)
+		}
+	}
+}
+
+func (r *InspectionRuntime) publishHealthChanges(now time.Time) {
+	if r == nil || r.runtime == nil {
+		return
+	}
+	for id, source := range r.Health() {
+		fingerprint := fmt.Sprintf("%t|%s|%s|%t|%t|%t|%s|%s", source.SensorEnabled, source.Mode, source.State, source.ReaderActive, source.ProcessReachable, source.CaptureLive, source.SensorEpoch, source.Reason)
+		r.mu.Lock()
+		previous, exists := r.healthVersion[id]
+		if !exists || previous != fingerprint {
+			r.healthVersion[id] = fingerprint
+		}
+		r.mu.Unlock()
+		if !exists || previous != fingerprint {
+			r.runtime.publish(domain.RuntimeEvent{Kind: domain.EventInspectionHealthChanged, Class: domain.EventClassInspection, Generation: r.runtime.CurrentGeneration(), Timestamp: now.UTC(), Reason: id + ": " + source.State})
 		}
 	}
 }
@@ -249,19 +269,27 @@ func (r *InspectionRuntime) handleObservation(ctx context.Context, obs inspectio
 	// source position may still complete a formerly pending correlation, but it
 	// must not increment the session threat count or publish a second alert.
 	attachThreat := false
+	securityStored := false
 	if obs.Alert != nil && !obs.Alert.InternalDiscovery {
 		event := ThreatFromObservation(obs, domain.RuntimeSession{}, connectivity.InspectionSelection{Mode: obs.Source.Mode})
 		event.CorrelationState = domain.CorrelationUncorrelated
 		event.CorrelationReason = "correlation pending"
 		stored, added, addErr := r.security.Add(event)
 		if addErr == nil {
+			securityStored = true
 			attachThreat = added || stored.SessionID == ""
+			if added {
+				r.runtime.publish(domain.RuntimeEvent{Kind: domain.EventSecurityAlert, Class: domain.EventClassSecurity, EventID: stored.EventID, SessionID: stored.SessionID, Timestamp: stored.IngestedAt})
+			}
 		}
 	}
 	resolution := r.resolver.Resolve(obs)
 	if resolution.State != domain.CorrelationCorrelated || resolution.Session == nil {
-		if obs.Alert != nil {
-			_, _ = r.security.UpdateCorrelation(obs.ID, "", "", 0, resolution.State, resolution.Reason)
+		if obs.Alert != nil && securityStored {
+			before, _ := r.security.Get(obs.ID)
+			if updated, updateErr := r.security.UpdateCorrelation(obs.ID, "", "", 0, resolution.State, resolution.Reason); updateErr == nil && updated.CorrelationRevision != before.CorrelationRevision {
+				r.runtime.publish(domain.RuntimeEvent{Kind: domain.EventSecurityEventUpdated, Class: domain.EventClassSecurity, EventID: updated.EventID, SessionID: updated.SessionID, Timestamp: time.Now().UTC(), Reason: resolution.Reason})
+			}
 		}
 		if resolution.State == domain.CorrelationUncorrelated {
 			_ = r.pending.Add(obs, time.Now().UTC())
@@ -270,8 +298,11 @@ func (r *InspectionRuntime) handleObservation(ctx context.Context, obs inspectio
 	}
 	r.pending.Remove(obs.ID)
 	value := resolution.Session.Clone()
-	if obs.Alert != nil {
-		_, _ = r.security.UpdateCorrelation(obs.ID, value.SessionID, value.MatchedPolicyID, value.PolicyGeneration, domain.CorrelationCorrelated, resolution.Reason)
+	if obs.Alert != nil && securityStored {
+		before, _ := r.security.Get(obs.ID)
+		if updated, updateErr := r.security.UpdateCorrelation(obs.ID, value.SessionID, value.MatchedPolicyID, value.PolicyGeneration, domain.CorrelationCorrelated, resolution.Reason); updateErr == nil && updated.CorrelationRevision != before.CorrelationRevision {
+			r.runtime.publish(domain.RuntimeEvent{Kind: domain.EventSecurityEventUpdated, Class: domain.EventClassSecurity, EventID: updated.EventID, SessionID: updated.SessionID, Generation: value.PolicyGeneration, Timestamp: time.Now().UTC(), Reason: resolution.Reason})
+		}
 	}
 	if resolution.Recent {
 		return
@@ -307,6 +338,11 @@ func (r *InspectionRuntime) handleObservation(ctx context.Context, obs inspectio
 			return
 		}
 		for _, notification := range reduction.Notifications {
+			if notification.Kind == domain.EventSecurityAlert {
+				// The physical alert notification was emitted when its bounded
+				// security record was committed. Correlation is a separate update.
+				continue
+			}
 			notification.Revision = updated.Revision
 			notification.InspectionRevision = updated.Inspection.Revision
 			r.runtime.publish(notification)

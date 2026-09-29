@@ -91,12 +91,19 @@ type SensorCounters struct {
 }
 
 type SourceHealth struct {
-	SensorID      string                `json:"sensor_id"`
-	Mode          domain.InspectionMode `json:"mode,omitempty"`
-	State         string                `json:"state"`
-	Reason        string                `json:"reason,omitempty"`
-	LastRead      *time.Time            `json:"last_read,omitempty"`
-	LastHeartbeat *time.Time            `json:"last_heartbeat,omitempty"`
-	Counters      SensorCounters        `json:"counters"`
-	ReaderStats   map[string]uint64     `json:"reader_stats,omitempty"`
+	SensorID         string                `json:"sensor_id"`
+	SensorEnabled    bool                  `json:"sensor_enabled"`
+	SensorEpoch      string                `json:"sensor_epoch,omitempty"`
+	ConfigHash       string                `json:"config_hash,omitempty"`
+	RulesetID        string                `json:"ruleset_id,omitempty"`
+	Mode             domain.InspectionMode `json:"mode,omitempty"`
+	ReaderActive     bool                  `json:"reader_active"`
+	ProcessReachable bool                  `json:"process_reachable"`
+	CaptureLive      bool                  `json:"capture_live"`
+	State            string                `json:"state"`
+	Reason           string                `json:"reason,omitempty"`
+	LastRead         *time.Time            `json:"last_read,omitempty"`
+	LastHeartbeat    *time.Time            `json:"last_heartbeat,omitempty"`
+	Counters         SensorCounters        `json:"counters"`
+	ReaderStats      map[string]uint64     `json:"reader_stats,omitempty"`
 }

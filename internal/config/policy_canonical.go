@@ -63,7 +63,18 @@ func effectivePolicyKey(c *domain.Config, policy domain.SecurityPolicy) (string,
 	if c != nil && policy.SecurityProfileID != "" {
 		for _, profile := range c.Profiles {
 			if profile.ID == policy.SecurityProfileID {
-				profileKey, err := ProfileEffectiveKey(profile)
+				var profileKey string
+				var err error
+				if domain.UsesM4(*c) && profile.RequestGate != nil && profile.RequestGate.Enabled {
+					var exclusionsKey string
+					exclusionsKey, err = TLSExclusionEffectiveKey(*c)
+					if err != nil {
+						return "", err
+					}
+					profileKey, err = profileEffectiveKey(profile, exclusionsKey)
+				} else {
+					profileKey, err = ProfileEffectiveKey(profile)
+				}
 				if err != nil {
 					return "", err
 				}
@@ -80,13 +91,25 @@ func effectivePolicyKey(c *domain.Config, policy domain.SecurityPolicy) (string,
 	return string(encoded), nil
 }
 
-// ProfileEffectiveKey contains only settings that can change M3 behavior.
+// ProfileEffectiveKey contains settings that change legacy/M3 behavior. M4
+// settings are added by EffectivePolicyKey only when the global gate is on.
 func ProfileEffectiveKey(profile domain.SecurityProfile) (string, error) {
+	return profileEffectiveKey(profile, "")
+}
+
+func profileEffectiveKey(profile domain.SecurityProfile, exclusionsKey string) (string, error) {
 	value := struct {
-		IDSIPSEnabled bool                      `json:"ids_ips_enabled"`
-		TLSMode       domain.TLSMode            `json:"tls_mode"`
-		Inspection    *domain.InspectionProfile `json:"inspection,omitempty"`
+		IDSIPSEnabled bool                       `json:"ids_ips_enabled"`
+		TLSMode       domain.TLSMode             `json:"tls_mode"`
+		Inspection    *domain.InspectionProfile  `json:"inspection,omitempty"`
+		RequestGate   *domain.RequestGateProfile `json:"request_gate,omitempty"`
+		Exclusions    string                     `json:"tls_exclusions,omitempty"`
 	}{IDSIPSEnabled: profile.IDSIPSEnabled, TLSMode: profile.TLSMode, Inspection: profile.Inspection}
+	if exclusionsKey != "" && profile.RequestGate != nil && profile.RequestGate.Enabled {
+		gate := *profile.RequestGate
+		value.RequestGate = &gate
+		value.Exclusions = exclusionsKey
+	}
 	encoded, err := json.Marshal(value)
 	return string(encoded), err
 }

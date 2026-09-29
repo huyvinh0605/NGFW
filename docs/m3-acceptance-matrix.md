@@ -1,8 +1,9 @@
 # M3 acceptance matrix
 
-Trạng thái khởi tạo 2026-09-22: **tất cả tiêu chí dưới đây NOT_RUN**.
-Tài liệu này chuẩn bị tiêu chí cho implementation; không phải bằng chứng M3 đã
-chạy. Xem [master spec](M3_IMPLEMENTATION_PLAN.md),
+Trạng thái acceptance 2026-09-28: **tất cả kịch bản Ubuntu dưới đây NOT_RUN**.
+Source đã được triển khai và các gate cục bộ được ghi riêng trong
+[implementation status](m3/IMPLEMENTATION_STATUS.md). Tài liệu này không phải
+bằng chứng M3 đã chạy trên appliance. Xem [master spec](M3_IMPLEMENTATION_PLAN.md),
 [coding tasks](m3/CODING_TASKS.md), [Linux runbook](../tests/integration/m3/README.md).
 
 Mỗi row khi thực thi phải thêm: git/worktree hash, config generation/hash,
@@ -64,8 +65,8 @@ go test -race -count=1 ./internal/engine/... ./internal/session/... \
 ```
 
 Trong thư mục `web`: `npm ci`, `npm test`, `npm run build`.
-Các script M3 ghi trong runbook **chưa được tạo ở bước viết specification**;
-agent tạo chúng tại T01/T29 rồi mới ghi kết quả chạy.
+Các script M3 trong runbook đã được tạo. Chỉ đổi trạng thái từng hàng sau khi
+script tương ứng chạy và evidence thật đã được lưu.
 
 ## Evidence index bắt buộc cho mỗi lần chạy
 

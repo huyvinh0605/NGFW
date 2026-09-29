@@ -9,6 +9,7 @@ import {
   normalizeSessionInspection,
   normalizeThreatEvent,
   normalizeThreatEventPage,
+  normalizeThreatEventPageData,
 } from "../src/inspectionData.ts";
 import { normalizeConfigExport, normalizeSessionPage } from "../src/runtimeData.ts";
 
@@ -60,6 +61,29 @@ test("does not confuse a reported packet drop with an applied session guard", ()
   assert.equal(guard.enforcement?.scope, "SESSION");
   assert.equal(guard.enforcement?.status, "APPLIED");
   assert.doesNotThrow(() => create(<ThreatEventTable events={[packet, guard]}/>).toJSON());
+});
+
+test("preserves bounded security-event cursor metadata and drops malformed records", () => {
+  const page = normalizeThreatEventPageData({
+    items: [{ event_id: "evt-1", severity: "HIGH" }, null, "bad"],
+    stream_id: "boot-a",
+    next_sequence: "42",
+    next_cursor: "boot-a:42",
+    oldest_sequence: 7,
+    has_more: true,
+    gap: true,
+    gap_from: 7,
+    evicted_count: 6,
+  });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].event_id, "evt-1");
+  assert.equal(page.stream_id, "boot-a");
+  assert.equal(page.next_sequence, 42);
+  assert.equal(page.next_cursor, "boot-a:42");
+  assert.equal(page.has_more, true);
+  assert.equal(page.gap, true);
+  assert.equal(page.gap_from, 7);
+  assert.equal(page.evicted_count, 6);
 });
 
 test("sensor-down health remains visible and one malformed source cannot crash the panel", () => {
