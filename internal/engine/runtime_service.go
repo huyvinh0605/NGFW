@@ -22,6 +22,7 @@ import (
 // Linux dataplane state.
 type RuntimeServiceAdapter struct {
 	Runtime *Runtime
+	Gate    *GateService
 	Config  *config.Manager
 	Apply   func(context.Context, domain.Config) error
 	// ApplyGeneration is the M3-aware privileged path.  The exact generation
@@ -386,6 +387,9 @@ func (s *RuntimeServiceAdapter) GetSession(_ context.Context, id string) (domain
 	value, ok := s.Runtime.Store.Get(id)
 	if !ok {
 		return domain.RuntimeSession{}, session.ErrSessionMissing
+	}
+	if s.Gate != nil {
+		value.RequestGate = s.Gate.RequestEvidenceForSession(id, 32)
 	}
 	return value, nil
 }

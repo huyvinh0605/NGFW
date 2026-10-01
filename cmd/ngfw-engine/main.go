@@ -21,6 +21,7 @@ import (
 	"github.com/kltngfw/ngfw/internal/engine"
 	"github.com/kltngfw/ngfw/internal/engineipc"
 	"github.com/kltngfw/ngfw/internal/flow"
+	"github.com/kltngfw/ngfw/internal/gateipc"
 	"github.com/kltngfw/ngfw/internal/inspection"
 	"github.com/kltngfw/ngfw/internal/inspection/eve"
 	sensorpkg "github.com/kltngfw/ngfw/internal/inspection/sensor"
@@ -265,6 +266,8 @@ func main() {
 		inspectionMu.Unlock()
 	}()
 	service := engine.NewRuntimeServiceAdapter(runtimeEngine, m, nil)
+	gateService := &engine.GateService{Runtime: runtimeEngine, Scope: flow.Scope{NetworkNamespace: os.Getenv("NGFW_NETWORK_NAMESPACE")}}
+	service.Gate = gateService
 	service.ApplyGeneration = applyDataplane
 	service.FinalizeActivation = controller.FinalizeActivation
 	service.BeforeActivate = func(_ context.Context, desired domain.Config, _ uint64) error {
@@ -291,6 +294,12 @@ func main() {
 	ipcServer := engineipc.NewRuntimeServer(engineipc.DefaultSocketPath(stateDir), service)
 	ipcErrors := make(chan error, 1)
 	go func() { ipcErrors <- ipcServer.Serve(ctx) }()
+	gateSocket := os.Getenv("NGFW_REQUEST_GATE_SOCKET")
+	if gateSocket == "" {
+		gateSocket = gateipc.DefaultSocketPath
+	}
+	gateErrors := make(chan error, 1)
+	go func() { gateErrors <- gateipc.NewServer(gateService).ServeUnix(ctx, gateSocket) }()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	logger.Info("ngfw engine started", "ipc_socket", ipcServer.SocketPath)
@@ -305,6 +314,13 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case gateErr := <-gateErrors:
+			if gateErr != nil {
+				logger.Error("request-gate IPC degraded; M1/M2 forwarding remains active", "error", gateErr)
+			} else if ctx.Err() == nil {
+				logger.Error("request-gate IPC stopped unexpectedly; M1/M2 forwarding remains active")
+			}
+			gateErrors = nil
 		case now := <-ticker.C:
 			for _, closed := range runtimeEngine.Store.CleanupExpired(now, 512) {
 				_ = runtimeEngine.ReleaseExpiredSession(closed)

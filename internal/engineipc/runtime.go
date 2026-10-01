@@ -41,6 +41,12 @@ type InspectionRuntimeService interface {
 	GetSecurityEvent(context.Context, string) (domain.ThreatEvent, error)
 }
 
+type RequestGateRuntimeService interface {
+	RequestGateHealth(context.Context) (domain.RequestGateHealth, error)
+	RequestGateCapabilities(context.Context) (domain.RequestGateCapabilities, error)
+	ListRequestGateEvidence(context.Context, uint64, int) (domain.RequestGateEvidencePage, error)
+}
+
 type runtimeRequest struct {
 	Version   uint16          `json:"version"`
 	RequestID string          `json:"request_id"`
@@ -212,6 +218,24 @@ func (c *RuntimeClient) ReadRuntimeEvents(ctx context.Context, after uint64, max
 func (c *RuntimeClient) InspectionHealth(ctx context.Context) (domain.InspectionHealth, error) {
 	var out domain.InspectionHealth
 	err := c.call(ctx, "inspection_health", nil, &out, false)
+	return out, err
+}
+func (c *RuntimeClient) RequestGateHealth(ctx context.Context) (domain.RequestGateHealth, error) {
+	var out domain.RequestGateHealth
+	err := c.call(ctx, "request_gate_health", nil, &out, false)
+	return out, err
+}
+func (c *RuntimeClient) RequestGateCapabilities(ctx context.Context) (domain.RequestGateCapabilities, error) {
+	var out domain.RequestGateCapabilities
+	err := c.call(ctx, "request_gate_capabilities", nil, &out, false)
+	return out, err
+}
+func (c *RuntimeClient) ListRequestGateEvidence(ctx context.Context, after uint64, limit int) (domain.RequestGateEvidencePage, error) {
+	var out domain.RequestGateEvidencePage
+	err := c.call(ctx, "list_request_gate_evidence", struct {
+		After uint64 `json:"after"`
+		Limit int    `json:"limit"`
+	}{after, limit}, &out, false)
 	return out, err
 }
 func (c *RuntimeClient) InspectionCapabilities(ctx context.Context) (domain.InspectionCapabilities, error) {
@@ -516,6 +540,46 @@ func (s *RuntimeServer) dispatch(ctx context.Context, request runtimeRequest) (j
 			return nil, errors.New("inspection runtime IPC is unavailable")
 		}
 		result, err := service.InspectionHealth(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
+	case "request_gate_health":
+		service, ok := s.Service.(RequestGateRuntimeService)
+		if !ok {
+			return nil, errors.New("request-gate runtime IPC is unavailable")
+		}
+		result, err := service.RequestGateHealth(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
+	case "request_gate_capabilities":
+		service, ok := s.Service.(RequestGateRuntimeService)
+		if !ok {
+			return nil, errors.New("request-gate runtime IPC is unavailable")
+		}
+		result, err := service.RequestGateCapabilities(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return encode(result)
+	case "list_request_gate_evidence":
+		service, ok := s.Service.(RequestGateRuntimeService)
+		if !ok {
+			return nil, errors.New("request-gate runtime IPC is unavailable")
+		}
+		var p struct {
+			After uint64 `json:"after"`
+			Limit int    `json:"limit"`
+		}
+		if err := decodePayload(request, &p); err != nil {
+			return nil, err
+		}
+		if p.Limit < 1 || p.Limit > 128 {
+			return nil, errors.New("request-gate evidence limit must be 1..128")
+		}
+		result, err := service.ListRequestGateEvidence(ctx, p.After, p.Limit)
 		if err != nil {
 			return nil, err
 		}

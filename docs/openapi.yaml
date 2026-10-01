@@ -118,6 +118,31 @@ paths:
           content: {application/json: {schema: {$ref: '#/components/schemas/InspectionCapabilitiesEnvelope'}}}
         '503': {description: Engine IPC unavailable}
         '504': {description: Engine IPC timed out}
+  /request-gate/health:
+    get:
+      summary: Engine-owned M4 request-gate health
+      description: A configured gate remains down until the production proxy and workers are verified. Enabled alone never means healthy.
+      responses:
+        '200': {description: Request-gate health, content: {application/json: {schema: {$ref: '#/components/schemas/RequestGateHealthEnvelope'}}}}
+        '503': {description: Engine IPC unavailable}
+        '504': {description: Engine IPC timed out}
+  /request-gate/capabilities:
+    get:
+      summary: M4 implementation capabilities and deployment readiness
+      responses:
+        '200': {description: Capabilities with production_ready separate from supported, content: {application/json: {schema: {$ref: '#/components/schemas/RequestGateCapabilitiesEnvelope'}}}}
+        '503': {description: Engine IPC unavailable}
+  /request-gate/evidence:
+    get:
+      security: [{bearerAuth: []}]
+      summary: Bounded engine-owned M4 request decision evidence
+      parameters:
+        - {name: after_sequence, in: query, schema: {type: integer, format: int64, minimum: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 128, default: 50}}
+      responses:
+        '200': {description: Evidence page without raw headers, query or body, content: {application/json: {schema: {$ref: '#/components/schemas/RequestGateEvidencePageEnvelope'}}}}
+        '400': {description: Invalid pagination filter}
+        '503': {description: Engine IPC unavailable}
   /security/events:
     get:
       summary: Bounded M3 Suricata security-event stream
@@ -361,6 +386,59 @@ components:
             ips_queue: {$ref: '#/components/schemas/IPSQueueStatus'}
             stats: {type: object, additionalProperties: {type: integer, format: int64}}
             updated_at: {type: string, format: date-time}
+    RequestGateHealthEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [enabled, status, generation, proxy_reachable, http_listener_ready, https_listener_ready, ca_loaded, workers_ready, workers_total, queue_depth, active_connections, active_requests, counters, updated_at]
+          properties:
+            enabled: {type: boolean}
+            status: {type: string, enum: [disabled, healthy, degraded, down]}
+            generation: {type: integer, format: int64}
+            proxy_reachable: {type: boolean}
+            http_listener_ready: {type: boolean}
+            https_listener_ready: {type: boolean}
+            ca_loaded: {type: boolean}
+            workers_ready: {type: integer}
+            workers_total: {type: integer}
+            queue_depth: {type: integer}
+            active_connections: {type: integer}
+            active_requests: {type: integer}
+            counters: {type: object, additionalProperties: {type: integer, format: int64}}
+            updated_at: {type: string, format: date-time}
+    RequestGateCapabilitiesEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [supported, production_ready, http_versions, connection_actions, fail_modes, limits, runtime_ipc_version, build_version, limitations]
+          properties:
+            supported: {type: boolean}
+            production_ready: {type: boolean}
+            http_versions: {type: array, items: {type: string}}
+            connection_actions: {type: array, items: {type: string, enum: [BYPASS, METADATA_ONLY, INSPECT_HTTP, DECRYPT, BLOCK]}}
+            fail_modes: {type: array, items: {type: string, enum: [OPEN, CLOSE]}}
+            limits: {type: object}
+            runtime_ipc_version: {type: integer}
+            build_version: {type: string}
+            limitations: {type: array, items: {type: string}}
+    RequestGateEvidencePageEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [items, next_sequence, has_more]
+          properties:
+            items: {type: array, maxItems: 128, items: {type: object}}
+            next_sequence: {type: integer, format: int64}
+            has_more: {type: boolean}
     InspectionSourceStatus:
       type: object
       required: [sensor_id, sensor_enabled, reader_active, process_reachable, capture_live, state, counters, reader_stats]

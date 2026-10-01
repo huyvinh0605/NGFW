@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"container/list"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	configpkg "github.com/kltngfw/ngfw/internal/config"
@@ -24,21 +26,44 @@ import (
 type GateService struct {
 	Runtime *Runtime
 	Scope   flow.Scope
+	// M4 connection/request records are engine-owned, bounded and never copied
+	// into the proxy. They do not replace the M2 session store.
+	gateMu            sync.Mutex
+	gateConnections   map[string]gateConnectionRecord
+	gateDecisions     map[string]gateDecisionRecord
+	gateDecisionOrder *list.List
+	gateDecisionBytes int
+	gateSequence      uint64
+	MaxConnections    int
+	MaxDecisions      int
+	MaxEvidenceBytes  int
 }
 
 func (service *GateService) HandleGate(ctx context.Context, operation gateipc.Operation, payload json.RawMessage) (gateipc.Result, error) {
-	if operation != gateipc.OpenConnection {
+	switch operation {
+	case gateipc.OpenConnection:
+		var open domain.ProxyConnectionOpen
+		if err := json.Unmarshal(payload, &open); err != nil {
+			return gateipc.Result{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
+		}
+		decision, err := service.OpenConnection(ctx, open)
+		if err != nil {
+			return gateipc.Result{}, err
+		}
+		return gateipc.Result{Meta: gateipc.ResponseMeta{ConfigGeneration: decision.ConfigGeneration, DecisionID: decision.DecisionID}, Data: decision}, nil
+	case gateipc.EvaluateRequest:
+		var input domain.ProxyRequestEvaluation
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return gateipc.Result{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
+		}
+		decision, err := service.EvaluateRequest(ctx, input)
+		if err != nil {
+			return gateipc.Result{}, err
+		}
+		return gateipc.Result{Meta: gateipc.ResponseMeta{ConfigGeneration: decision.ConfigGeneration, DecisionID: decision.DecisionID}, Data: decision}, nil
+	default:
 		return gateipc.Result{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
 	}
-	var open domain.ProxyConnectionOpen
-	if err := json.Unmarshal(payload, &open); err != nil {
-		return gateipc.Result{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
-	}
-	decision, err := service.OpenConnection(ctx, open)
-	if err != nil {
-		return gateipc.Result{}, err
-	}
-	return gateipc.Result{Meta: gateipc.ResponseMeta{ConfigGeneration: decision.ConfigGeneration, DecisionID: decision.DecisionID}, Data: decision}, nil
 }
 
 // OpenConnection authorizes transport handling only. INSPECT_HTTP and DECRYPT
@@ -131,6 +156,10 @@ func (service *GateService) OpenConnection(ctx context.Context, open domain.Prox
 			decision.ReasonCode = "GATE_POLICY_NOT_ALLOWED"
 		}
 		if service.Runtime.CurrentGeneration() == generation {
+			if !service.rememberGateConnection(open, &decision) {
+				decision.Action = domain.TLSGateBlock
+				decision.ReasonCode = "GATE_ENGINE_UNAVAILABLE"
+			}
 			return decision, nil
 		}
 	}
@@ -174,6 +203,14 @@ func (service *GateService) decideGate(program connectivity.Program, view connec
 		if _, excluded := plan.MatchTLSExclusion(open.TLS.SNI, upstream); excluded {
 			decision.Action = domain.TLSGateBypass
 			decision.ReasonCode = "TLS_EXCLUSION"
+		} else if open.TLSFailureCode != "" || open.TLS.SNI == "" {
+			decision.ReasonCode = open.TLSFailureCode
+			if decision.ReasonCode == "" {
+				decision.ReasonCode = "TLS_SNI_UNAVAILABLE"
+			}
+			if plan.FailMode == domain.GateFailOpen {
+				decision.Action = domain.TLSGateBypass
+			}
 		} else {
 			decision.Action = domain.TLSGateDecrypt
 			decision.ReasonCode = "GATE_INSPECTION_REQUIRED"
@@ -205,6 +242,11 @@ func validateGateOpen(open domain.ProxyConnectionOpen) (netip.AddrPort, netip.Ad
 	}
 	if !*open.IsTLS && (open.TLS.Available || open.TLS.Decrypted || open.TLS.SNI != "" || open.TLS.ALPN != "") {
 		return netip.AddrPort{}, netip.AddrPort{}, errors.New("plain HTTP cannot claim TLS metadata")
+	}
+	if open.TLSFailureCode != "" {
+		if !*open.IsTLS || open.TLSFailureCode != "TLS_CLIENTHELLO_TIMEOUT" && open.TLSFailureCode != "TLS_CLIENTHELLO_INVALID" || open.TLS.Available || open.TLS.SNI != "" || open.TLS.ALPN != "" {
+			return netip.AddrPort{}, netip.AddrPort{}, errors.New("invalid TLS ClientHello failure code")
+		}
 	}
 	return netip.AddrPortFrom(source, uint16(open.SourcePort)), netip.AddrPortFrom(destination, uint16(open.OriginalPort)), nil
 }

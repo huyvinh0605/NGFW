@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,23 @@ const (
 
 var ErrInvalidRequest = errors.New("REQUEST_PCAP_INVALID_REQUEST")
 var ErrCaptureLimit = errors.New("REQUEST_PCAP_CAPTURE_LIMIT")
+
+type FlowTuple struct {
+	ClientIP   netip.Addr
+	ClientPort uint16
+	ServerIP   netip.Addr
+	ServerPort uint16
+}
+
+// SyntheticTuple returns the exact packet tuple encoded for a worker job.
+// T22 uses it to reject EVE records from a different job or stale flow.
+func SyntheticTuple(flowID uint32) FlowTuple {
+	return FlowTuple{
+		ClientIP:   netip.AddrFrom4([4]byte{198, 18 | byte(flowID>>31), byte(flowID >> 23), byte(flowID >> 15)}),
+		ClientPort: uint16(1024 + (flowID & 0x7fff)),
+		ServerIP:   netip.AddrFrom4([4]byte{192, 168, 0, 10}), ServerPort: 80,
+	}
+}
 
 // Build produces linktype Ethernet (DLT_EN10MB), IPv4, TCP and a complete
 // three-way handshake, request, empty HTTP response and bidirectional close.
@@ -229,9 +247,10 @@ func makePacket(fromClient bool, flowID uint32, identifier uint16, seq, ack uint
 	var sourceIP, destinationIP [4]byte
 	var sourcePort, destinationPort uint16
 	var sourceMAC, destinationMAC [6]byte
-	clientIP := [4]byte{198, 18 | byte(flowID>>31), byte(flowID >> 23), byte(flowID >> 15)}
-	clientPort := uint16(1024 + (flowID & 0x7fff))
-	serverIP := [4]byte{192, 168, 0, 10}
+	flow := SyntheticTuple(flowID)
+	clientIP := flow.ClientIP.As4()
+	clientPort := flow.ClientPort
+	serverIP := flow.ServerIP.As4()
 	if fromClient {
 		sourceIP, destinationIP = clientIP, serverIP
 		sourcePort, destinationPort = clientPort, 80

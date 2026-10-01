@@ -2,16 +2,19 @@
 
 The proxy never creates a CA during normal startup. A missing, mismatched,
 expired, or insecure CA key makes CA mode fail startup. Use a dedicated
-directory owned by the proxy account; do not place the key in `/etc/ngfw`
-where the management API has group read access.
+directory owned by the dedicated `ngfw-proxy` account; do not place the key in
+`/etc/ngfw` where the management API has group read access. The API runs as
+`ngfw` and must fail `test -r` for the private key.
 
 After building/installing the `ngfw-proxy` binary on Ubuntu:
 
 ```bash
-sudo install -d -o ngfw -g ngfw -m 0700 /var/lib/ngfw/ca
-sudo -u ngfw /usr/local/lib/ngfw/ngfw-proxy ca init
-sudo -u ngfw /usr/local/lib/ngfw/ngfw-proxy ca fingerprint
+sudo bash scripts/install-m4-assets.sh
+sudo install -d -o ngfw-proxy -g ngfw-proxy -m 0700 /var/lib/ngfw/ca
+sudo -u ngfw-proxy /usr/local/lib/ngfw/ngfw-proxy ca init
+sudo -u ngfw-proxy /usr/local/lib/ngfw/ngfw-proxy ca fingerprint
 sudo stat -c '%a %U:%G %n' /var/lib/ngfw/ca /var/lib/ngfw/ca/ca.key /var/lib/ngfw/ca/ca.crt
+sudo -u ngfw test ! -r /var/lib/ngfw/ca/ca.key
 ```
 
 `ca init` refuses to overwrite an existing CA. It prints the SHA-256

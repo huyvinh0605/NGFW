@@ -114,6 +114,7 @@ func TestM4OpenConnectionLinkedSNATAndDNAT(t *testing.T) {
 	snatID := apply(snatOriginal, snatReply, 1)
 	open := gateTestOpen(true)
 	open.OriginalPort = 443
+	open.TLS = domain.TLSContext{SNI: "lab.example", Available: true}
 	decision, err := service.OpenConnection(context.Background(), open)
 	if err != nil || decision.SessionID != snatID || decision.Action != domain.TLSGateDecrypt {
 		t.Fatalf("SNAT linked to wrong session or action: %+v, %v", decision, err)
@@ -122,6 +123,8 @@ func TestM4OpenConnectionLinkedSNATAndDNAT(t *testing.T) {
 	dnatReply := domain.Tuple{Family: domain.FamilyIPv4, SrcIP: netip.MustParseAddr("10.20.0.10"), SrcPort: 443, DstIP: dnatOriginal.SrcIP, DstPort: dnatOriginal.SrcPort, Protocol: 6}
 	dnatID := apply(dnatOriginal, dnatReply, 2)
 	dnatOpen := gateTestOpen(true)
+	dnatOpen.TLS = domain.TLSContext{SNI: "dmz.example", Available: true}
+	dnatOpen.ConnectionID = "11111111111111111111111111111111"
 	dnatOpen.SourceIP, dnatOpen.SourcePort = dnatOriginal.SrcIP.String(), int(dnatOriginal.SrcPort)
 	dnatOpen.OriginalIP, dnatOpen.OriginalPort = "10.20.0.10", 443
 	decision, err = service.OpenConnection(context.Background(), dnatOpen)
@@ -175,6 +178,37 @@ func TestM4OpenConnectionTLSModesAndExclusion(t *testing.T) {
 	decision, err = service.OpenConnection(context.Background(), open)
 	if err != nil || decision.Action != domain.TLSGateBlock || decision.PolicyID != "deny" {
 		t.Fatalf("TLS exclusion overrode first-match L3 deny: %+v, %v", decision, err)
+	}
+}
+
+func TestM4OpenConnectionClientHelloFailureUsesEngineProfile(t *testing.T) {
+	for _, failure := range []string{"TLS_CLIENTHELLO_TIMEOUT", "TLS_CLIENTHELLO_INVALID", ""} {
+		for _, mode := range []domain.GateFailMode{domain.GateFailOpen, domain.GateFailClose} {
+			config := gateTestConfig()
+			config.Profiles[0].RequestGate.FailMode = mode
+			service := gateTestService(t, config)
+			open := gateTestOpen(true)
+			open.OriginalPort = 443
+			open.TLSFailureCode = failure
+			decision, err := service.OpenConnection(context.Background(), open)
+			wantAction := domain.TLSGateBlock
+			if mode == domain.GateFailOpen {
+				wantAction = domain.TLSGateBypass
+			}
+			wantReason := failure
+			if failure == "" {
+				wantReason = "TLS_SNI_UNAVAILABLE"
+			}
+			if err != nil || decision.Action != wantAction || decision.ReasonCode != wantReason {
+				t.Fatalf("failure=%q mode=%s decision=%+v err=%v", failure, mode, decision, err)
+			}
+		}
+	}
+	service := gateTestService(t, gateTestConfig())
+	plain := gateTestOpen(false)
+	plain.TLSFailureCode = "TLS_CLIENTHELLO_INVALID"
+	if _, err := service.OpenConnection(context.Background(), plain); err == nil {
+		t.Fatal("plain HTTP carried TLS failure code")
 	}
 }
 

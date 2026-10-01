@@ -99,15 +99,15 @@ Go `1.27.0 windows/amd64`; Node `22.19.0`; npm `10.9.3`; Windows NT `10.0.26200.
 | T18 | DONE / LOCAL_TESTED | gzip/zlib-deflate decoder with decoded-byte/ratio caps, cancellation and explicit partial/unsupported/malformed errors; request pipeline binding awaits T23/T24. |
 | T19 | DONE / LOCAL_TESTED | Deterministic bounded Ethernet/IPv4/TCP request PCAP builder, distinct per-job flowID mapping, valid checksums/sequence, secret-header stripping and golden test; Suricata fixture awaits Ubuntu. |
 | T20 | DONE / LOCAL_TESTED | Versioned JSON Unix socket client, required-command handshake, fragmented response parsing, bounded deadline/response, typed PCAP queue methods and stale-reply-safe closure; live Suricata awaits Ubuntu. |
-| T21 | NOT_STARTED | Pending dependencies and task implementation. |
-| T22 | NOT_STARTED | Pending dependencies and task implementation. |
-| T23 | NOT_STARTED | Pending dependencies and task implementation. |
-| T24 | NOT_STARTED | Pending dependencies and task implementation. |
-| T25 | NOT_STARTED | Pending dependencies and task implementation. |
-| T26 | NOT_STARTED | Pending dependencies and task implementation. |
-| T27 | NOT_STARTED | Pending dependencies and task implementation. |
-| T28 | NOT_STARTED | Pending dependencies and task implementation. |
-| T29 | NOT_STARTED | Pending dependencies and task implementation. |
+| T21 | DONE / LOCAL_TESTED | Bounded pool, unique 0700 job dirs/0600 PCAP, per-worker Suricata process factory, deadline/cancel/queue byte caps, structured queue drain and bounded EVE read; live process acceptance pending. |
+| T22 | DONE / LOCAL_TESTED | Job-local EVE parser correlates synthetic tuple/PCAP/flow ID, requires closed-flow completion, preserves bounded alert metadata, and treats malformed/stale/incomplete output as unavailable. |
+| T23 | DONE / LOCAL_TESTED | Engine-owned bounded connection/request records, `evaluate_request` IPC, per-request current L3/L4 policy recheck, deterministic verdict/failure table and generation/block revocation tests. |
+| T24 | DONE / LOCAL_TESTED | HTTP/1.1 forwarder holds requests until engine ALLOW; local tests pass. Ubuntu traffic acceptance pending. |
+| T25 | DONE / LOCAL_TESTED | HTTP/2 request isolation and bounded streams tested locally; Ubuntu traffic acceptance pending. |
+| T26 | DONE / LOCAL_TESTED | Failure/overload statuses, deadlines and counters tested locally. |
+| T27 | DONE / LOCAL_TESTED | Engine-owned bounded request evidence and session context tested locally. |
+| T28 | PARTIAL / VM_CAPABILITY_PENDING | Engine gate IPC attached; production proxy/selector and activation await T01 Ubuntu capability evidence. |
+| T29 | PARTIAL / LOCAL_TESTED | Engine IPC + API health/capabilities/evidence, OpenAPI, hardened units and offline assets/collector added; live readiness, Suricata config validation and acceptance await Ubuntu/T28. |
 
 ## Acceptance
 
@@ -304,3 +304,82 @@ TESTS: `go test -count=1 ./internal/inspection/suricata_socket -timeout 30s` PAS
 CONTRACTS SATISFIED: protocol 0.1 handshake, required command discovery, byte-fragmented JSON responses, bounded operation timeout/64 KiB reply, typed submit/current/list/count, malformed/null queue state as protocol error, error/timeout connection closure.
 KNOWN LIMITATIONS: no Suricata process was started locally; command compatibility and queue completion require Ubuntu T01/T21 acceptance. This client does not equate an empty queue with inspection success.
 NEXT TASK: T21 bounded synchronous request-inspector pool.
+
+TASK: T21 bounded synchronous request-inspector pool
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/inspection/requestworker/pool.go`, `internal/inspection/requestworker/suricata.go`, matching tests, `internal/inspection/requestpcap/builder.go`, `docs/m4/CODE_CONTRACTS.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./internal/inspection/requestworker -timeout 30s` PASS; `go test -race -count=1 ./internal/inspection/requestworker -timeout 60s` PASS; `go vet ./internal/inspection/requestworker` PASS; Linux amd64 cross-build PASS.
+CONTRACTS SATISFIED: fixed one-session-per-worker pool, bounded queued items/bytes and concurrent builders, deadline covering queue wait, no flowID reuse, 0700 job workdirs/0600 PCAP, structured Suricata queue drain, 1 MiB EVE cap, cancellation and cleanup.
+KNOWN LIMITATIONS: local tests use fake command socket/session; the real Suricata process and terminal EVE behavior remain Ubuntu VM ACCEPTANCE PENDING. Missing/empty output is unavailable, never clean.
+NEXT TASK: T22 EVE request normalization.
+
+TASK: T22 EVE request normalization
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/inspection/requestworker/eve.go`, `internal/inspection/requestworker/eve_test.go`, `internal/domain/request_gate.go`, `internal/inspection/requestpcap/builder.go`, `docs/m4/CODE_CONTRACTS.md`, `docs/M4_IMPLEMENTATION_PLAN.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./internal/inspection/requestpcap ./internal/inspection/requestworker -timeout 30s` PASS; `go test -race -count=1 ./internal/inspection/requestworker -timeout 60s` PASS; `go vet ./internal/inspection/requestworker ./internal/domain` PASS; Linux amd64 cross-build PASS.
+CONTRACTS SATISFIED: bounded JSONL parser, terminal flow proof, exact job PCAP/tuple/flow ID correlation, no stale alerts, explicit unavailable/error codes, alert SID/category/message/action/severity/timestamp preservation, unsupported event filtering.
+KNOWN LIMITATIONS: fixture-based local tests cannot establish how a live Suricata build emits terminal `flow` records for the synthetic PCAP; Ubuntu acceptance remains pending. Final authoritative request decision belongs to T23.
+NEXT TASK: T23 engine-owned request verdict and IPC operation.
+
+TASK: T23 engine-owned request verdict and IPC operation
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/domain/request_gate.go`, `internal/engine/gate_service.go`, `internal/engine/gate_request.go`, `internal/engine/gate_request_test.go`, `internal/engine/gate_service_test.go`, `docs/m4/CODE_CONTRACTS.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./internal/engine -run 'TestM4' -timeout 40s` PASS; `go test -race -count=1 ./internal/engine -run 'TestM4' -timeout 80s` PASS; `go vet ./internal/engine ./internal/domain` PASS. CP5 before T23: `go test -count=1 ./...` PASS, `go vet ./...` PASS.
+CONTRACTS SATISFIED: only engine evaluates final request verdict; every request rechecks current connectivity generation, session link and source block; per-connection identity and request decisions are bounded; clean/blocked/unavailable/oversize tables produce explicit request-scope status and coverage; Unix IPC round trip uses request evidence without body bytes.
+KNOWN LIMITATIONS: no production HTTP forwarder invokes this IPC yet (T24). The current profile has no configured blocking-SID list, so explicit Suricata blocking action is the blocking signal. Live Suricata/Ubuntu acceptance remains pending.
+NEXT TASK: T24 HTTP/1.1 forwarder.
+
+TASK: T24 HTTP/1.1 request forwarder
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/proxy/http1_gate.go`, `internal/proxy/http1_gate_test.go`, `internal/proxy/upstream_tls.go`, `docs/m4/CODE_CONTRACTS.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./internal/proxy -run 'TestHTTP1RequestGate|TestDialVerifiedUpstream' -timeout 45s` PASS; `go test -race -count=1 ./internal/proxy -run 'TestHTTP1RequestGate|TestDialVerifiedUpstream' -timeout 60s` PASS; `go vet ./internal/proxy ./internal/engine ./internal/inspection/requestworker` PASS; Linux amd64 cross-build PASS.
+CONTRACTS SATISFIED: Go HTTP/1.1 parser holds request through bounded body read, decoding, detector evidence and authoritative engine IPC; BLOCK/invalid reply never dials upstream; clean and engine-approved partial requests replay original bytes after ALLOW; hop headers are stripped; keep-alive re-evaluates each request; HTTPS HTTP/1.1 upstream verifies certificate and hostname with HTTP/1.1 ALPN and no plaintext downgrade. Local tests prove pre-upstream hold, malicious block, raw chunked body replay, oversize block/partial allow, timeout evidence, stale/malformed verdict rejection and TLS verification failure.
+KNOWN LIMITATIONS: the production `cmd/ngfw-proxy` still needs T28 wiring to instantiate this gate; HTTP/2 dispatch/upstream belongs to T25. Live Suricata, transparent redirect and Ubuntu TLS interception acceptance remain pending. T17 parser status mapping and T26 overload/failure counters remain partial.
+NEXT TASK: T25 HTTP/2 downstream/upstream isolation.
+
+TASK: T25 HTTP/2 downstream/upstream isolation
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/proxy/http1_gate.go`, `internal/proxy/http1_gate_test.go`, `go.mod`, `go.sum`, `docs/m4/CODE_CONTRACTS.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./internal/proxy -run '^TestHTTP2RequestGate' -timeout 25s` PASS; `go test -race -count=1 ./internal/proxy -run 'TestHTTP2RequestGate|TestHTTP1RequestGate' -timeout 60s` PASS; `go test -count=1 ./internal/proxy ./internal/inspection/requestworker ./internal/engine -timeout 60s` PASS; `go vet ./internal/proxy` PASS.
+CONTRACTS SATISFIED: decrypted TLS ALPN h2 uses the pinned Go HTTP/2 server stack with per-connection stream, frame, HPACK and receive-window bounds. Request IDs, body buffers, inspection calls and engine decisions are isolated per stream. Engine BLOCK returns a stream-scoped response without closing other h2 streams. Authorized h2 requests use verified upstream TLS and can negotiate HTTP/2. A two-stream local test proves only the clean body reaches an HTTP/2 upstream; request IDs/ordinals differ and no fake StreamID is exposed.
+KNOWN LIMITATIONS: package name `HTTP1RequestGate` predates its h2 support; production command wiring remains T28. Live browser/Suricata/TLS interception acceptance on Ubuntu remains pending. T26 still owns overload counters and failure mapping. The pinned x/net HTTP/2 import required x/text v0.18.0 and x/sync v0.8.0 checksums.
+NEXT TASK: T26 failure policy and overload semantics.
+
+TASK: T17 HTTP parser limit completion (T24/T26 dependency)
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/proxy/http1_gate.go`, `internal/proxy/http1_gate_test.go`.
+TESTS: `go test -count=1 ./internal/proxy -run '^TestHTTPRequestGateRejectsOversizeHeadersURLAndMalformedFraming$' -timeout 15s` PASS; proxy race and vet checks listed with T26 PASS.
+CONTRACTS SATISFIED: Go HTTP server enforces header read bound and the normalized request limit; tests prove 431 for excessive headers, 414 for URL limit, 400 for malformed framing, and no upstream request. Raw body max+1 and replay restrictions were tested earlier.
+KNOWN LIMITATIONS: Ubuntu wire acceptance and actual browser behavior remain pending.
+NEXT TASK: T26 failure policy and overload semantics.
+
+TASK: T26 failure policy and overload semantics
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/domain/request_gate.go`, `internal/engine/gate_request.go`, `internal/engine/gate_request_test.go`, `internal/engine/gate_service.go`, `internal/engine/gate_service_test.go`, `internal/proxy/gate_connection.go`, `internal/proxy/gate_connection_test.go`, `internal/proxy/http1_gate.go`, `internal/proxy/http1_gate_test.go`, `internal/proxy/gate_stats.go`, `docs/m4/CODE_CONTRACTS.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: targeted engine/profile, proxy failure/overload/parser and HTTP/2 stalled-stream tests PASS; `go test -count=1 ./internal/proxy ./internal/engine ./internal/gateipc ./internal/domain -timeout 70s` PASS; `go test -race -count=1 ./internal/proxy -run 'TestHTTPRequestGate|TestHTTP1RequestGate|TestHTTP2RequestGate|TestGateConnectionInvalidClientHello' -timeout 80s` PASS; targeted engine race PASS; `go vet ./internal/proxy ./internal/engine ./internal/domain` PASS; Linux amd64 cross-build PASS.
+CONTRACTS SATISFIED: engine now honors explicit unsupported-encoding action under fail mode and always blocks malformed compressed data with 400; ClientHello timeout/invalid and missing SNI route to engine-owned OPEN/BYPASS or CLOSE/BLOCK; local request-capacity overflow returns 503 without harming in-flight traffic; incomplete HTTP/1.1 or HTTP/2 body releases the slot at deadline; stable counters cover verdict and failure categories. HTTP/2 remains usable after one stalled stream; parser rejects 400/414/431 before upstream.
+KNOWN LIMITATIONS: T29 still must aggregate/expose health counters and deploy a production proxy. Live Ubuntu transparent interception, real Suricata behavior, and configured CA ownership remain VM ACCEPTANCE PENDING. T26 does not claim that a downstream TLS handshake failure can safely fail-open after a substitute certificate is presented.
+NEXT TASK: T27 request security events and session detail.
+
+TASK: T27 request security events and session detail
+STATUS: DONE / LOCAL_TESTED
+FILES CHANGED: `internal/domain/request_gate.go`, `internal/domain/session_m2.go`, `internal/domain/runtime_events.go`, `internal/engine/gate_service.go`, `internal/engine/gate_request.go`, `internal/engine/gate_request_test.go`, `internal/engine/runtime_service.go`, `docs/m4/CODE_CONTRACTS.md`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./internal/engine -run '^TestM4RequestEvidence' -timeout 40s` PASS; `go test -race -count=1 ./internal/engine -run '^TestM4RequestEvidence' -timeout 60s` PASS; `go test -count=1 ./internal/domain ./internal/session ./internal/engine ./internal/engineipc -timeout 70s` PASS; `go vet ./internal/domain ./internal/session ./internal/engine` PASS; Linux amd64 cross-build PASS.
+CONTRACTS SATISFIED: engine-owned request evidence has count/byte/TTL bounds and sequence pagination; path and alert details are truncated with explicit flags; raw body/query/headers are absent. Runtime events carry request decision IDs without request payloads. Session detail attaches the newest 32 request records through one authoritative GateService; local tests cover eviction, pagination, clone isolation, correlated session detail and concurrent reads/evaluations under race detector.
+KNOWN LIMITATIONS: production engine command must construct GateService and attach it to RuntimeServiceAdapter in T28; T29 exposes evidence/health through management API. Ubuntu request-gate acceptance remains pending.
+NEXT TASK: T28 activation snapshot/rollback/restart and production process wiring.
+
+TASK: T28 engine-side request-gate IPC attachment
+STATUS: PARTIAL / LOCAL_TESTED / VM_CAPABILITY_PENDING
+FILES CHANGED: `cmd/ngfw-engine/main.go`, `internal/engine/runtime_service.go`, `docs/m4/IMPLEMENTATION_STATUS.md`.
+TESTS: `go test -count=1 ./cmd/ngfw-engine ./internal/engine -timeout 45s` PASS; final local checkpoint `go test -count=1 ./... -timeout 120s` PASS and `go vet ./...` PASS; Linux amd64 cross-build of engine/proxy/requestworker packages PASS; a final targeted engine-command test after log hardening PASS.
+CONTRACTS SATISFIED: privileged `ngfw-engine` now constructs the sole GateService from the existing authoritative Runtime, binds the dedicated bounded gate IPC server, and attaches the same GateService to management session detail. A gate-socket failure is logged as degraded without stopping M1/M2 forwarding. Engine restart constructs empty request/connection maps, so stale process-local M4 verdicts are not trusted.
+ARCHITECTURAL GAP: T01 Ubuntu capability evidence has not established REDIRECT versus TPROXY, including correct original/post-DNAT destination recovery. T06 nft interception render/apply, T07 Linux resolver, M4 plan/hash preflight and rollback activation, and production `cmd/ngfw-proxy` migration cannot be truthfully completed before that decision. The current `cmd/ngfw-proxy` still contains the legacy memory-engine path; it is NOT a production M4 request-gate binary and must not be deployed as one. No Linux interception or acceptance claim is made.
+NEXT TASK: on the Ubuntu appliance run `sudo bash tests/integration/m4/probe-capabilities.sh --evidence-dir /tmp/ngfw-m4-probe`; use its observed result to finish T06/T07/T28, then T29 and live acceptance.
+
+TASK: T29 API, deploy assets and read-only acceptance collection
+STATUS: PARTIAL / LOCAL_TESTED / VM_ACCEPTANCE_PENDING
+FILES CHANGED: `internal/domain/request_gate.go`, `internal/engine/request_gate_runtime.go`, `internal/engineipc/runtime.go`, `internal/management/api.go`, `internal/management/request_gate_api.go`, matching tests, `docs/openapi.yaml`, `deploy/ngfw-proxy.service`, `deploy/ngfw-request-worker-preflight.service`, `deploy/ngfw-proxy.env.example`, `deploy/request-gate/*`, `scripts/install-m4-assets.sh`, `scripts/verify-m4-linux.sh`, `docs/m4/CA_PROVISIONING.md`, `tests/integration/m4/README.md`, `tests/integration/m4/EVIDENCE_TEMPLATE.md`.
+CONTRACTS SATISFIED: management reads M4 health/capabilities and bounded evidence only from authoritative engine IPC; request evidence requires authentication. Implemented protocol support is separate from production readiness. With no verified proxy heartbeat, enabled M4 reports `down`, zero ready workers and `production_ready=false`, never a false healthy verdict. The proxy unit has a dedicated account, read-only CA path, no CAP_NET_ADMIN, bounded cgroup limits, and a separate request-worker config preflight. The asset installer does not start the legacy proxy or change nftables. The read-only collector explicitly records `acceptance_status: PENDING`.
+KNOWN LIMITATIONS: no generation-bound live proxy heartbeat is wired; dynamic worker/queue counters remain unavailable until T28 production proxy wiring. Suricata config/rules syntax must be validated by `suricata -T` on Ubuntu. T01/T06/T07/T28 remain required before production activation; all M4 traffic acceptance rows remain NOT_RUN.
+NEXT TASK: obtain T01 Ubuntu probe evidence, then finish T06/T07/T28 and live T29 health/acceptance.

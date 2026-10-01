@@ -16,6 +16,7 @@ const (
 	EventSecurityAlert           RuntimeEventKind = "SecurityAlert"
 	EventSecurityEventUpdated    RuntimeEventKind = "SecurityEventUpdated"
 	EventInspectionHealthChanged RuntimeEventKind = "InspectionHealthChanged"
+	EventRequestGateDecision     RuntimeEventKind = "RequestGateDecision"
 
 	EventClassRuntime    RuntimeEventClass = "runtime"
 	EventClassPolicy     RuntimeEventClass = "policy"

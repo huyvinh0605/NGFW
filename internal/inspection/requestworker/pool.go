@@ -42,6 +42,8 @@ type SessionFactory func(ctx context.Context, workerID int) (Session, error)
 type Result struct {
 	RequestID string
 	WorkerID  int
+	FlowID    uint32
+	PCAPPath  string
 	EVE       []byte
 	Duration  time.Duration
 }
@@ -56,6 +58,7 @@ type Stats struct {
 type job struct {
 	ctx       context.Context
 	requestID string
+	flowID    uint32
 	pcap      []byte
 	result    chan outcome
 }
@@ -176,7 +179,7 @@ func (pool *Pool) Inspect(ctx context.Context, requestID string, request inspect
 		<-pool.slots
 		return Result{}, err
 	}
-	work := &job{ctx: callCtx, requestID: requestID, pcap: pcap, result: make(chan outcome, 1)}
+	work := &job{ctx: callCtx, requestID: requestID, flowID: flowID, pcap: pcap, result: make(chan outcome, 1)}
 	pool.mu.Lock()
 	if pool.closed || pool.ctx.Err() != nil {
 		pool.mu.Unlock()
@@ -302,7 +305,7 @@ func (pool *Pool) run(work *job, workerID int, session Session) (Result, error) 
 	if len(eve) == 0 || len(eve) > 1<<20 {
 		return Result{}, ErrUnavailable
 	}
-	return Result{RequestID: work.requestID, WorkerID: workerID, EVE: append([]byte(nil), eve...)}, nil
+	return Result{RequestID: work.requestID, WorkerID: workerID, FlowID: work.flowID, PCAPPath: pcapPath, EVE: append([]byte(nil), eve...)}, nil
 }
 
 func (pool *Pool) finish(work *job, result Result, err error) {

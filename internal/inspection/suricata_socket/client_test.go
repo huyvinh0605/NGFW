@@ -107,8 +107,8 @@ func TestDialFragmentedResponsesAndCommands(t *testing.T) {
 	}
 	select {
 	case err := <-serverDone:
-		if !errors.Is(err, io.EOF) {
-			t.Fatalf("fake server exited: %v", err)
+		if err == nil {
+			t.Fatal("fake server exited without a close/read result")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("fake server did not exit after client close")

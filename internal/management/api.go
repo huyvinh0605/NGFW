@@ -86,6 +86,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security-profiles/", func(w http.ResponseWriter, r *http.Request) { a.objectByID(w, r, "profile") })
 	mux.HandleFunc("/api/v1/inspection/health", a.inspectionHealth)
 	mux.HandleFunc("/api/v1/inspection/capabilities", a.inspectionCapabilities)
+	mux.HandleFunc("/api/v1/request-gate/health", a.requestGateHealth)
+	mux.HandleFunc("/api/v1/request-gate/capabilities", a.requestGateCapabilities)
+	mux.HandleFunc("/api/v1/request-gate/evidence", a.requestGateEvidence)
 	mux.HandleFunc("/api/v1/security/events", a.securityEvents)
 	mux.HandleFunc("/api/v1/security/events/", a.securityEventByID)
 	mux.HandleFunc("/api/v1/policies/validate", a.validate)
@@ -112,7 +115,7 @@ func (a *API) Handler() http.Handler {
 
 func (a *API) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		publicRead := r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/v1/users")
+		publicRead := r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/v1/users") && r.URL.Path != "/api/v1/request-gate/evidence"
 		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/v1/auth/login" || publicRead {
 			next.ServeHTTP(w, r)
 			return

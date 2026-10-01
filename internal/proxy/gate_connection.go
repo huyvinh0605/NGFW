@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/kltngfw/ngfw/internal/domain"
@@ -73,6 +74,26 @@ type GateConnectionHandler struct {
 	ClientHelloBytes    int
 	ClientHelloTimeout  time.Duration
 	TLSHandshakeTimeout time.Duration
+	clientHelloTimeout  atomic.Uint64
+	clientHelloInvalid  atomic.Uint64
+	tlsHandshakeFail    atomic.Uint64
+	upstreamConnectFail atomic.Uint64
+}
+
+type GateConnectionStats struct {
+	Counters map[string]uint64
+}
+
+func (handler *GateConnectionHandler) Stats() GateConnectionStats {
+	if handler == nil {
+		return GateConnectionStats{}
+	}
+	return GateConnectionStats{Counters: map[string]uint64{
+		"client_hello_timeout":  handler.clientHelloTimeout.Load(),
+		"client_hello_invalid":  handler.clientHelloInvalid.Load(),
+		"tls_handshake_fail":    handler.tlsHandshakeFail.Load(),
+		"upstream_connect_fail": handler.upstreamConnectFail.Load(),
+	}}
 }
 
 func (handler *GateConnectionHandler) ServeProxyConnection(ctx context.Context, downstream net.Conn, value ConnectionContext) error {
@@ -81,11 +102,21 @@ func (handler *GateConnectionHandler) ServeProxyConnection(ctx context.Context, 
 	}
 	var buffered []byte
 	var metadata domain.TLSContext
+	var failureCode string
 	if value.TLS {
 		var err error
 		metadata, buffered, err = PeekClientHello(ctx, downstream, handler.ClientHelloBytes, handler.ClientHelloTimeout)
 		if err != nil {
-			return err // T26 will map partial/timeout to engine-owned failure policy
+			switch {
+			case errors.Is(err, ErrClientHelloTimeout):
+				handler.clientHelloTimeout.Add(1)
+				failureCode = "TLS_CLIENTHELLO_TIMEOUT"
+			case errors.Is(err, ErrClientHelloInvalid), errors.Is(err, inspection.ErrClientHelloIncomplete):
+				handler.clientHelloInvalid.Add(1)
+				failureCode = "TLS_CLIENTHELLO_INVALID"
+			default:
+				return err
+			}
 		}
 	}
 	isTLS := value.TLS
@@ -93,7 +124,7 @@ func (handler *GateConnectionHandler) ServeProxyConnection(ctx context.Context, 
 		ConnectionID: value.ConnectionID,
 		SourceIP:     value.ClientAddress.Addr().Unmap().String(), SourcePort: int(value.ClientAddress.Port()),
 		OriginalIP: value.OriginalDestination.Addr().Unmap().String(), OriginalPort: int(value.OriginalDestination.Port()),
-		Protocol: "tcp", IsTLS: &isTLS, TLS: metadata,
+		Protocol: "tcp", IsTLS: &isTLS, TLS: metadata, TLSFailureCode: failureCode,
 	}
 	decision, err := handler.Authorizer.OpenConnection(ctx, open)
 	if err != nil {
@@ -101,6 +132,9 @@ func (handler *GateConnectionHandler) ServeProxyConnection(ctx context.Context, 
 	}
 	if err := validateConnectionDecision(value, decision); err != nil {
 		return err
+	}
+	if failureCode != "" && decision.Action == domain.TLSGateDecrypt {
+		return ErrGateDecisionInvalid
 	}
 	switch decision.Action {
 	case domain.TLSGateBlock:
@@ -139,6 +173,7 @@ func (handler *GateConnectionHandler) rawTunnel(ctx context.Context, downstream 
 	}
 	upstream, err := dial(ctx, "tcp", target.String())
 	if err != nil {
+		handler.upstreamConnectFail.Add(1)
 		return fmt.Errorf("%w: %v", ErrUpstreamConnect, err)
 	}
 	defer upstream.Close()
@@ -207,6 +242,7 @@ func (handler *GateConnectionHandler) serveDecrypted(ctx context.Context, downst
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := secure.HandshakeContext(handshakeCtx); err != nil {
+		handler.tlsHandshakeFail.Add(1)
 		return fmt.Errorf("%w: %v", ErrTLSHandshake, err)
 	}
 	return handler.HTTPGate.ServeHTTPConnection(ctx, secure, value, decision)

@@ -1,0 +1,21 @@
+[Unit]
+Description=Validate NGFW M4 Suricata request-worker configuration
+After=local-fs.target
+Before=ngfw-proxy.service
+
+[Service]
+Type=oneshot
+User=ngfw-proxy
+Group=ngfw-proxy
+ExecStart=/usr/bin/suricata -T -c /etc/ngfw/request-gate/suricata.yaml -l /var/lib/ngfw/request-workers
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/ngfw/request-gate
+ReadWritePaths=/var/lib/ngfw/request-workers
+PrivateTmp=true
+
+[Install]
+WantedBy=ngfw-proxy.service

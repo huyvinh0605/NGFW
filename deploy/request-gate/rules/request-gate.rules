@@ -1,0 +1,6 @@
+# Deterministic lab signatures for finite, normalized HTTP request PCAPs.
+# These are acceptance fixtures, not a comprehensive production WAF ruleset.
+alert http any any -> any any (msg:"NGFW M4 lab SQLi UNION SELECT"; flow:established,to_server; http.uri; content:"UNION"; nocase; content:"SELECT"; nocase; distance:0; within:32; sid:9904001; rev:1;)
+alert http any any -> any any (msg:"NGFW M4 lab XSS script"; flow:established,to_server; http.uri; content:"<script"; nocase; sid:9904002; rev:1;)
+alert http any any -> any any (msg:"NGFW M4 lab SQLi body"; flow:established,to_server; http.request_body; content:"UNION SELECT"; nocase; sid:9904003; rev:1;)
+alert http any any -> any any (msg:"NGFW M4 lab XSS body"; flow:established,to_server; http.request_body; content:"<script"; nocase; sid:9904004; rev:1;)

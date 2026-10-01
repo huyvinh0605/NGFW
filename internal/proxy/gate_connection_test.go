@@ -70,6 +70,70 @@ func TestGateConnectionPlainHTTPOnlyCallsRequestHandlerAfterEngineAction(t *test
 	}
 }
 
+func TestGateConnectionInvalidClientHelloDelegatesFailModeToEngine(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	accepted := make(chan string, 1)
+	go func() {
+		connection, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
+		wire := make([]byte, len("HELLODATA"))
+		_, _ = io.ReadFull(connection, wire)
+		accepted <- string(wire)
+		_, _ = connection.Write([]byte("OK"))
+	}()
+	value := ConnectionContext{
+		ConnectionID: "0123456789abcdef0123456789abcdef", TLS: true,
+		ClientAddress:       netip.MustParseAddrPort("127.0.0.1:50000"),
+		OriginalDestination: netip.MustParseAddrPort(upstream.Addr().String()),
+	}
+	client, downstream := net.Pipe()
+	defer client.Close()
+	defer downstream.Close()
+	var opens atomic.Int32
+	handler := &GateConnectionHandler{
+		Authorizer: ConnectionAuthorizerFunc(func(_ context.Context, open domain.ProxyConnectionOpen) (domain.ProxyConnectionDecision, error) {
+			opens.Add(1)
+			if open.TLSFailureCode != "TLS_CLIENTHELLO_INVALID" || open.TLS.Available || open.IsTLS == nil || !*open.IsTLS {
+				t.Errorf("failed ClientHello was not sent to engine: %+v", open)
+			}
+			return testGateDecision(value, domain.TLSGateBypass), nil // engine-owned fail OPEN
+		}),
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- handler.ServeProxyConnection(context.Background(), downstream, value) }()
+	_ = client.SetDeadline(time.Now().Add(4 * time.Second))
+	if _, err := client.Write([]byte("HELLODATA")); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(client, reply); err != nil || string(reply) != "OK" {
+		t.Fatalf("engine-authorized bypass failed: %q %v", reply, err)
+	}
+	if wire := <-accepted; wire != "HELLODATA" || opens.Load() != 1 {
+		t.Fatalf("partial ClientHello was not replayed exactly: %q opens=%d", wire, opens.Load())
+	}
+	if stats := handler.Stats(); stats.Counters["client_hello_invalid"] != 1 || stats.Counters["tls_handshake_fail"] != 0 {
+		t.Fatalf("ClientHello failure counters wrong: %+v", stats)
+	}
+	_ = client.Close()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bypass did not stop")
+	}
+}
+
 func TestGateConnectionTLSTunnelReplaysExactClientHello(t *testing.T) {
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

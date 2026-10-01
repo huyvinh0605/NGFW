@@ -241,7 +241,7 @@ Each worker:
 2. writes the PCAP;
 3. enqueuees `pcap-file` through the Unix socket;
 4. polls structured socket commands until completion or deadline;
-5. reads bounded job-local EVE output;
+5. reads bounded job-local EVE output and requires a matching terminal flow event before reporting complete coverage;
 6. normalizes alerts;
 7. removes temporary files according to retention policy;
 8. releases the worker.

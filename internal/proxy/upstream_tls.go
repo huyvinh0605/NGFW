@@ -19,6 +19,15 @@ var ErrUpstreamVerify = errors.New("TLS_UPSTREAM_VERIFY_FAILED")
 // IP. A trust or handshake error always closes the connection; it never
 // retries as plaintext or with InsecureSkipVerify.
 func DialVerifiedUpstream(ctx context.Context, target netip.AddrPort, hostname string, roots *x509.CertPool, dial func(context.Context, string, string) (net.Conn, error)) (*tls.Conn, error) {
+	return dialVerifiedUpstream(ctx, target, hostname, roots, dial, []string{"h2", "http/1.1"})
+}
+
+// DialVerifiedUpstreamHTTP1 forces HTTP/1.1 ALPN for the T24 round tripper.
+func DialVerifiedUpstreamHTTP1(ctx context.Context, target netip.AddrPort, hostname string, roots *x509.CertPool, dial func(context.Context, string, string) (net.Conn, error)) (*tls.Conn, error) {
+	return dialVerifiedUpstream(ctx, target, hostname, roots, dial, []string{"http/1.1"})
+}
+
+func dialVerifiedUpstream(ctx context.Context, target netip.AddrPort, hostname string, roots *x509.CertPool, dial func(context.Context, string, string) (net.Conn, error), protocols []string) (*tls.Conn, error) {
 	if ctx == nil || !target.IsValid() || target.Port() == 0 || target.Addr().IsUnspecified() || target.Addr().IsMulticast() {
 		return nil, ErrUpstreamConnect
 	}
@@ -50,7 +59,7 @@ func DialVerifiedUpstream(ctx context.Context, target netip.AddrPort, hostname s
 	}
 	secure := tls.Client(raw, &tls.Config{
 		MinVersion: tls.VersionTLS12, ServerName: hostname, RootCAs: roots,
-		NextProtos: []string{"h2", "http/1.1"},
+		NextProtos: protocols,
 	})
 	if err := secure.HandshakeContext(callCtx); err != nil {
 		_ = secure.Close()

@@ -1,0 +1,29 @@
+%YAML 1.1
+---
+vars:
+  address-groups:
+    HOME_NET: "any"
+    EXTERNAL_NET: "any"
+default-rule-path: /etc/ngfw/request-gate/rules
+rule-files:
+  - request-gate.rules
+stream:
+  inline: no
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert
+        - http
+unix-command:
+  enabled: yes
+stats:
+  enabled: yes
+  interval: 2
+logging:
+  default-log-level: notice
+  outputs:
+    - console:
+        enabled: yes

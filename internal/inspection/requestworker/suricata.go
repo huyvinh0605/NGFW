@@ -101,7 +101,7 @@ func ProductionFactory(config ProcessConfig) (SessionFactory, error) {
 				return nil, errors.Join(ErrUnavailable, startupCtx.Err())
 			default:
 			}
-			client, err := suricata_socket.Dial(startupCtx, socketPath, 250*time.Millisecond)
+			client, err := suricata_socket.Dial(startupCtx, socketPath, 2*time.Second)
 			if err == nil {
 				session.client = client
 				return session, nil

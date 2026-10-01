@@ -2,21 +2,37 @@
 Description=NGFW selective HTTP/TLS request gate
 After=ngfw-engine.service network-online.target
 Wants=network-online.target
+Requires=ngfw-request-worker-preflight.service
+After=ngfw-request-worker-preflight.service
 
 [Service]
 Type=simple
-User=ngfw
-Group=ngfw
-EnvironmentFile=-/etc/ngfw/ngfw.env
+User=ngfw-proxy
+Group=ngfw-proxy
+SupplementaryGroups=ngfw
+EnvironmentFile=-/etc/ngfw/proxy.env
 WorkingDirectory=/var/lib/ngfw
 ExecStart=/usr/local/lib/ngfw/ngfw-proxy
 Restart=on-failure
 RestartSec=2
+RuntimeDirectory=ngfw-proxy
+RuntimeDirectoryMode=0700
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/ngfw /var/log/ngfw
+ReadOnlyPaths=/var/lib/ngfw/ca /etc/ngfw/request-gate
+ReadWritePaths=/var/lib/ngfw/request-workers /var/log/ngfw
 PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=2G
+TasksMax=128
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

@@ -58,6 +58,9 @@ type ProxyConnectionOpen struct {
 	OriginalIP   string `json:"original_ip"`
 	OriginalPort int    `json:"original_port"`
 	Protocol     string `json:"protocol"`
+	// TLSFailureCode is set only when a bounded ClientHello peek failed. The
+	// engine, not the proxy, chooses BYPASS or BLOCK from the active profile.
+	TLSFailureCode string `json:"tls_failure_code,omitempty"`
 	// IsTLS is required, including an explicit false for plain HTTP. A missing
 	// value must never cause a TLS connection to be treated as HTTP by default.
 	IsTLS *bool      `json:"is_tls"`
@@ -114,6 +117,7 @@ type RequestAlert struct {
 	Message     string `json:"message,omitempty"`
 	Action      string `json:"action,omitempty"`
 	Severity    string `json:"severity,omitempty"`
+	Timestamp   string `json:"timestamp,omitempty"`
 }
 
 type RequestInspectionResult struct {
@@ -125,6 +129,13 @@ type RequestInspectionResult struct {
 	DurationMS  int64           `json:"duration_ms"`
 	RulesetID   string          `json:"ruleset_id,omitempty"`
 	RulesetHash string          `json:"ruleset_hash,omitempty"`
+}
+
+// ProxyRequestEvaluation is the bounded evaluate_request IPC payload. Raw
+// request headers, query and body never cross this boundary.
+type ProxyRequestEvaluation struct {
+	Context    RequestContext          `json:"context"`
+	Inspection RequestInspectionResult `json:"inspection"`
 }
 
 func (r RequestInspectionResult) Clone() RequestInspectionResult {
@@ -146,6 +157,33 @@ type RequestDecision struct {
 	Reason           string          `json:"reason"`
 }
 
+// RequestGateEvidence is the engine-owned, bounded management record. The
+// request DTO already excludes raw query, headers and body; the store also
+// truncates path and alert details before retaining a copy.
+type RequestGateEvidence struct {
+	EventID         string                  `json:"event_id"`
+	Sequence        uint64                  `json:"sequence"`
+	ObservedAt      time.Time               `json:"observed_at"`
+	Context         RequestContext          `json:"context"`
+	PathTruncated   bool                    `json:"path_truncated"`
+	Inspection      RequestInspectionResult `json:"inspection"`
+	AlertCount      int                     `json:"alert_count"`
+	AlertsTruncated bool                    `json:"alerts_truncated"`
+	Decision        RequestDecision         `json:"decision"`
+}
+
+func (e RequestGateEvidence) Clone() RequestGateEvidence {
+	e.Context = e.Context.Clone()
+	e.Inspection = e.Inspection.Clone()
+	return e
+}
+
+type RequestGateEvidencePage struct {
+	Items        []RequestGateEvidence `json:"items"`
+	NextSequence uint64                `json:"next_sequence"`
+	HasMore      bool                  `json:"has_more"`
+}
+
 type RequestGateHealth struct {
 	Enabled            bool              `json:"enabled"`
 	Status             string            `json:"status"`
@@ -161,6 +199,20 @@ type RequestGateHealth struct {
 	ActiveRequests     int               `json:"active_requests"`
 	Counters           map[string]uint64 `json:"counters"`
 	UpdatedAt          time.Time         `json:"updated_at"`
+}
+
+// RequestGateCapabilities distinguishes implemented request-gate code from
+// verified Linux interception. Supported alone is never a readiness signal.
+type RequestGateCapabilities struct {
+	Supported         bool              `json:"supported"`
+	ProductionReady   bool              `json:"production_ready"`
+	HTTPVersions      []string          `json:"http_versions"`
+	ConnectionActions []TLSGateAction   `json:"connection_actions"`
+	FailModes         []GateFailMode    `json:"fail_modes"`
+	Limits            RequestGateConfig `json:"limits"`
+	RuntimeIPCVersion uint16            `json:"runtime_ipc_version"`
+	BuildVersion      string            `json:"build_version"`
+	Limitations       []string          `json:"limitations"`
 }
 
 func (h RequestGateHealth) Clone() RequestGateHealth {
