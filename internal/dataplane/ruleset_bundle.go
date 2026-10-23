@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/kltngfw/ngfw/internal/domain"
 )
 
 type RulesetBundle struct {
@@ -13,12 +15,13 @@ type RulesetBundle struct {
 	InspectionSchema  string   `json:"inspection_schema"`
 	PolicyTransaction string   `json:"policy_transaction"`
 	ExpectedObjects   []string `json:"expected_objects"`
+	ProxySchema       string   `json:"proxy_schema,omitempty"`
 }
 
 func (n *NftRunner) ApplyBundle(ctx context.Context, bundle RulesetBundle) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	runtimeCreated, policyCreated, inspectionCreated := false, false, false
+	runtimeCreated, policyCreated, inspectionCreated, proxyCreated := false, false, false, false
 	cleanup := func(cause error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -26,7 +29,7 @@ func (n *NftRunner) ApplyBundle(ctx context.Context, bundle RulesetBundle) error
 		for _, table := range []struct {
 			name    string
 			created bool
-		}{{"ngfw_inspection", inspectionCreated}, {"ngfw", policyCreated}, {"ngfw_runtime", runtimeCreated}} {
+		}{{"ngfw_proxy", proxyCreated}, {"ngfw_inspection", inspectionCreated}, {"ngfw", policyCreated}, {"ngfw_runtime", runtimeCreated}} {
 			if !table.created {
 				continue
 			}
@@ -61,11 +64,34 @@ func (n *NftRunner) ApplyBundle(ctx context.Context, bundle RulesetBundle) error
 			return cleanup(err)
 		}
 	}
+	if bundle.ProxySchema != "" {
+		proxyCreated, err = n.ensureProxySchemaLocked(ctx)
+		if err != nil {
+			return cleanup(err)
+		}
+	} else if exists, inspectErr := n.tableExists(ctx, "ngfw_proxy"); inspectErr != nil {
+		return cleanup(inspectErr)
+	} else if exists {
+		if err := n.verifyProxyOwnershipLocked(ctx); err != nil {
+			return cleanup(err)
+		}
+		// Schema-1 compensation must withdraw newer M4 hooks too.
+		bundle.PolicyTransaction += "\ndelete table inet ngfw_proxy\n" + ProxySchemaScript() + renderM4RuntimeGuards(domain.Config{}, false)
+	}
 	if out, err := n.runInput(ctx, bundle.PolicyTransaction, "-c", "-f", "-"); err != nil {
 		return cleanup(fmt.Errorf("nft M3 transaction validation failed: %w: %s", err, strings.TrimSpace(string(out))))
 	}
 	if out, err := n.runInput(ctx, bundle.PolicyTransaction, "-f", "-"); err != nil {
 		return cleanup(fmt.Errorf("nft M3 transaction apply failed: %w: %s", err, strings.TrimSpace(string(out))))
+	}
+	if bundle.ProxySchema != "" {
+		state, err := n.readM4StaticState(ctx)
+		if err != nil {
+			return err
+		}
+		n.m4StaticState = state
+	} else {
+		n.m4StaticState = ""
 	}
 	if err := n.verifyBundleLocked(ctx, bundle); err != nil {
 		// Once the policy transaction was accepted, deleting only newly-created
@@ -91,7 +117,7 @@ func (n *NftRunner) verifyBundleLocked(ctx context.Context, bundle RulesetBundle
 	}
 	for _, object := range objects {
 		parts := strings.Split(object, "/")
-		if len(parts) != 2 || parts[0] != "inet" || (parts[1] != "ngfw" && parts[1] != "ngfw_runtime" && parts[1] != "ngfw_inspection") {
+		if len(parts) != 2 || parts[0] != "inet" || (parts[1] != "ngfw" && parts[1] != "ngfw_runtime" && parts[1] != "ngfw_inspection" && parts[1] != "ngfw_proxy") {
 			return fmt.Errorf("unsupported nft verification object %q", object)
 		}
 		if out, err := n.run(ctx, "list", "table", parts[0], parts[1]); err != nil {
@@ -102,6 +128,15 @@ func (n *NftRunner) verifyBundleLocked(ctx context.Context, bundle RulesetBundle
 		out, err := n.run(ctx, append([]string{"list"}, object...)...)
 		if err != nil {
 			return fmt.Errorf("verify nft %s %s/%s/%s: %w: %s", object[0], object[1], object[2], object[3], err, strings.TrimSpace(string(out)))
+		}
+	}
+	if bundle.ProxySchema != "" {
+		state, err := n.readM4StaticState(ctx)
+		if err != nil {
+			return err
+		}
+		if n.m4StaticState == "" || state != n.m4StaticState {
+			return errors.New("M4 nft selector/guard state differs from verified activation")
 		}
 	}
 	return nil

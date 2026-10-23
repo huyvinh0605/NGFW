@@ -13,9 +13,10 @@ import (
 // NftRunner is a privileged Linux adapter. It checks the complete ruleset,
 // applies it as one nft transaction, and reads the managed table back.
 type NftRunner struct {
-	Binary      string
-	mu          sync.RWMutex
-	lastRuleset string
+	Binary        string
+	mu            sync.RWMutex
+	lastRuleset   string
+	m4StaticState string
 }
 
 func NewNftRunner(binary string) *NftRunner {

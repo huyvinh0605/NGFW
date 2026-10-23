@@ -615,7 +615,7 @@ func TestHTTPRequestGateFailureEvidenceNeverBecomesClean(t *testing.T) {
 					return domain.RequestInspectionResult{}, test.inspectorErr
 				}),
 				Authorizer: RequestAuthorizerFunc(func(_ context.Context, evaluation domain.ProxyRequestEvaluation, _ uint64) (domain.RequestDecision, error) {
-					if evaluation.Inspection.Completed || evaluation.Inspection.ErrorCode != test.code || evaluation.Inspection.Coverage != domain.RequestCoverageUnavailable {
+					if evaluation.Inspection.Completed || evaluation.Inspection.ErrorCode != test.code || evaluation.Inspection.Coverage != domain.RequestCoverageUnavailable || evaluation.Inspection.RulesetID != domain.DefaultRequestGateConfig().RulesetID {
 						t.Errorf("bad failure evidence: %+v", evaluation.Inspection)
 					}
 					return domain.RequestDecision{

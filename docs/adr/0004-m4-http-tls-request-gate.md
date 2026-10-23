@@ -1,7 +1,7 @@
 # ADR 0004: M4 HTTP/TLS Synchronous Request Gate
 
-- Status: Proposed for implementation; Linux capability probe required
-- Date: 2026-09-28
+- Status: TPROXY mechanism accepted; activation implemented; VM acceptance pending
+- Date: 2026-10-23
 - Scope: M4
 
 ## Context
@@ -23,6 +23,25 @@ Synchronous signature inspection uses a dedicated bounded pool of persistent Sur
 Request failures are not security-clean results. Fail-open may allow with `PARTIAL/UNAVAILABLE` coverage and evidence; fail-close blocks with an availability reason distinct from malicious detection.
 
 ## Consequences
+
+The Ubuntu 24.04 / Linux 6.8 appliance probe found that a DNAT flow sent to
+`198.51.100.20:443` reaches the backend without traversing a second nft NAT
+`redirect` chain: five client/backend requests but only four proxy accepts.
+REDIRECT therefore fails the mandatory DNAT gate. An isolated TPROXY + IPv4
+policy-routing probe passed all five flows, including that DNAT flow, with the
+accepted socket retaining the post-DNAT `10.251.0.2:443` destination. The
+probe also passed TLS 1.2/1.3 ALPN, proxy restart, non-recursive upstream and
+Suricata 7 Unix-socket PCAP queue drain. The recorded evidence is under
+`artifacts/m4-t01-20261022T1135Z/`.
+
+The engine must own the nft selector and mark-based policy route and restore
+both across failed activation, rollback and restart. The proxy needs
+`IP_TRANSPARENT` on its listeners; the VM confirmed `CAP_NET_RAW` is sufficient
+and a plain account receives `EPERM`. A private request-worker process drops
+the proxy's ambient capability before executing Suricata. Kernel
+interception is activated through the checksummed controller snapshot after
+nonce-bound proxy preparation. Kernel verification, monotonic rollback and
+journal recovery are implemented; full appliance traffic acceptance is pending.
 
 M4 can prove that representative SQLi/XSS requests never reach upstream while clean HTTP/1.1 and HTTP/2 requests do. It adds latency and memory cost because request bodies are held and Suricata PCAP inspection is synchronous; performance must be measured rather than claimed.
 

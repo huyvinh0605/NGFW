@@ -99,26 +99,8 @@ func main() {
 		options := compileOptions(desired)
 		return controller.ApplyRuntimePrepared(applyContext, desired, options, targetGeneration)
 	}
-	startupContext, cancelStartup := context.WithTimeout(ctx, 60*time.Second)
-	startupGeneration := m.Version().Version
-	if err := validateInspectionArtifacts(m.Running()); err != nil {
-		cancelStartup()
-		logger.Error("running M3 configuration references unavailable or modified inspection artifacts", "error", err)
-		os.Exit(1)
-	}
-	if err := applyDataplane(startupContext, m.Running(), startupGeneration); err != nil {
-		cancelStartup()
-		logger.Error("startup dataplane reconciliation failed", "error", err)
-		os.Exit(1)
-	}
-	cancelStartup()
-	logger.Info("running configuration reconciled to Linux dataplane", "version", m.Version().Version, "recovered_interrupted_activation", recoveringActivation)
-	if err := forwarding.EnsureConntrack(ctx); err != nil {
-		logger.Warn("conntrack accounting/events/timestamps unavailable; session metadata may be partial", "error", err)
-	}
-
 	generation := m.Version().Version
-	program, programErr := connectivity.CompileForCapabilities(m.Running(), generation, connectivity.Capabilities{Inspection: true})
+	program, programErr := connectivity.CompileForCapabilities(m.Running(), generation, connectivity.Capabilities{Inspection: true, RequestGate: true})
 	if programErr != nil {
 		logger.Error("M2 connectivity program failed", "error", programErr)
 		os.Exit(1)
@@ -138,6 +120,58 @@ func main() {
 		runtimeLimits.MaxEventQueue = m.Running().MaxEventsQueue
 	}
 	runtimeEngine := engine.NewRuntime(source, program, m.Version().Version, runtimeLimits)
+	gateService := &engine.GateService{Runtime: runtimeEngine, Scope: flow.Scope{NetworkNamespace: os.Getenv("NGFW_NETWORK_NAMESPACE")}}
+	gateService.RunningConfig = func() (domain.Config, uint64) {
+		before := m.Version().Version
+		value := m.Running()
+		if m.Version().Version != before {
+			return domain.Config{}, 0
+		}
+		return value, before
+	}
+	gateService.InterceptionReady = controller.M4InterceptionReady
+	gateService.ActivationArtifacts = controller.M4Artifacts
+	controller.ProxyRouting = dataplane.TPROXYRouting{IP: dataplane.NewExecIPCommandRunner(os.Getenv("NGFW_IP_BINARY"))}
+	controller.PrepareProxy = gateService.PrepareGateRuntime
+	go controller.MonitorM4Readiness(ctx)
+	gateSocket := os.Getenv("NGFW_REQUEST_GATE_SOCKET")
+	if gateSocket == "" {
+		gateSocket = gateipc.DefaultSocketPath
+	}
+	gateErrors := make(chan error, 1)
+	gateServer := gateipc.NewServer(gateService)
+	gateServer.SocketGroup = "ngfw-proxy"
+	go func() { gateErrors <- gateServer.ServeUnix(ctx, gateSocket) }()
+	finalizeActivation := func(finalizeContext context.Context, value domain.Config, generation uint64) error {
+		if domain.UsesM4(value) {
+			if err := gateService.ConfirmGatePreparation(generation); err != nil {
+				return err
+			}
+		}
+		if err := controller.FinalizeActivation(finalizeContext, value, generation); err != nil {
+			return err
+		}
+		gateService.CompleteGatePreparation()
+		return nil
+	}
+	startupContext, cancelStartup := context.WithTimeout(ctx, 60*time.Second)
+	startupGeneration := m.Version().Version
+	if err := validateInspectionArtifacts(m.Running()); err != nil {
+		cancelStartup()
+		logger.Error("running M3 configuration references unavailable or modified inspection artifacts", "error", err)
+		os.Exit(1)
+	}
+	if err := applyDataplane(startupContext, m.Running(), startupGeneration); err != nil {
+		cancelStartup()
+		logger.Error("startup dataplane reconciliation failed", "error", err)
+		os.Exit(1)
+	}
+	cancelStartup()
+	logger.Info("running configuration reconciled to Linux dataplane", "version", m.Version().Version, "recovered_interrupted_activation", recoveringActivation)
+	if err := forwarding.EnsureConntrack(ctx); err != nil {
+		logger.Warn("conntrack accounting/events/timestamps unavailable; session metadata may be partial", "error", err)
+	}
+
 	// A revoked conntrack set contains kernel IDs whose namespace/boot/start
 	// provenance is not encoded in nft's integer set. Clear it once per engine
 	// start so an ID reused after restart cannot inherit a stale DROP fence.
@@ -243,7 +277,7 @@ func main() {
 		logger.Warn("inspection runtime configuration failed", "error", startupInspectionErr)
 	} else {
 		finalizeContext, finalizeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if finalizeErr := controller.FinalizeActivation(finalizeContext, m.Running(), m.Version().Version); finalizeErr != nil {
+		if finalizeErr := finalizeActivation(finalizeContext, m.Running(), m.Version().Version); finalizeErr != nil {
 			logger.Warn("startup activation journal remains pending", "error", finalizeErr)
 		}
 		finalizeCancel()
@@ -266,10 +300,15 @@ func main() {
 		inspectionMu.Unlock()
 	}()
 	service := engine.NewRuntimeServiceAdapter(runtimeEngine, m, nil)
-	gateService := &engine.GateService{Runtime: runtimeEngine, Scope: flow.Scope{NetworkNamespace: os.Getenv("NGFW_NETWORK_NAMESPACE")}}
 	service.Gate = gateService
-	service.ApplyGeneration = applyDataplane
-	service.FinalizeActivation = controller.FinalizeActivation
+	service.ApplyGeneration = func(ctx context.Context, desired domain.Config, generation uint64) error {
+		err := applyDataplane(ctx, desired, generation)
+		if err != nil {
+			gateService.CompleteGatePreparation()
+		}
+		return err
+	}
+	service.FinalizeActivation = finalizeActivation
 	service.BeforeActivate = func(_ context.Context, desired domain.Config, _ uint64) error {
 		return validateInspectionArtifacts(desired)
 	}
@@ -294,12 +333,6 @@ func main() {
 	ipcServer := engineipc.NewRuntimeServer(engineipc.DefaultSocketPath(stateDir), service)
 	ipcErrors := make(chan error, 1)
 	go func() { ipcErrors <- ipcServer.Serve(ctx) }()
-	gateSocket := os.Getenv("NGFW_REQUEST_GATE_SOCKET")
-	if gateSocket == "" {
-		gateSocket = gateipc.DefaultSocketPath
-	}
-	gateErrors := make(chan error, 1)
-	go func() { gateErrors <- gateipc.NewServer(gateService).ServeUnix(ctx, gateSocket) }()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	logger.Info("ngfw engine started", "ipc_socket", ipcServer.SocketPath)
@@ -322,9 +355,6 @@ func main() {
 			}
 			gateErrors = nil
 		case now := <-ticker.C:
-			for _, closed := range runtimeEngine.Store.CleanupExpired(now, 512) {
-				_ = runtimeEngine.ReleaseExpiredSession(closed)
-			}
 			runtimeEngine.SweepBlocks(now)
 		}
 	}

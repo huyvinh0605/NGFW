@@ -63,18 +63,29 @@ func (f RequestAuthorizerFunc) EvaluateRequest(ctx context.Context, evaluation d
 
 // IPCRequestAuthorizer validates the authoritative engine response. A proxy
 // cannot turn a missing, stale or malformed engine reply into an ALLOW.
-type IPCRequestAuthorizer struct{ Client *gateipc.Client }
+type IPCRequestAuthorizer struct {
+	Client           *gateipc.Client
+	EngineInstanceID string
+	Generation       uint64
+}
 
 func (authorizer IPCRequestAuthorizer) EvaluateRequest(ctx context.Context, evaluation domain.ProxyRequestEvaluation, generation uint64) (domain.RequestDecision, error) {
 	if authorizer.Client == nil {
 		return domain.RequestDecision{}, ErrGateDecisionInvalid
 	}
 	var decision domain.RequestDecision
+	if authorizer.Generation != 0 && generation != authorizer.Generation {
+		return domain.RequestDecision{}, ErrGateDecisionInvalid
+	}
+	evaluation.EngineInstanceID, evaluation.ConfigGeneration = authorizer.EngineInstanceID, authorizer.Generation
 	meta, err := authorizer.Client.CallAtGeneration(ctx, gateipc.EvaluateRequest, evaluation, &decision, generation)
 	if err != nil {
 		return domain.RequestDecision{}, err
 	}
 	if meta.DecisionID != decision.DecisionID || meta.ConfigGeneration != decision.ConfigGeneration || !validRequestDecision(evaluation.Context, decision, generation) {
+		return domain.RequestDecision{}, ErrGateDecisionInvalid
+	}
+	if authorizer.Generation != 0 && decision.ConfigGeneration != authorizer.Generation {
 		return domain.RequestDecision{}, ErrGateDecisionInvalid
 	}
 	return decision, nil
@@ -99,31 +110,51 @@ func validRequestDecision(request domain.RequestContext, decision domain.Request
 // TLS HTTP/1.1 uses verified upstream TLS. HTTP/2 streams reuse only the
 // connection-scoped identity allocator; each request has its own gate state.
 type HTTP1RequestGate struct {
-	Limits       domain.RequestGateConfig
-	Inspector    RequestInspector
-	Authorizer   RequestAuthorizer
-	DialContext  func(context.Context, string, string) (net.Conn, error)
-	Roots        *x509.CertPool
-	counters     requestGateCounters
-	requestSlots chan struct{}
-	mu           sync.Mutex
+	Limits         domain.RequestGateConfig
+	Inspector      RequestInspector
+	Authorizer     RequestAuthorizer
+	DialContext    func(context.Context, string, string) (net.Conn, error)
+	Roots          *x509.CertPool
+	counters       requestGateCounters
+	requestSlots   chan struct{}
+	clientRequests map[netip.Addr]int
+	mu             sync.Mutex
 }
 
-func (gate *HTTP1RequestGate) acquire() bool {
+func (gate *HTTP1RequestGate) acquire(client netip.Addr) bool {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
+	client = client.Unmap()
+	if !client.IsValid() {
+		return false
+	}
+	limits := gate.Limits.WithDefaults()
 	if gate.requestSlots == nil {
-		gate.requestSlots = make(chan struct{}, gate.Limits.WithDefaults().MaxConcurrentRequests)
+		gate.requestSlots = make(chan struct{}, limits.MaxConcurrentRequests)
+		gate.clientRequests = make(map[netip.Addr]int)
+	}
+	if gate.clientRequests[client] >= limits.MaxPerClientRequests {
+		return false
 	}
 	select {
 	case gate.requestSlots <- struct{}{}:
+		gate.clientRequests[client]++
 		return true
 	default:
 		return false
 	}
 }
 
-func (gate *HTTP1RequestGate) release() { <-gate.requestSlots }
+func (gate *HTTP1RequestGate) release(client netip.Addr) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	client = client.Unmap()
+	<-gate.requestSlots
+	gate.clientRequests[client]--
+	if gate.clientRequests[client] == 0 {
+		delete(gate.clientRequests, client)
+	}
+}
 
 func (gate *HTTP1RequestGate) ServeHTTPConnection(ctx context.Context, downstream net.Conn, value ConnectionContext, connectionDecision domain.ProxyConnectionDecision) error {
 	if gate == nil || ctx == nil || downstream == nil || gate.Authorizer == nil || !value.OriginalDestination.IsValid() || connectionDecision.ConfigGeneration == 0 || connectionDecision.UpstreamIP != value.OriginalDestination.Addr().Unmap().String() || connectionDecision.UpstreamPort != int(value.OriginalDestination.Port()) {
@@ -142,7 +173,7 @@ func (gate *HTTP1RequestGate) ServeHTTPConnection(ctx context.Context, downstrea
 		return ErrGateHandlerMissing
 	}
 	limits := gate.Limits.WithDefaults()
-	if limits.MaxConcurrentRequests < 1 || limits.MaxConcurrentRequests > 4096 || limits.MaxHTTP2Streams < 1 || limits.MaxHTTP2Streams > 256 || limits.MaxPerClientRequests < 1 || limits.MaxPerClientRequests > 256 || limits.MaxHeaderBytes < 1 || limits.MaxHeaderBytes > 64<<10 || limits.MaxRawBodyBytes < 1 || limits.MaxRawBodyBytes > 1<<20 || limits.RequestTimeoutMillis < 100 || limits.RequestTimeoutMillis > 30000 {
+	if limits.MaxConcurrentRequests < 1 || limits.MaxConcurrentRequests > 1024 || limits.MaxHTTP2Streams < 1 || limits.MaxHTTP2Streams > 256 || limits.MaxPerClientRequests < 1 || limits.MaxPerClientRequests > 1024 || limits.MaxHeaderBytes < 1 || limits.MaxHeaderBytes > 64<<10 || limits.MaxRawBodyBytes < 1 || limits.MaxRawBodyBytes > 1<<20 || limits.RequestTimeoutMillis < 100 || limits.RequestTimeoutMillis > 30000 {
 		return inspection.ErrGateHTTPMalformed
 	}
 	allocator, err := NewRequestIdentityAllocator(value.ConnectionID)
@@ -187,12 +218,12 @@ func (gate *HTTP1RequestGate) handleRequest(w http.ResponseWriter, request *http
 		writeGateStatus(w, request, http.StatusBadRequest)
 		return
 	}
-	if !gate.acquire() {
+	if !gate.acquire(connection.ClientAddress.Addr()) {
 		gate.counters.capacityRejected.Add(1)
 		writeGateStatus(w, request, http.StatusServiceUnavailable)
 		return
 	}
-	defer gate.release()
+	defer gate.release(connection.ClientAddress.Addr())
 	gate.counters.activeRequests.Add(1)
 	defer gate.counters.activeRequests.Add(-1)
 	requestCtx, cancel := context.WithTimeout(request.Context(), time.Duration(limits.RequestTimeoutMillis)*time.Millisecond)
@@ -231,7 +262,7 @@ func (gate *HTTP1RequestGate) handleRequest(w http.ResponseWriter, request *http
 		writeGateStatus(w, request, http.StatusBadRequest)
 		return
 	}
-	evidence := domain.RequestInspectionResult{RequestID: requestContext.RequestID, Coverage: domain.RequestCoverageUnavailable, ErrorCode: "GATE_SENSOR_UNAVAILABLE"}
+	evidence := domain.RequestInspectionResult{RequestID: requestContext.RequestID, Coverage: domain.RequestCoverageUnavailable, ErrorCode: "GATE_SENSOR_UNAVAILABLE", RulesetID: limits.RulesetID}
 	if requestContext.Truncated {
 		gate.counters.bodyLimit.Add(1)
 		evidence.Coverage = domain.RequestCoveragePartial

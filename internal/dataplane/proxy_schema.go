@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -9,13 +10,15 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
-// ProxySelectionSchema is a compiler input version. It is deliberately not an
-// nftables table version: REDIRECT/TPROXY syntax is selected only after T01.
+// ProxySelectionSchema is a compiler input version, not an nftables table
+// version. The Ubuntu T01 probe selected TPROXY for post-DNAT interception.
 const ProxySelectionSchema = 1
 
-// ProxySchemaScript defines only an inert, NGFW-owned table. T01 must select
-// REDIRECT or TPROXY before a hooked prerouting chain can be rendered. Merely
-// creating this table cannot change packet forwarding.
+// Legacy Apply/ApplyM2 cannot activate M4 without a complete snapshot.
+var ErrM4ActivationUnavailable = errors.New("M4 requires snapshot activation, proxy preflight and policy routing")
+
+// ProxySchemaScript creates an inert owned table before the atomic policy
+// transaction. The activation coordinator installs its hook and route.
 func ProxySchemaScript() string {
 	return `table inet ngfw_proxy {
   comment "owner=ngfw-engine schema=1"

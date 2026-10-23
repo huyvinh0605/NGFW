@@ -8,4 +8,18 @@ Request envelope: `version`, random `correlation_id`, `operation`, `payload`. Ve
 
 Transport errors use stable codes: `GATE_IPC_MALFORMED`, `GATE_IPC_VERSION_MISMATCH`, `GATE_IPC_FRAME_TOO_LARGE`, `GATE_IPC_DEADLINE_EXCEEDED`, `GATE_ENGINE_UNAVAILABLE`, `GATE_IPC_CORRELATION_MISMATCH`, `GATE_IPC_STALE_GENERATION`, and `GATE_IPC_INTERNAL`. Raw handler errors and request payloads are not returned in error frames. A full server queue currently closes the new connection; the client reports engine unavailability. T26 will attach the configured failure policy and queue-specific health counters. No transport error is a clean inspection result.
 
-T10 and T23 will bind typed engine operations to this transport. T09 does not activate interception or change M1/M2/M3 packet forwarding.
+T10/T23 bind typed engine operations to this transport. T28 uses
+`gate_health_ping` for a two-phase resource handshake. The engine may return a
+random `preparation_id` with limits and CA requirements, while
+`interception_ready=false`. This permits listener/worker startup only; every
+connection/request authorization remains blocked during preparation.
+
+The proxy echoes that ID in its heartbeat together with ruleset ID/hash,
+worker-config hash and public CA certificate fingerprint. No private-key hash
+is exchanged. A heartbeat from another preparation cannot satisfy preflight.
+After kernel verification and publication of Running/Runtime, the engine
+clears the preparation ID and supplies the accepted `expected_artifacts`.
+The proxy keeps matching prepared resources; changed identity/generation or
+an aborted preparation retires the old runtime first. A process restart must
+load artifacts matching the accepted identity. Stale IPC cannot authorize
+traffic after a commit or rollback.

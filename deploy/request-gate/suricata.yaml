@@ -17,6 +17,7 @@ outputs:
       types:
         - alert
         - http
+        - flow
 unix-command:
   enabled: yes
 stats:

@@ -27,6 +27,9 @@ type ProcessConfig struct {
 	RootDir        string
 	StartupTimeout time.Duration
 	PollInterval   time.Duration
+	// A transparent proxy needs CAP_NET_RAW to create IP_TRANSPARENT listeners.
+	// The private Suricata child must not inherit that ambient capability.
+	DropNetworkRawCapability bool
 }
 
 type suricataSession struct {
@@ -80,7 +83,16 @@ func ProductionFactory(config ProcessConfig) (SessionFactory, error) {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, errors.Join(ErrUnavailable, err)
 		}
-		command := exec.Command(config.Binary, "-c", config.ConfigPath, "--unix-socket="+socketPath, "-l", root)
+		binary := config.Binary
+		args := []string{"-c", config.ConfigPath, "--unix-socket=" + socketPath, "-l", root}
+		if config.DropNetworkRawCapability {
+			if runtime.GOOS != "linux" {
+				return nil, ErrInvalidConfig
+			}
+			binary = "/usr/bin/setpriv"
+			args = append([]string{"--ambient-caps=-net_raw", "--", config.Binary}, args...)
+		}
+		command := exec.Command(binary, args...)
 		command.Stdout, command.Stderr = io.Discard, io.Discard
 		if err := command.Start(); err != nil {
 			return nil, errors.Join(ErrUnavailable, err)
@@ -116,6 +128,18 @@ func ProductionFactory(config ProcessConfig) (SessionFactory, error) {
 			}
 		}
 	}, nil
+}
+
+func (session *suricataSession) Ready() bool {
+	if session == nil || session.closed.Load() || session.client == nil {
+		return false
+	}
+	select {
+	case <-session.done:
+		return false
+	default:
+		return true
+	}
 }
 
 func (session *suricataSession) Run(ctx context.Context, pcapPath, outputDir string) ([]byte, error) {

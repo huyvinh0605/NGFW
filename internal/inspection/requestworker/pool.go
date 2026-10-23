@@ -53,6 +53,7 @@ type Stats struct {
 	InFlightItems int
 	QueuedBytes   int
 	Workers       int
+	WorkersReady  int
 }
 
 type job struct {
@@ -77,6 +78,7 @@ type Pool struct {
 	builders chan struct{}
 	sessions []Session
 	flowID   atomic.Uint32
+	failed   atomic.Bool
 	workers  sync.WaitGroup
 	mu       sync.Mutex
 	closed   bool
@@ -140,7 +142,7 @@ func (pool *Pool) Inspect(ctx context.Context, requestID string, request inspect
 	pool.mu.Lock()
 	closed := pool.closed
 	pool.mu.Unlock()
-	if closed || pool.ctx.Err() != nil {
+	if closed || pool.ctx.Err() != nil || pool.failed.Load() {
 		return Result{}, ErrUnavailable
 	}
 	select {
@@ -227,7 +229,15 @@ func (pool *Pool) Stats() Stats {
 	}
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	return Stats{QueuedItems: len(pool.jobs), InFlightItems: pool.inFlight, QueuedBytes: pool.bytes, Workers: len(pool.sessions)}
+	ready := 0
+	if !pool.closed && pool.ctx.Err() == nil && !pool.failed.Load() {
+		for _, session := range pool.sessions {
+			if health, ok := session.(interface{ Ready() bool }); ok && health.Ready() {
+				ready++
+			}
+		}
+	}
+	return Stats{QueuedItems: len(pool.jobs), InFlightItems: pool.inFlight, QueuedBytes: pool.bytes, Workers: len(pool.sessions), WorkersReady: ready}
 }
 
 func (pool *Pool) Close() {
@@ -282,6 +292,9 @@ func (pool *Pool) run(work *job, workerID int, session Session) (Result, error) 
 	if err := work.ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if pool.failed.Load() {
+		return Result{}, ErrUnavailable
+	}
 	directory, err := os.MkdirTemp(pool.config.RootDir, "job-")
 	if err != nil {
 		return Result{}, errors.Join(ErrUnavailable, err)
@@ -300,6 +313,10 @@ func (pool *Pool) run(work *job, workerID int, session Session) (Result, error) 
 	}
 	eve, err := session.Run(ctx, pcapPath, output)
 	if err != nil {
+		// A failed/cancelled job may still be queued in the detector. Retire
+		// it before deleting its PCAP, and never reuse that process for a job.
+		pool.failed.Store(true)
+		_ = session.Close()
 		return Result{}, errors.Join(ErrUnavailable, err)
 	}
 	if len(eve) == 0 || len(eve) > 1<<20 {

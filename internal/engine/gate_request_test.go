@@ -25,7 +25,7 @@ func gateRequestInput(open domain.ProxyConnectionOpen, connectionDecision domain
 			RequestOrdinal: 1, HTTPVersion: "HTTP/1.1", Method: "GET", Scheme: "http",
 			Host: "lab.example", Path: "/", HeaderBytes: 100,
 		},
-		Inspection: domain.RequestInspectionResult{RequestID: requestID, Completed: true, Coverage: domain.CoverageComplete},
+		Inspection: domain.RequestInspectionResult{RequestID: requestID, Completed: true, Coverage: domain.CoverageComplete, RulesetID: "m4-builtin-v1"},
 	}
 }
 
@@ -68,7 +68,7 @@ func TestM4EvaluateRequestFailureModesAndPartial(t *testing.T) {
 		open := gateTestOpen(false)
 		connection, _ := service.OpenConnection(context.Background(), open)
 		input := gateRequestInput(open, connection)
-		input.Inspection = domain.RequestInspectionResult{RequestID: input.Context.RequestID, Completed: false, Coverage: domain.RequestCoverageUnavailable, ErrorCode: "GATE_EVE_INCOMPLETE"}
+		input.Inspection = domain.RequestInspectionResult{RequestID: input.Context.RequestID, Completed: false, Coverage: domain.RequestCoverageUnavailable, ErrorCode: "GATE_EVE_INCOMPLETE", RulesetID: "m4-builtin-v1"}
 		outage, err := service.EvaluateRequest(context.Background(), input)
 		if err != nil || outage.Coverage != domain.RequestCoverageUnavailable || outage.ReasonCode != "GATE_EVE_INCOMPLETE" {
 			t.Fatalf("outage mislabeled clean: %+v %v", outage, err)
@@ -78,6 +78,7 @@ func TestM4EvaluateRequestFailureModesAndPartial(t *testing.T) {
 		}
 		input.Context.Truncated = true
 		input.Inspection.Coverage = domain.RequestCoveragePartial
+		input.Inspection.RulesetID = "" // body limit is known before the detector runs
 		partial, err := service.EvaluateRequest(context.Background(), input)
 		if err != nil || partial.Coverage != domain.RequestCoveragePartial || partial.ReasonCode != "GATE_REQUEST_TOO_LARGE" {
 			t.Fatalf("partial body lost: %+v %v", partial, err)
@@ -85,6 +86,28 @@ func TestM4EvaluateRequestFailureModesAndPartial(t *testing.T) {
 		if failMode == domain.GateFailOpen && (partial.Verdict != domain.RequestAllow || partial.HTTPStatus != 0) || failMode == domain.GateFailClose && (partial.Verdict != domain.RequestBlock || partial.HTTPStatus != 413) {
 			t.Fatalf("wrong oversize mode %s: %+v", failMode, partial)
 		}
+	}
+}
+
+func TestM4BlockedOversizeCannotBecomeFailOpenFromMissingSensorIdentity(t *testing.T) {
+	configured := gateTestConfig()
+	configured.Profiles[0].RequestGate.FailMode = domain.GateFailOpen
+	configured.Profiles[0].RequestGate.OversizeAction = "BLOCK"
+	service := gateTestService(t, configured)
+	open := gateTestOpen(false)
+	connection, err := service.OpenConnection(context.Background(), open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := gateRequestInput(open, connection)
+	input.Context.Truncated = true
+	input.Inspection.RulesetID = "" // the detector never saw the oversized body
+	input.Inspection.Coverage = domain.RequestCoveragePartial
+	input.Inspection.Completed = false
+	input.Inspection.ErrorCode = "GATE_REQUEST_TOO_LARGE"
+	verdict, err := service.EvaluateRequest(context.Background(), input)
+	if err != nil || verdict.Verdict != domain.RequestBlock || verdict.HTTPStatus != 413 || verdict.ReasonCode != "GATE_REQUEST_TOO_LARGE" {
+		t.Fatalf("oversize BLOCK was converted to fail-open: %+v %v", verdict, err)
 	}
 }
 

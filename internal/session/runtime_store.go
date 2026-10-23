@@ -65,6 +65,8 @@ type PageResult struct {
 type RuntimeStats struct {
 	Active, Created, Closed, Invalidated, TrackingDrops, CapacityDrops uint64
 	EventDrops, Resyncs                                                uint64
+	DumpIncomplete, LastDumpBytes, LastDumpMillis                      uint64
+	GetChecks, GetUnavailable, ExpiryBacklog, ExpiryOldestSeconds      uint64
 }
 
 type tombstone struct {
@@ -92,6 +94,7 @@ type RuntimeStore struct {
 	conntracksBySession map[string][]conntrackKey
 	closed              []domain.RuntimeSession
 	tombstones          []tombstone
+	expiryRetryAfter    map[string]time.Time
 	limits              RuntimeLimits
 	revision            uint64
 	stats               RuntimeStats
@@ -117,7 +120,7 @@ func NewRuntimeStore(limits RuntimeLimits) *RuntimeStore {
 	if limits.MaxEventQueue <= 0 {
 		limits.MaxEventQueue = defaults.MaxEventQueue
 	}
-	return &RuntimeStore{byID: map[string]*domain.RuntimeSession{}, byIdentity: map[domain.ConntrackIdentity]string{}, byConntrack: map[conntrackKey]string{}, byTuple: map[flow.Key]map[string]struct{}{}, aliasesBySession: map[string][]flow.Key{}, identitiesBySession: map[string][]domain.ConntrackIdentity{}, conntracksBySession: map[string][]conntrackKey{}, limits: limits}
+	return &RuntimeStore{byID: map[string]*domain.RuntimeSession{}, byIdentity: map[domain.ConntrackIdentity]string{}, byConntrack: map[conntrackKey]string{}, byTuple: map[flow.Key]map[string]struct{}{}, aliasesBySession: map[string][]flow.Key{}, identitiesBySession: map[string][]domain.ConntrackIdentity{}, conntracksBySession: map[string][]conntrackKey{}, expiryRetryAfter: map[string]time.Time{}, limits: limits}
 }
 
 // HasActiveKernelKey reports whether an active session currently owns the
@@ -143,6 +146,22 @@ func (s *RuntimeStore) HasActiveKernelKey(identity domain.ConntrackIdentity) boo
 	return false
 }
 
+// The M2 revoked_ctids nft set is keyed by conntrack ID alone. A delayed
+// close must not delete an element now owned by a newer revoked session.
+func (s *RuntimeStore) HasActiveRevokedConntrackID(id uint32) bool {
+	if s == nil || id == 0 {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, current := range s.byID {
+		if current.Identity.ID == id && current.Revoked {
+			return true
+		}
+	}
+	return false
+}
+
 func sessionID(identity domain.ConntrackIdentity) string {
 	b := []byte(identity.BootID + "\x00" + identity.NetworkNS + "\x00" + identity.Original.String())
 	b = append(b, byte(identity.Zone>>8), byte(identity.Zone), byte(identity.Family), byte(identity.ID>>24), byte(identity.ID>>16), byte(identity.ID>>8), byte(identity.ID))
@@ -157,6 +176,14 @@ func sessionID(identity domain.ConntrackIdentity) string {
 }
 
 func (s *RuntimeStore) Apply(record conntrack.Record, now time.Time) (domain.RuntimeSession, bool, error) {
+	value, created, _, err := s.ApplyObserved(record, now)
+	return value, created, err
+}
+
+// ApplyObserved reports whether a session changed in a way that requires
+// policy or inspection work. Merely seeing the same flow in a later dump does
+// not count as packet activity.
+func (s *RuntimeStore) ApplyObserved(record conntrack.Record, now time.Time) (domain.RuntimeSession, bool, bool, error) {
 	// UPDATE messages can legitimately omit the original tuple when the
 	// kernel only reports counters/timeout changes. The identity still carries
 	// the canonical tuple when available; use it without erasing fields already
@@ -165,7 +192,7 @@ func (s *RuntimeStore) Apply(record conntrack.Record, now time.Time) (domain.Run
 		record.OriginalTuple = record.Identity.Original
 	}
 	if !record.OriginalTuple.Valid() {
-		return domain.RuntimeSession{}, false, ErrIdentityMissing
+		return domain.RuntimeSession{}, false, false, ErrIdentityMissing
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -180,37 +207,51 @@ func (s *RuntimeStore) Apply(record conntrack.Record, now time.Time) (domain.Run
 	if id := s.resolveIdentityLocked(identity); id != "" {
 		if existing := s.byID[id]; existing != nil {
 			s.rememberIdentityLocked(id, identity)
-			return s.mergeLocked(existing, record, now), false, nil
+			value, changed := s.mergeLocked(existing, record, now)
+			return value, false, changed, nil
 		}
 	}
 	for _, tombstone := range s.tombstones {
 		if tombstoneIdentityMatches(tombstone.Identity, identity) {
-			return domain.RuntimeSession{}, false, ErrStaleEvent
+			return domain.RuntimeSession{}, false, false, ErrStaleEvent
 		}
 	}
 	key := flow.Key{Scope: flow.Scope{NetworkNamespace: identity.NetworkNS, ConntrackZone: identity.Zone}, Tuple: record.OriginalTuple}
 	if id, status := s.resolveTupleLocked(key); status == "ok" {
 		if existing := s.byID[id]; existing != nil {
-			s.rememberIdentityLocked(id, identity)
-			return s.mergeLocked(existing, record, now), false, nil
+			// A reused tuple may denote a different kernel incarnation. Never
+			// coalesce two known, conflicting IDs or start timestamps.
+			if (identity.ID == 0 || existing.Identity.ID == 0 || identity.ID == existing.Identity.ID) &&
+				(identity.KernelStart == 0 || existing.Identity.KernelStart == 0 || identity.KernelStart == existing.Identity.KernelStart) {
+				s.rememberIdentityLocked(id, identity)
+				value, changed := s.mergeLocked(existing, record, now)
+				return value, false, changed, nil
+			}
 		}
 	}
 	if len(s.byID) >= s.limits.MaxSessions {
 		s.stats.TrackingDrops++
 		s.stats.CapacityDrops++
-		return domain.RuntimeSession{}, false, ErrRuntimeCapacity
+		return domain.RuntimeSession{}, false, false, ErrRuntimeCapacity
 	}
 	id := sessionID(identity)
 	if _, exists := s.byID[id]; exists { // partial identity collision; never overwrite.
 		id += "-" + hex.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
 	}
+	createdFromKernel := record.Presence.Timestamp && !record.KernelStart.IsZero()
 	created := record.KernelStart
-	createdFromKernel := !created.IsZero() && record.Presence.Timestamp
-	if created.IsZero() {
+	if !createdFromKernel {
 		created = now
 	}
 	state := stateFor(record)
-	sess := &domain.RuntimeSession{SessionID: id, Identity: identity, OriginalTuple: record.OriginalTuple, IPFamily: record.OriginalTuple.Family, Protocol: record.OriginalTuple.Protocol, State: state, CreatedAt: created, LastSeen: now, LastObservedAt: now, PacketsOriginal: record.PacketsOriginal, BytesOriginal: record.BytesOriginal, PacketsReply: record.PacketsReply, BytesReply: record.BytesReply, CacheState: domain.CacheNotEvaluated, Revision: 1, Quality: domain.SessionQuality{TrackingStatus: domain.TrackingComplete, IdentityConfidence: domain.IdentityComplete}}
+	sess := &domain.RuntimeSession{SessionID: id, Identity: identity, OriginalTuple: record.OriginalTuple, IPFamily: record.OriginalTuple.Family, Protocol: record.OriginalTuple.Protocol, State: state, CreatedAt: created, LastSeen: now, LastObservedAt: now, CacheState: domain.CacheNotEvaluated, Revision: 1, Quality: domain.SessionQuality{TrackingStatus: domain.TrackingComplete, IdentityConfidence: domain.IdentityComplete}}
+	originalCounters, replyCounters := counterPresence(record.Presence)
+	if originalCounters {
+		sess.PacketsOriginal, sess.BytesOriginal = record.PacketsOriginal, record.BytesOriginal
+	}
+	if replyCounters {
+		sess.PacketsReply, sess.BytesReply = record.PacketsReply, record.BytesReply
+	}
 	if !createdFromKernel {
 		sess.Quality.IdentityConfidence = domain.IdentityPartial
 		sess.Quality.MissingFields = append(sess.Quality.MissingFields, "kernel_start")
@@ -223,9 +264,15 @@ func (s *RuntimeStore) Apply(record conntrack.Record, now time.Time) (domain.Run
 		sess.Quality.TrackingStatus = domain.TrackingPartial
 		sess.Quality.MissingFields = append(sess.Quality.MissingFields, "reply_tuple")
 	}
-	if !record.Presence.Counters {
+	if !originalCounters || !replyCounters {
 		sess.Quality.TrackingStatus = domain.TrackingPartial
 		sess.Quality.MissingFields = append(sess.Quality.MissingFields, "counters")
+		if !originalCounters {
+			sess.Quality.MissingFields = append(sess.Quality.MissingFields, "counters_original")
+		}
+		if !replyCounters {
+			sess.Quality.MissingFields = append(sess.Quality.MissingFields, "counters_reply")
+		}
 	}
 	if !record.Presence.Timeout {
 		sess.Quality.TrackingStatus = domain.TrackingPartial
@@ -235,23 +282,25 @@ func (s *RuntimeStore) Apply(record conntrack.Record, now time.Time) (domain.Run
 		sess.Quality.TrackingStatus = domain.TrackingPartial
 		sess.Quality.MissingFields = append(sess.Quality.MissingFields, "mark")
 	}
-	if record.ReplyTuple != nil {
+	if record.Presence.ReplyTuple && record.ReplyTuple != nil {
 		v := *record.ReplyTuple
 		sess.ReplyTuple = &v
 	}
-	sess.NAT = makeNAT(record.OriginalTuple, record.ReplyTuple)
+	sess.NAT = makeNAT(record.OriginalTuple, sess.ReplyTuple)
 	if sess.NAT.TranslatedTuple != nil {
 		translated := *sess.NAT.TranslatedTuple
 		sess.TranslatedTuple = &translated
 	}
-	if record.Timeout > 0 {
+	if record.Presence.Timeout {
 		expiry := now.Add(record.Timeout)
 		sess.ExpiresAt = &expiry
 	}
-	sess.KernelEpoch = uint16(record.Mark >> 20)
-	sess.KernelMark = record.Mark
-	if record.Mark != 0 {
-		sess.KernelCacheVerified = false
+	if record.Presence.Mark {
+		sess.KernelEpoch = uint16(record.Mark >> 20)
+		sess.KernelMark = record.Mark
+		if record.Mark != 0 {
+			sess.KernelCacheVerified = false
+		}
 	}
 	s.byID[id] = sess
 	s.rememberIdentityLocked(id, identity)
@@ -259,7 +308,7 @@ func (s *RuntimeStore) Apply(record conntrack.Record, now time.Time) (domain.Run
 	s.stats.Created++
 	s.stats.Active = uint64(len(s.byID))
 	s.revision++
-	return sess.Clone(), true, nil
+	return sess.Clone(), true, true, nil
 }
 
 func tombstoneIdentityMatches(previous, current domain.ConntrackIdentity) bool {
@@ -309,11 +358,16 @@ func makeNAT(original domain.Tuple, reply *domain.Tuple) domain.NATInfo {
 	return n
 }
 
-func (s *RuntimeStore) mergeLocked(existing *domain.RuntimeSession, r conntrack.Record, now time.Time) domain.RuntimeSession {
+func (s *RuntimeStore) mergeLocked(existing *domain.RuntimeSession, r conntrack.Record, now time.Time) (domain.RuntimeSession, bool) {
+	changed := false
+	oldMissing := len(existing.Quality.MissingFields)
+	oldTracking := existing.Quality.TrackingStatus
+	oldConfidence := existing.Quality.IdentityConfidence
 	if existing.Identity.KernelStart == 0 && r.Identity.KernelStart != 0 && r.Presence.Timestamp {
 		existing.Identity.KernelStart = r.Identity.KernelStart
 		existing.Quality.IdentityConfidence = domain.IdentityComplete
 		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "kernel_start")
+		changed = true
 	}
 	if existing.Identity.ID == 0 && r.Identity.ID != 0 && r.Presence.ID {
 		existing.Identity.ID = r.Identity.ID
@@ -321,57 +375,89 @@ func (s *RuntimeStore) mergeLocked(existing *domain.RuntimeSession, r conntrack.
 		if existing.Quality.IdentityConfidence == domain.IdentityPartial && len(existing.Quality.MissingFields) == 0 {
 			existing.Quality.IdentityConfidence = domain.IdentityComplete
 		}
+		changed = true
 	}
 	if r.Presence.ReplyTuple && r.ReplyTuple != nil {
 		v := *r.ReplyTuple
-		existing.ReplyTuple = &v
-		existing.NAT = makeNAT(existing.OriginalTuple, r.ReplyTuple)
-		if existing.NAT.TranslatedTuple != nil {
-			translated := *existing.NAT.TranslatedTuple
-			existing.TranslatedTuple = &translated
-		} else {
-			existing.TranslatedTuple = nil
+		if existing.ReplyTuple == nil || *existing.ReplyTuple != v {
+			existing.ReplyTuple = &v
+			existing.NAT = makeNAT(existing.OriginalTuple, r.ReplyTuple)
+			if existing.NAT.TranslatedTuple != nil {
+				translated := *existing.NAT.TranslatedTuple
+				existing.TranslatedTuple = &translated
+			} else {
+				existing.TranslatedTuple = nil
+			}
+			s.reindexLocked(existing)
+			changed = true
 		}
-		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "reply_tuple")
-		s.reindexLocked(existing)
+		if len(existing.Quality.MissingFields) > 0 {
+			existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "reply_tuple")
+		}
 	}
-	if r.Presence.Counters {
-		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "counters")
-		if r.PacketsOriginal > existing.PacketsOriginal || r.BytesOriginal > existing.BytesOriginal || r.PacketsReply > existing.PacketsReply || r.BytesReply > existing.BytesReply {
+	originalCounters, replyCounters := counterPresence(r.Presence)
+	if originalCounters {
+		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "counters_original")
+		if r.PacketsOriginal > existing.PacketsOriginal || r.BytesOriginal > existing.BytesOriginal {
 			existing.LastSeen = now
+			changed = true
 		}
 		existing.PacketsOriginal = maxUint64(existing.PacketsOriginal, r.PacketsOriginal)
 		existing.BytesOriginal = maxUint64(existing.BytesOriginal, r.BytesOriginal)
+	}
+	if replyCounters {
+		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "counters_reply")
+		if r.PacketsReply > existing.PacketsReply || r.BytesReply > existing.BytesReply {
+			existing.LastSeen = now
+			changed = true
+		}
 		existing.PacketsReply = maxUint64(existing.PacketsReply, r.PacketsReply)
 		existing.BytesReply = maxUint64(existing.BytesReply, r.BytesReply)
 	}
-	if r.Presence.Timeout && r.Timeout > 0 {
+	if !hasMissing(existing.Quality.MissingFields, "counters_original") && !hasMissing(existing.Quality.MissingFields, "counters_reply") {
+		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "counters")
+	}
+	if r.Presence.Timeout {
 		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "timeout")
 		expiry := now.Add(r.Timeout)
 		existing.ExpiresAt = &expiry
 	}
 	if r.TCPState != "" {
-		existing.State = stateFor(r)
+		if state := stateFor(r); state != existing.State {
+			existing.State = state
+			existing.LastSeen = now
+			changed = true
+		}
 	}
 	if r.SeenReply && existing.State == domain.SessionNew {
 		existing.State = domain.SessionEstablished
+		existing.LastSeen = now
+		changed = true
 	}
 	existing.LastObservedAt = now
-	if existing.State != domain.SessionClosed {
-		existing.LastSeen = now
-	}
-	existing.KernelMark = r.Mark
-	existing.KernelEpoch = uint16(r.Mark >> 20)
 	if r.Presence.Mark {
+		if existing.KernelMark != r.Mark {
+			existing.KernelMark = r.Mark
+			existing.KernelEpoch = uint16(r.Mark >> 20)
+			existing.KernelCacheVerified = false
+			changed = true
+		}
 		existing.Quality.MissingFields = removeMissing(existing.Quality.MissingFields, "mark")
 	}
 	if len(existing.Quality.MissingFields) == 0 {
 		existing.Quality.TrackingStatus = domain.TrackingComplete
 	}
-	existing.Revision++
+	if len(existing.Quality.MissingFields) != oldMissing || existing.Quality.TrackingStatus != oldTracking ||
+		existing.Quality.IdentityConfidence != oldConfidence {
+		changed = true
+	}
+	delete(s.expiryRetryAfter, existing.SessionID)
 	s.rememberIdentityLocked(existing.SessionID, r.Identity)
-	s.revision++
-	return existing.Clone()
+	if changed {
+		existing.Revision++
+		s.revision++
+	}
+	return existing.Clone(), changed
 }
 
 func removeMissing(values []string, target string) []string {
@@ -382,6 +468,22 @@ func removeMissing(values []string, target string) []string {
 		}
 	}
 	return filtered
+}
+
+func counterPresence(p conntrack.Presence) (original, reply bool) {
+	if p.CountersOriginal || p.CountersReply {
+		return p.CountersOriginal, p.CountersReply
+	}
+	return p.Counters, p.Counters
+}
+
+func hasMissing(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func maxUint64(a, b uint64) uint64 {
@@ -412,6 +514,7 @@ func (s *RuntimeStore) indexLocked(v *domain.RuntimeSession) {
 func (s *RuntimeStore) reindexLocked(v *domain.RuntimeSession) { s.indexLocked(v); s.revision++ }
 
 func (s *RuntimeStore) removeIndexesLocked(id string) {
+	delete(s.expiryRetryAfter, id)
 	s.removeTupleIndexesLocked(id)
 	for _, identity := range s.identitiesBySession[id] {
 		if current, ok := s.byIdentity[identity]; ok && current == id {
@@ -635,6 +738,12 @@ func (s *RuntimeStore) Close(identity domain.ConntrackIdentity, reason string, n
 	} else {
 		now = now.UTC()
 	}
+	return s.closeLocked(id, v, reason, now), true
+}
+
+// closeLocked is shared by an exact DESTROY and a verified expiry. Callers
+// must hold the store mutex and prove that this is still the same incarnation.
+func (s *RuntimeStore) closeLocked(id string, v *domain.RuntimeSession, reason string, now time.Time) domain.RuntimeSession {
 	v.State = domain.SessionClosed
 	v.ClosedAt = &now
 	v.Revision++
@@ -655,7 +764,7 @@ func (s *RuntimeStore) Close(identity domain.ConntrackIdentity, reason string, n
 	s.stats.Closed++
 	s.stats.Active = uint64(len(s.byID))
 	s.revision++
-	return closed, true
+	return closed
 }
 
 func (s *RuntimeStore) Delete(id string, reason string, now time.Time) error {
@@ -932,59 +1041,124 @@ func matches(v domain.RuntimeSession, f SessionFilter) bool {
 	return true
 }
 
-func (s *RuntimeStore) Cleanup(now time.Time, budget int) int {
-	return len(s.CleanupExpired(now, budget))
-}
-
-func (s *RuntimeStore) CleanupExpired(now time.Time, budget int) []domain.RuntimeSession {
+// ExpiredCandidates only selects suspected expiry; it never closes a flow.
+// The engine must verify each candidate against the kernel outside this lock.
+func (s *RuntimeStore) ExpiredCandidates(now time.Time, budget int) ([]domain.RuntimeSession, int, time.Duration) {
 	if budget <= 0 {
 		budget = 512
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	closedNow := make([]domain.RuntimeSession, 0)
-	for id, v := range s.byID {
-		if len(closedNow) >= budget {
+	type expiryEntry struct {
+		id       string
+		deadline time.Time
+	}
+	s.mu.RLock()
+	due := make([]expiryEntry, 0)
+	totalDue := 0
+	var oldest time.Duration
+	for id, value := range s.byID {
+		if value.ExpiresAt != nil && !value.ExpiresAt.After(now) {
+			totalDue++
+			age := now.Sub(*value.ExpiresAt)
+			if age > oldest {
+				oldest = age
+			}
+			if !s.expiryRetryAfter[id].After(now) {
+				due = append(due, expiryEntry{id: id, deadline: *value.ExpiresAt})
+			}
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].deadline.Equal(due[j].deadline) {
+			return due[i].id < due[j].id
+		}
+		return due[i].deadline.Before(due[j].deadline)
+	})
+	candidates := make([]domain.RuntimeSession, 0, min(len(due), budget))
+	s.mu.RLock()
+	for _, entry := range due {
+		if len(candidates) >= budget {
 			break
 		}
-		if v.ExpiresAt != nil && !v.ExpiresAt.After(now) {
-			v.State = domain.SessionClosed
-			closedAt := now.UTC()
-			v.ClosedAt = &closedAt
-			s.closed = append(s.closed, v.Clone())
-			if len(s.closed) > s.limits.MaxClosed {
-				s.closed = s.closed[len(s.closed)-s.limits.MaxClosed:]
-			}
-			s.tombstones = append(s.tombstones, tombstone{ID: id, Identity: v.Identity, At: now.UTC()})
-			if len(s.tombstones) > s.limits.MaxClosed {
-				s.tombstones = s.tombstones[len(s.tombstones)-s.limits.MaxClosed:]
-			}
-			s.removeIndexesLocked(id)
-			delete(s.byID, id)
-			closedNow = append(closedNow, v.Clone())
+		value := s.byID[entry.id]
+		if value != nil && value.ExpiresAt != nil && value.ExpiresAt.Equal(entry.deadline) &&
+			!value.ExpiresAt.After(now) && !s.expiryRetryAfter[entry.id].After(now) {
+			candidates = append(candidates, value.Clone())
 		}
 	}
-	cutoff := now.Add(-s.limits.ClosedTTL)
-	kept := s.closed[:0]
-	for _, v := range s.closed {
-		if v.ClosedAt != nil && v.ClosedAt.After(cutoff) {
-			kept = append(kept, v)
-		}
+	s.mu.RUnlock()
+	return candidates, totalDue, oldest
+}
+
+func (s *RuntimeStore) expiryCandidateLocked(candidate domain.RuntimeSession, now time.Time) (*domain.RuntimeSession, bool) {
+	current := s.byID[candidate.SessionID]
+	if current == nil || current.Identity != candidate.Identity || current.Revision != candidate.Revision ||
+		!current.LastObservedAt.Equal(candidate.LastObservedAt) || current.ExpiresAt == nil || candidate.ExpiresAt == nil ||
+		!current.ExpiresAt.Equal(*candidate.ExpiresAt) || current.ExpiresAt.After(now) {
+		return nil, false
 	}
-	s.closed = kept
-	tombs := s.tombstones[:0]
-	for _, t := range s.tombstones {
-		if t.At.After(cutoff) {
-			tombs = append(tombs, t)
-		}
+	return current, true
+}
+
+func (s *RuntimeStore) ExpiryCandidateCurrent(candidate domain.RuntimeSession, now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.expiryCandidateLocked(candidate, now)
+	return ok
+}
+
+// CloseVerifiedExpired is only called after a targeted, successful ENOENT
+// response for the candidate identity. The final comparison defeats a
+// concurrent NEW/UPDATE/DESTROY or resync during the kernel round trip.
+func (s *RuntimeStore) CloseVerifiedExpired(candidate domain.RuntimeSession, now time.Time) (domain.RuntimeSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.expiryCandidateLocked(candidate, now)
+	if !ok {
+		return domain.RuntimeSession{}, false
 	}
-	s.tombstones = tombs
-	if len(closedNow) > 0 {
-		s.stats.Closed += uint64(len(closedNow))
-		s.stats.Active = uint64(len(s.byID))
+	return s.closeLocked(candidate.SessionID, current, "verified conntrack expiry", now.UTC()), true
+}
+
+func (s *RuntimeStore) DeferExpired(candidate domain.RuntimeSession, now time.Time, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.expiryCandidateLocked(candidate, now)
+	if !ok {
+		return false
+	}
+	s.expiryRetryAfter[current.SessionID] = now.Add(30 * time.Second)
+	if current.Quality.TrackingStatus != domain.TrackingStale || current.Quality.Reason != reason {
+		current.Quality.TrackingStatus = domain.TrackingStale
+		current.Quality.Reason = reason
+		current.Revision++
 		s.revision++
 	}
-	return closedNow
+	return true
+}
+
+// PruneClosed bounds recent correlation records independently of kernel-flow
+// expiry. It never changes a live session or a kernel guard.
+func (s *RuntimeStore) PruneClosed(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := now.Add(-s.limits.ClosedTTL)
+	kept := s.closed[:0]
+	for _, value := range s.closed {
+		if value.ClosedAt != nil && value.ClosedAt.After(cutoff) {
+			kept = append(kept, value)
+		}
+	}
+	clear(s.closed[len(kept):])
+	s.closed = kept
+	tombs := s.tombstones[:0]
+	for _, value := range s.tombstones {
+		if value.At.After(cutoff) {
+			tombs = append(tombs, value)
+		}
+	}
+	clear(s.tombstones[len(tombs):])
+	s.tombstones = tombs
 }
 
 // ReconcileMissing removes active sessions which were not present in a

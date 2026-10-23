@@ -1,6 +1,6 @@
 # M4 implementation status
 
-Baseline date: 2026-09-28. This ledger tracks implementation separately from Ubuntu appliance acceptance.
+Baseline date: 2026-09-28; last updated 2026-10-23. This ledger tracks implementation separately from Ubuntu appliance acceptance. Historical task checkpoints below record their state at the time and are superseded by the current-status section at the end.
 
 ## Source and worktree
 
@@ -79,14 +79,14 @@ Go `1.27.0 windows/amd64`; Node `22.19.0`; npm `10.9.3`; Windows NT `10.0.26200.
 | Task | Status | Evidence / blocker |
 |---|---|---|
 | T00 | DONE | Baseline recorded; contracts copied without edits. |
-| T01 | PARTIAL / VM_PENDING | Probe script authored and syntax-checked locally; Ubuntu netns/nft/Suricata execution pending. |
+| T01 | DONE / VM_PROBED | REDIRECT failed DNAT interception; TPROXY + FIB route selection, post-DNAT destination and Suricata PCAP queue passed on Ubuntu. See `artifacts/m4-t01-20261022T1135Z/`. |
 | T02 | DONE | M4 domain contracts and deep clones; `go test -count=1 ./internal/domain` PASS. |
 | T03 | DONE | Config schema/defaults/validation and clone isolation; `go test -count=1 ./internal/config ./internal/domain ./internal/management` PASS. |
 | T04 | DONE | Effective gate/exclusion key, exclusion duplicate/shadow checks, first-match deny invariant; `go test -count=1 ./internal/config ./internal/connectivity ./internal/engine ./internal/management` PASS. |
 | T05 | DONE / LOCAL_TESTED | Shared first-match M2/M3 matcher derives immutable M4 plans; dependent Go package tests PASS. No Linux interception claim. |
-| T06 | PARTIAL / LOCAL_TESTED | Mechanism-neutral first-match proxy selector plan + validation implemented. nft REDIRECT/TPROXY render/apply awaits T01 Ubuntu result. |
-| T07 | PARTIAL / LOCAL_TESTED | Resolver boundary and explicit unavailable fallback implemented; Linux getsockopt/TPROXY adapter awaits T01 capability result. |
-| T08 | PARTIAL / LOCAL_TESTED | Bounded dual-listener connection lifecycle, random IDs, ConnContext and graceful shutdown implemented; command migration awaits authoritative engine gate path. |
+| T06 | DONE / LOCAL_TESTED | TPROXY selector is part of the activation bundle; first-match policy, DNAT guard, scoped QUIC block, additional TLS ports, runtime guards and no-listener drop are wired. |
+| T07 | DONE / LOCAL_TESTED | TPROXY resolver and IP_TRANSPARENT listeners are used by the production proxy command; the earlier T01 Ubuntu probe covers preserved post-DNAT destination. |
+| T08 | DONE / LOCAL_TESTED | Production proxy uses engine IPC, bounded connection lifecycle, resource preparation, generation replacement and graceful shutdown; legacy in-memory engine is no longer in the command. |
 | T09 | DONE / LOCAL_TESTED | Bounded versioned Unix IPC transport, worker queue, deadline/correlation/generation checks, fragmented I/O and fuzz-seed tests; engine operation binding belongs to T10/T23. |
 | T10 | DONE / LOCAL_TESTED | User-approved `INSPECT_HTTP` contract; authoritative Runtime gate service and Unix IPC round trip tested locally. Production command activation belongs to T28. |
 | T11 | DONE / LOCAL_TESTED | Bounded incremental ClientHello record peek, exact consumed-byte replay buffer, deadline and fragmentation/malformed/TLS1.3 tests. |
@@ -95,7 +95,7 @@ Go `1.27.0 windows/amd64`; Node `22.19.0`; npm `10.9.3`; Windows NT `10.0.26200.
 | T14 | DONE / LOCAL_TESTED | Verdict-based transport dispatcher implements INSPECT_HTTP callback, exact raw tunnel replay, and downstream TLS termination without silent downgrade. |
 | T15 | DONE / LOCAL_TESTED | Verified upstream TLS dial uses original IP, expected DNS/IP identity, trusted roots and ALPN; mismatch/connect errors are explicit. |
 | T16 | DONE / LOCAL_TESTED | Detached in-memory HTTP normalization plus random RequestID, atomic per-connection ordinal and nullable StreamID; concurrent real HTTP/2 test. |
-| T17 | PARTIAL / LOCAL_TESTED | Bounded max+1 body read, truncated flag, exact replay only after matching ALLOW verdict and header/URL/count validation; HTTP server limits/status mapping await T24/T26. |
+| T17 | DONE / LOCAL_TESTED | Header/URL/count/body limits and HTTP parser/status mappings are wired through T24/T26, including bounded body replay and HTTP/2 stream isolation. |
 | T18 | DONE / LOCAL_TESTED | gzip/zlib-deflate decoder with decoded-byte/ratio caps, cancellation and explicit partial/unsupported/malformed errors; request pipeline binding awaits T23/T24. |
 | T19 | DONE / LOCAL_TESTED | Deterministic bounded Ethernet/IPv4/TCP request PCAP builder, distinct per-job flowID mapping, valid checksums/sequence, secret-header stripping and golden test; Suricata fixture awaits Ubuntu. |
 | T20 | DONE / LOCAL_TESTED | Versioned JSON Unix socket client, required-command handshake, fragmented response parsing, bounded deadline/response, typed PCAP queue methods and stale-reply-safe closure; live Suricata awaits Ubuntu. |
@@ -106,12 +106,12 @@ Go `1.27.0 windows/amd64`; Node `22.19.0`; npm `10.9.3`; Windows NT `10.0.26200.
 | T25 | DONE / LOCAL_TESTED | HTTP/2 request isolation and bounded streams tested locally; Ubuntu traffic acceptance pending. |
 | T26 | DONE / LOCAL_TESTED | Failure/overload statuses, deadlines and counters tested locally. |
 | T27 | DONE / LOCAL_TESTED | Engine-owned bounded request evidence and session context tested locally. |
-| T28 | PARTIAL / VM_CAPABILITY_PENDING | Engine gate IPC attached; production proxy/selector and activation await T01 Ubuntu capability evidence. |
-| T29 | PARTIAL / LOCAL_TESTED | Engine IPC + API health/capabilities/evidence, OpenAPI, hardened units and offline assets/collector added; live readiness, Suricata config validation and acceptance await Ubuntu/T28. |
+| T28 | DONE / LOCAL_TESTED | Schema-2 snapshot binds selector, policy route, public CA fingerprint and detector artifacts. Preflight precedes kernel mutation; commit/rollback/interrupted recovery and observed readiness are wired. Schema-1 snapshots still verify. |
+| T29 | CODE_COMPLETE / VM_ACCEPTANCE_PENDING | IPC/API/health/capabilities, proxy service, engine socket-group drop-in, optional binary installer and evidence collector are implemented. Full deployed traffic acceptance is separate and pending. |
 
 ## Acceptance
 
-M1/M2/M3 acceptance records remain unchanged. M4 VM acceptance: NOT_RUN. The Windows host cannot run the Linux netns/nft/Suricata probe; that is an environment blocker, not a failing code test. Later task checkpoints must record the smallest test command, exit status, contract covered, limitations and next task.
+M1/M2/M3 acceptance records remain unchanged. M4 T01 capability probe has VM evidence; M4 traffic acceptance: NOT_RUN. Later task checkpoints must record the smallest test command, exit status, contract covered, limitations and next task.
 
 ## Contract note
 
@@ -383,3 +383,75 @@ FILES CHANGED: `internal/domain/request_gate.go`, `internal/engine/request_gate_
 CONTRACTS SATISFIED: management reads M4 health/capabilities and bounded evidence only from authoritative engine IPC; request evidence requires authentication. Implemented protocol support is separate from production readiness. With no verified proxy heartbeat, enabled M4 reports `down`, zero ready workers and `production_ready=false`, never a false healthy verdict. The proxy unit has a dedicated account, read-only CA path, no CAP_NET_ADMIN, bounded cgroup limits, and a separate request-worker config preflight. The asset installer does not start the legacy proxy or change nftables. The read-only collector explicitly records `acceptance_status: PENDING`.
 KNOWN LIMITATIONS: no generation-bound live proxy heartbeat is wired; dynamic worker/queue counters remain unavailable until T28 production proxy wiring. Suricata config/rules syntax must be validated by `suricata -T` on Ubuntu. T01/T06/T07/T28 remain required before production activation; all M4 traffic acceptance rows remain NOT_RUN.
 NEXT TASK: obtain T01 Ubuntu probe evidence, then finish T06/T07/T28 and live T29 health/acceptance.
+
+## Current continuation checkpoint — 2026-10-22
+
+T01 is resolved on the real Ubuntu appliance. REDIRECT fails the required
+DNAT-to-DMZ interception. TPROXY with an IPv4 policy route and FIB egress
+match passes HTTP/HTTPS, post-DNAT destination recovery, TLS 1.2/1.3 ALPN,
+proxy restart and private Suricata 7 PCAP queue drain. The T01 evidence is
+under `artifacts/m4-t01-20261022T1135Z/`; ADR 0004 records the decision.
+
+Code completed in this continuation: Unix gate IPC compile fix; local request
+failure identity and oversize fail-policy fix; proxy runtime/generation/health
+tests; Suricata 7 socket greeting, counted command-list and idle `"None"`
+compatibility; TPROXY original-destination resolver; IP_TRANSPARENT listener
+adapter; first-match nft renderer with FIB destination zones, DNAT zone guard
+and no-listener drop; policy-route manager with foreign-rule protection.
+Focused Go tests, race checks, vet and Linux cross-build passed at the noted
+checkpoint. The renderer passed `nft -c` in a disposable VM namespace. The
+policy-route manager passed ensure/verify/idempotent remove and foreign-rule
+rejection in disposable VM namespaces.
+
+**Production activation remains incomplete.** The M4-enabled activation
+interlock rejects commit before kernel mutation, and the engine does not yet
+declare interception ready. T28 must bind the selector and policy route to the
+same checksummed activation snapshot, provide rollback/startup recovery and
+preflight proxy listener/CA/worker readiness. Redirected flows bypass the
+M1/M2/M3 forward hooks, so the activation must also carry their dynamic
+source-block/session-revocation and DNAT-zone protections to the prerouting
+path. The current renderer handles the DNAT-zone case but runtime guard parity
+is still open. Explicit custom gate ports lack an HTTP-versus-TLS listener
+mapping and are rejected by the renderer. M4 live traffic acceptance remains
+NOT_RUN; none of these package or namespace probes substitutes for it.
+
+## Current code completion checkpoint — 2026-10-23
+
+Implementation scope: the remaining T06/T07/T08/T17/T28/T29 code is connected.
+M4 traffic acceptance remains **NOT_RUN**. The SSH connection to the lab VM
+at `192.168.100.1:22` timed out during this continuation; no new appliance
+binary or Running config was deployed.
+
+- The privileged controller compiles a schema-2 activation snapshot binding
+  the proxy plan, fixed IPv4 mark/table/priority, static nft transaction and
+  actual ruleset/config hashes and CA certificate fingerprint. Schema-1
+  M1/M3 persisted snapshots retain their hash format and can be restored.
+- The proxy starts resources under an engine-issued preparation nonce before
+  kernel mutation. No HTTP/TLS forwarding is authorized during preparation.
+  Ready heartbeats must identify that nonce, generation and loaded artifacts.
+- Route ensure precedes selector installation; selector withdrawal precedes
+  route removal. Rollback restores the previous selector/route and artifact
+  identity. Interrupted recovery uses the persisted journal and Running.
+  Finalization verifies kernel state before removing the journal.
+- The production management compiler now retains M4 selections on commit
+  and rollback, and the engine opens gate IPC early enough for startup
+  preflight. Readiness is invalidated on activation and refreshed by a bounded
+  kernel monitor; HTTP authorization does not fork ip/nft for each request.
+- Prerouting guard chains use the existing source-block/revoked-conntrack and
+  App-ID denial sets, retaining dynamic elements. DNAT destination-zone checks
+  precede TPROXY. Local/MGMT traffic remains excluded from proxy selection.
+- M4 ON/OFF replaces only the owned `inet ngfw_proxy` table in the same nft
+  transaction as policy and guard updates; OFF restores an inert chain with no
+  prerouting hook. This avoids retaining an old hook after a table flush.
+- TCP/80 selects plaintext HTTP. Other explicitly selected TCP ports/ranges
+  select TLS as specified by the existing gate contract. Overlap with a local
+  proxy listener is rejected. QUIC blocking is scoped to the first matching
+  DECRYPT gate profile and its UDP service selector.
+- Fresh proxy processes must load the accepted detector and CA identities.
+  The M4 installer supplies the engine's supplementary socket group without
+  adding CAP_CHOWN; the proxy retains only CAP_NET_RAW and drops it in workers.
+
+Validation is recorded in `artifacts/m4-code-completion-20261023/RESULTS.md`.
+Local/fake-adapter checks establish code behavior, not Ubuntu traffic acceptance.
+The remaining task is deploying matching binaries/assets and executing the
+M4 acceptance matrix, including the new complete nft/route transaction on Linux.

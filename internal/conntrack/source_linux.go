@@ -14,36 +14,31 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 	"github.com/mdlayher/netlink"
 	ct "github.com/ti-mo/conntrack"
-	"github.com/ti-mo/netfilter"
+	"golang.org/x/sys/unix"
 )
 
 type LinuxSource struct {
-	mu        sync.Mutex
-	events    *ct.Conn
-	dump      *ct.Conn
-	networkNS string
-	bootID    string
-	closed    bool
+	mu         sync.Mutex
+	events     *netlink.Conn
+	networkNS  string
+	bootID     string
+	closed     bool
+	subscribed bool
 }
 
 func NewLinuxSource(networkNS string) (*LinuxSource, error) {
-	// Keep event and dump sockets separate so a slow bounded dump cannot stop
-	// multicast delivery. The library owns the netlink framing and decoder; no
-	// conntrack command output is parsed here.
-	events, err := ct.Dial(&netlink.Config{Strict: true})
+	// The multicast socket is never used for requests. Each dump/Get gets a
+	// separate socket so an interrupted multipart reply cannot poison the next
+	// request, and a slow dump cannot stop event reception.
+	events, err := netlink.Dial(unix.NETLINK_NETFILTER, &netlink.Config{Strict: true})
 	if err != nil {
 		return nil, fmt.Errorf("dial conntrack event socket: %w", err)
-	}
-	dump, err := ct.Dial(&netlink.Config{Strict: true})
-	if err != nil {
-		_ = events.Close()
-		return nil, fmt.Errorf("dial conntrack dump socket: %w", err)
 	}
 	bootID := "unknown-boot"
 	if value, readErr := os.ReadFile("/proc/sys/kernel/random/boot_id"); readErr == nil && strings.TrimSpace(string(value)) != "" {
 		bootID = strings.TrimSpace(string(value))
 	}
-	return &LinuxSource{events: events, dump: dump, networkNS: networkNS, bootID: bootID}, nil
+	return &LinuxSource{events: events, networkNS: networkNS, bootID: bootID}, nil
 }
 
 func (s *LinuxSource) Subscribe(ctx context.Context, sink EventSink) error {
@@ -55,45 +50,46 @@ func (s *LinuxSource) Subscribe(ctx context.Context, sink EventSink) error {
 		s.mu.Unlock()
 		return ErrSourceClosed
 	}
-	conn := s.events
-	s.mu.Unlock()
-	channel := make(chan ct.Event, 1024)
-	errCh, err := conn.Listen(channel, 1, netfilter.GroupsCT)
-	if err != nil {
-		return fmt.Errorf("listen conntrack events: %w", err)
+	if s.subscribed {
+		s.mu.Unlock()
+		return errors.New("conntrack source already subscribed")
 	}
+	conn := s.events
+	for _, group := range []uint32{1, 2, 3} { // NFNLGRP_CONNTRACK_NEW/UPDATE/DESTROY
+		if err := conn.JoinGroup(group); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("join conntrack event group %d: %w", group, err)
+		}
+	}
+	s.subscribed = true
+	s.mu.Unlock()
 	go func() {
+		buffer := make([]byte, maxConntrackDatagram)
 		for {
-			select {
-			case <-ctx.Done():
+			messages, _, err := readNetlinkDatagram(ctx, conn, buffer)
+			if ctx.Err() != nil {
 				return
-			case ev, ok := <-channel:
-				if !ok {
-					return
-				}
-				if ev.Flow == nil {
+			}
+			if isReadTimeout(err) {
+				continue
+			}
+			if err != nil {
+				sink.ReportLoss(Loss{Reason: err.Error(), Count: 1, At: time.Now().UTC(), Fatal: true})
+				return
+			}
+			for _, msg := range messages {
+				if msg.Header.Type == netlink.Overrun || msg.Header.Type == netlink.Error {
+					sink.ReportLoss(Loss{Reason: "conntrack event stream overrun/error", Count: 1, At: time.Now().UTC()})
 					continue
 				}
-				converted, convertErr := recordFromFlow(*ev.Flow, s.networkNS, s.bootID)
-				if convertErr != nil {
-					sink.ReportLoss(Loss{Reason: convertErr.Error(), Count: 1, At: time.Now().UTC()})
+				record, kind, decodeErr := decodeConntrackMessage(msg, s.networkNS, s.bootID)
+				if decodeErr != nil {
+					sink.ReportLoss(Loss{Reason: decodeErr.Error(), Count: 1, At: time.Now().UTC()})
 					continue
 				}
-				kind := EventUpdate
-				switch ev.Type {
-				case ct.EventNew:
-					kind = EventNew
-				case ct.EventDestroy:
-					kind = EventDestroy
-				}
-				if !sink.TryEnqueue(Event{Kind: kind, Record: converted, Received: time.Now().UTC()}) {
+				if !sink.TryEnqueue(Event{Kind: kind, Record: record, Received: time.Now().UTC()}) {
 					sink.ReportLoss(Loss{Reason: "event sink queue full", Count: 1, At: time.Now().UTC()})
 				}
-			case err := <-errCh:
-				if err != nil {
-					sink.ReportLoss(Loss{Reason: err.Error(), Count: 1, At: time.Now().UTC()})
-				}
-				return
 			}
 		}
 	}()
@@ -113,78 +109,42 @@ func (s *LinuxSource) Dump(ctx context.Context, limits DumpLimits, visit func(Re
 	if limits.Deadline <= 0 {
 		limits.Deadline = 30 * time.Second
 	}
-	if err := ctx.Err(); err != nil {
-		return DumpResult{Complete: false, Reason: err.Error()}, err
-	}
 	deadlineCtx, cancel := context.WithTimeout(ctx, limits.Deadline)
 	defer cancel()
-	// ti-mo/conntrack exposes a typed dump; cap the number of decoded records
-	// before handing them to the engine. The adapter never exposes its backing
-	// slice, and a future raw-netlink transport can replace this implementation
-	// without changing the Source contract.
-	flows, err := s.dump.Dump(nil)
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return DumpResult{Reason: ErrSourceClosed.Error()}, ErrSourceClosed
+	}
+	conn, err := netlink.Dial(unix.NETLINK_NETFILTER, &netlink.Config{Strict: true})
 	if err != nil {
 		return DumpResult{Complete: false, Reason: err.Error()}, err
 	}
-	result := DumpResult{Complete: true}
-	for _, flow := range flows {
-		select {
-		case <-deadlineCtx.Done():
-			result.Complete = false
-			result.Reason = deadlineCtx.Err().Error()
-			return result, ErrDumpIncomplete
-		default:
-		}
-		if result.Records >= limits.MaxRecords {
-			result.Complete = false
-			result.Reason = "record limit"
-			return result, ErrDumpIncomplete
-		}
-		record, convertErr := recordFromFlow(flow, s.networkNS, s.bootID)
-		if convertErr != nil {
-			result.Complete = false
-			result.Reason = convertErr.Error()
-			return result, convertErr
-		}
-		estimated := estimateRecordBytes(record)
-		if result.Bytes+estimated > limits.MaxBytes {
-			result.Complete = false
-			result.Reason = "byte limit"
-			return result, ErrDumpIncomplete
-		}
-		if err := visit(record); err != nil {
-			result.Complete = false
-			result.Reason = err.Error()
-			return result, err
-		}
-		result.Records++
-		result.Bytes += estimated
-	}
-	return result, nil
+	defer conn.Close()
+	return streamConntrackDump(deadlineCtx, conn, limits, s.networkNS, s.bootID, visit)
 }
 
 func (s *LinuxSource) Get(ctx context.Context, id Identity) (Record, error) {
 	if err := ctx.Err(); err != nil {
 		return Record{}, err
 	}
-	// The high-level library requires a complete flow tuple for Get. Use a
-	// bounded dump and exact identity match; this is intentionally slower than
-	// packet forwarding and is only used to verify stale tracking entries.
-	var found *Record
-	_, err := s.Dump(ctx, DumpLimits{MaxRecords: 200000, MaxBytes: 64 << 20, Deadline: time.Second}, func(r Record) error {
-		if sameIdentity(r.Identity, domain.ConntrackIdentity{BootID: id.BootID, NetworkNS: id.NetworkNS, Zone: id.Zone, Family: id.Family, ID: id.ID, KernelStart: id.KernelStart, Original: id.Original}) {
-			copy := r
-			found = &copy
-		}
-		return nil
-	})
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return Record{}, ErrSourceClosed
+	}
+	if (id.BootID != "" && id.BootID != s.bootID) || (id.NetworkNS != "" && id.NetworkNS != s.networkNS) ||
+		!id.Original.Valid() || id.Original.Family != id.Family || id.ID == 0 && id.KernelStart == 0 {
+		return Record{}, ErrAmbiguousIdentity
+	}
+	conn, err := netlink.Dial(unix.NETLINK_NETFILTER, &netlink.Config{Strict: true})
 	if err != nil {
 		return Record{}, err
 	}
-	if found == nil {
-		return Record{}, errors.New("conntrack record not found")
-	}
-	return *found, nil
+	defer conn.Close()
+	return getConntrackFlow(ctx, conn, id, s.networkNS, s.bootID)
 }
 
 func (s *LinuxSource) Close() error {
@@ -194,54 +154,32 @@ func (s *LinuxSource) Close() error {
 		return nil
 	}
 	s.closed = true
-	events, dump := s.events, s.dump
+	events := s.events
 	s.mu.Unlock()
-	var first error
 	if events != nil {
-		if err := events.Close(); err != nil {
-			first = err
-		}
+		return events.Close()
 	}
-	if dump != nil {
-		if err := dump.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
+	return nil
 }
 
-func sameIdentity(a, b domain.ConntrackIdentity) bool {
-	if a.BootID != "" && b.BootID != "" && a.BootID != b.BootID {
-		return false
-	}
-	if a.NetworkNS != "" && b.NetworkNS != "" && a.NetworkNS != b.NetworkNS {
-		return false
-	}
-	if a.ID != 0 && b.ID != 0 && a.ID != b.ID {
-		return false
-	}
-	if a.KernelStart != 0 && b.KernelStart != 0 && a.KernelStart != b.KernelStart {
-		return false
-	}
-	if a.Zone != b.Zone || a.Family != b.Family {
-		return false
-	}
-	return a.Original == b.Original
-}
-
-func recordFromFlow(f ct.Flow, networkNS, bootID string) (Record, error) {
+func recordFromFlow(f ct.Flow, presence Presence, networkNS, bootID string) (Record, error) {
 	o, err := tupleFromCT(f.TupleOrig)
 	if err != nil {
 		return Record{}, err
 	}
 	r, replyErr := tupleFromCT(f.TupleReply)
 	var reply *domain.Tuple
-	presence := Presence{OriginalTuple: true, ID: f.ID != 0, Mark: f.Mark != 0, Zone: f.Zone != 0, Counters: f.CountersOrig.Packets != 0 || f.CountersOrig.Bytes != 0 || f.CountersReply.Packets != 0 || f.CountersReply.Bytes != 0, Timeout: f.Timeout != 0, Timestamp: !f.Timestamp.Start.IsZero(), ProtoInfo: f.ProtoInfo.TCP != nil}
+	if presence.ReplyTuple && replyErr != nil {
+		return Record{}, fmt.Errorf("invalid conntrack reply tuple: %w", replyErr)
+	}
 	if replyErr == nil && r.Valid() {
 		reply = &r
-		presence.ReplyTuple = true
 	}
-	identity := domain.ConntrackIdentity{BootID: bootID, NetworkNS: networkNS, Zone: f.Zone, Family: o.Family, ID: f.ID, Original: o}
+	zone := f.Zone
+	if zone == 0 && f.TupleOrig.Zone != 0 {
+		zone = f.TupleOrig.Zone
+	}
+	identity := domain.ConntrackIdentity{BootID: bootID, NetworkNS: networkNS, Zone: zone, Family: o.Family, ID: f.ID, Original: o}
 	start := f.Timestamp.Start
 	if !start.IsZero() {
 		identity.KernelStart = uint64(start.UnixNano())

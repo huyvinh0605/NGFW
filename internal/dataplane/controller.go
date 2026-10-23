@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kltngfw/ngfw/internal/config"
@@ -37,7 +38,11 @@ type InspectionRuntimeCleaner interface {
 // dataplane changes. Calls are serialized so an API rollback cannot race an
 // in-progress apply.
 type Controller struct {
+	// Configured once by the engine before startup reconciliation.
+	ProxyRouting          ProxyRoutingManager
+	PrepareProxy          func(context.Context, domain.Config, uint64) (domain.RequestGateArtifacts, error)
 	mu                    sync.Mutex
+	m4Runtime             atomic.Pointer[m4RuntimeIdentity]
 	network               NetworkStateReconciler
 	rules                 RulesetApplier
 	forwarding            ForwardingEnsurer
@@ -168,14 +173,14 @@ func (c *Controller) ApplyRuntime(ctx context.Context, desired domain.Config, op
 	if err != nil {
 		return err
 	}
-	if domain.UsesM3(desired) {
+	if domain.UsesM3(desired) || snapshotUsesM4(&snapshot) {
 		return c.ApplySnapshot(ctx, snapshot)
 	}
 	// A fresh M1/M2 appliance keeps the proven M2 compiler/apply path and does
 	// not require an M3-capable nft schema. A downgrade from M3 uses the bundle
 	// once so the old inspection selectors are atomically emptied.
 	c.mu.Lock()
-	needsInspectionCleanup := c.currentUsesM3 || (c.recoveryPending && (c.recoveryUsesM3 || c.currentUsesM3))
+	needsInspectionCleanup := c.currentUsesM3 || snapshotUsesM4(c.currentSnapshot) || snapshotUsesM4(c.recoverySnapshot) || (c.recoveryPending && (c.recoveryUsesM3 || c.currentUsesM3))
 	c.mu.Unlock()
 	if needsInspectionCleanup {
 		return c.ApplySnapshot(ctx, snapshot)
@@ -214,6 +219,7 @@ func (c *Controller) ApplySnapshotPrepared(ctx context.Context, target Activatio
 func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapshot, retainJournal bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.m4Runtime.Store(nil)
 	target = cloneActivationSnapshot(target)
 	desired := target.Config
 	options := target.M2Options.Clone()
@@ -228,6 +234,12 @@ func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapsho
 	desiredBundle, err := CompileActivationSnapshot(target)
 	if err != nil {
 		return err
+	}
+	if err := c.prepareM4(ctx, &target); err != nil {
+		return err
+	}
+	if (snapshotUsesM4(c.currentSnapshot) || snapshotUsesM4(c.recoverySnapshot)) && c.ProxyRouting == nil {
+		return ErrM4ActivationUnavailable
 	}
 	applier, ok := c.rules.(RulesetBundleApplier)
 	if !ok {
@@ -296,8 +308,18 @@ func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapsho
 	if err := c.network.Reconcile(ctx, source, desired); err != nil {
 		return c.restoreM3AfterFailure(applier, source, target, rollback, rollbackKnown, previousSnapshot, oldBundle, fmt.Errorf("reconcile network: %w", err))
 	}
+	if snapshotUsesM4(&target) {
+		if err := c.ProxyRouting.Ensure(ctx); err != nil {
+			return c.restoreM3AfterFailure(applier, source, target, rollback, rollbackKnown, previousSnapshot, oldBundle, fmt.Errorf("apply M4 routing: %w", err))
+		}
+	}
 	if err := applier.ApplyBundle(ctx, desiredBundle); err != nil {
 		return c.restoreM3AfterFailure(applier, source, target, rollback, rollbackKnown, previousSnapshot, oldBundle, fmt.Errorf("apply M3 nftables: %w", err))
+	}
+	if !snapshotUsesM4(&target) && (snapshotUsesM4(&previousSnapshot) || snapshotUsesM4(c.currentSnapshot)) {
+		if err := c.ProxyRouting.Remove(ctx); err != nil {
+			return c.restoreM3AfterFailure(applier, source, target, rollback, rollbackKnown, previousSnapshot, oldBundle, fmt.Errorf("remove M4 routing: %w", err))
+		}
 	}
 	if !desiredUsesM3 {
 		cleaner, ok := c.rules.(InspectionRuntimeCleaner)
@@ -327,6 +349,7 @@ func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapsho
 		if err := os.Remove(c.journalPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove completed activation journal: %w", err)
 		}
+		c.refreshM4ReadinessLocked(ctx)
 	}
 	return nil
 }
@@ -363,7 +386,7 @@ func (c *Controller) ApplyRuntimePrepared(ctx context.Context, desired domain.Co
 		return err
 	}
 	c.mu.Lock()
-	needsM3Bundle := snapshot.UsesM3 || c.currentUsesM3 || c.currentSnapshot != nil && c.currentSnapshot.UsesM3 || c.recoveryPending && (c.recoveryUsesM3 || c.currentUsesM3)
+	needsM3Bundle := snapshot.UsesM3 || snapshotUsesM4(&snapshot) || snapshotUsesM4(c.currentSnapshot) || snapshotUsesM4(c.recoverySnapshot) || c.currentUsesM3 || c.currentSnapshot != nil && c.currentSnapshot.UsesM3 || c.recoveryPending && (c.recoveryUsesM3 || c.currentUsesM3)
 	c.mu.Unlock()
 	if !needsM3Bundle {
 		return c.ApplyRuntime(ctx, desired, options, generation)
@@ -377,6 +400,14 @@ func (c *Controller) VerifyActivation(ctx context.Context, snapshot ActivationSn
 	bundle, err := CompileActivationSnapshot(snapshot)
 	if err != nil {
 		return err
+	}
+	if snapshotUsesM4(&snapshot) {
+		if c.ProxyRouting == nil {
+			return ErrM4ActivationUnavailable
+		}
+		if err := c.ProxyRouting.Verify(ctx); err != nil {
+			return err
+		}
 	}
 	verifier, ok := c.rules.(interface {
 		VerifyBundle(context.Context, RulesetBundle) error
@@ -420,10 +451,16 @@ func (c *Controller) FinalizeActivation(ctx context.Context, expected domain.Con
 	if !exists || applied.Snapshot == nil || applied.Snapshot.ArtifactHash != c.currentSnapshot.ArtifactHash {
 		return errors.New("durable activation snapshot does not match prepared target")
 	}
+	if snapshotUsesM4(c.currentSnapshot) {
+		if err := c.VerifyActivation(ctx, *c.currentSnapshot); err != nil {
+			return fmt.Errorf("verify M4 before finalize: %w", err)
+		}
+	}
 	if err := os.Remove(c.journalPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("finalize activation journal: %w", err)
 	}
 	c.prepared = false
+	c.refreshM4ReadinessLocked(ctx)
 	return nil
 }
 
@@ -445,8 +482,23 @@ func (c *Controller) restoreM3AfterFailure(applier RulesetBundleApplier, source 
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var errs []error
+	if snapshotUsesM4(&previous) {
+		if err := c.prepareM4(rollbackCtx, &previous); err != nil {
+			errs = append(errs, fmt.Errorf("restore M4 proxy: %w", err))
+		}
+		if c.ProxyRouting == nil {
+			errs = append(errs, ErrM4ActivationUnavailable)
+		} else if err := c.ProxyRouting.Ensure(rollbackCtx); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if err := applier.ApplyBundle(rollbackCtx, old); err != nil {
 		errs = append(errs, fmt.Errorf("restore previous M3 nftables snapshot: %w", err))
+	}
+	if !snapshotUsesM4(&previous) && (snapshotUsesM4(&attempted) || snapshotUsesM4(c.currentSnapshot)) && c.ProxyRouting != nil {
+		if err := c.ProxyRouting.Remove(rollbackCtx); err != nil {
+			errs = append(errs, fmt.Errorf("restore M4 routing: %w", err))
+		}
 	}
 	if err := c.network.Reconcile(rollbackCtx, attempted.Config, rollback); err != nil {
 		errs = append(errs, fmt.Errorf("restore previous network snapshot: %w", err))
@@ -485,6 +537,7 @@ func (c *Controller) restoreM3AfterFailure(applier RulesetBundleApplier, source 
 		} else {
 			c.currentSnapshot = nil
 		}
+		c.refreshM4ReadinessLocked(rollbackCtx)
 		return cause
 	}
 	c.current = attempted.Config
@@ -507,8 +560,14 @@ func (c *Controller) restoreM3AfterFailure(applier RulesetBundleApplier, source 
 }
 
 func (c *Controller) apply(ctx context.Context, desired domain.Config, compiler func(domain.Config) (string, error)) error {
+	if domain.UsesM4(desired) {
+		return ErrM4ActivationUnavailable
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if snapshotUsesM4(c.currentSnapshot) || snapshotUsesM4(c.recoverySnapshot) {
+		return ErrM4ActivationUnavailable
+	}
 
 	if validationErrors := (config.Validator{}).Validate(desired); len(validationErrors) > 0 {
 		return fmt.Errorf("invalid dataplane configuration: %s", strings.Join(validationErrors, "; "))

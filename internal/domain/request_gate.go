@@ -52,12 +52,14 @@ func (c RequestCoverage) Valid() bool {
 }
 
 type ProxyConnectionOpen struct {
-	ConnectionID string `json:"connection_id"`
-	SourceIP     string `json:"source_ip"`
-	SourcePort   int    `json:"source_port"`
-	OriginalIP   string `json:"original_ip"`
-	OriginalPort int    `json:"original_port"`
-	Protocol     string `json:"protocol"`
+	EngineInstanceID string `json:"engine_instance_id,omitempty"`
+	ConfigGeneration uint64 `json:"config_generation,omitempty"`
+	ConnectionID     string `json:"connection_id"`
+	SourceIP         string `json:"source_ip"`
+	SourcePort       int    `json:"source_port"`
+	OriginalIP       string `json:"original_ip"`
+	OriginalPort     int    `json:"original_port"`
+	Protocol         string `json:"protocol"`
 	// TLSFailureCode is set only when a bounded ClientHello peek failed. The
 	// engine, not the proxy, chooses BYPASS or BLOCK from the active profile.
 	TLSFailureCode string `json:"tls_failure_code,omitempty"`
@@ -134,8 +136,10 @@ type RequestInspectionResult struct {
 // ProxyRequestEvaluation is the bounded evaluate_request IPC payload. Raw
 // request headers, query and body never cross this boundary.
 type ProxyRequestEvaluation struct {
-	Context    RequestContext          `json:"context"`
-	Inspection RequestInspectionResult `json:"inspection"`
+	EngineInstanceID string                  `json:"engine_instance_id,omitempty"`
+	ConfigGeneration uint64                  `json:"config_generation,omitempty"`
+	Context          RequestContext          `json:"context"`
+	Inspection       RequestInspectionResult `json:"inspection"`
 }
 
 func (r RequestInspectionResult) Clone() RequestInspectionResult {
@@ -185,6 +189,7 @@ type RequestGateEvidencePage struct {
 }
 
 type RequestGateHealth struct {
+	FailureCode        string            `json:"failure_code,omitempty"`
 	Enabled            bool              `json:"enabled"`
 	Status             string            `json:"status"`
 	Generation         uint64            `json:"generation"`

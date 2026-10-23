@@ -280,6 +280,9 @@ func (service *GateService) EvaluateRequest(ctx context.Context, input domain.Pr
 	if err := ctx.Err(); err != nil {
 		return domain.RequestDecision{}, err
 	}
+	if err := service.checkProxyRuntime(input.EngineInstanceID, input.ConfigGeneration); err != nil {
+		return domain.RequestDecision{}, err
+	}
 	request := input.Context
 	if !validGateRequest(request, input.Inspection) {
 		return domain.RequestDecision{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
@@ -326,7 +329,7 @@ func (service *GateService) EvaluateRequest(ctx context.Context, input domain.Pr
 		if plan.FailMode == domain.GateFailOpen && plan.EncodingAction == "ALLOW_PARTIAL" {
 			decision.Verdict, decision.HTTPStatus = domain.RequestAllow, 0
 		}
-	} else if input.Inspection.Completed && (input.Inspection.Coverage == domain.CoverageComplete || input.Inspection.Coverage == domain.RequestCoveragePartial) && input.Inspection.ErrorCode == "" && hasBlockingGateAlert(input.Inspection.Alerts) {
+	} else if input.Inspection.Completed && (input.Inspection.Coverage == domain.CoverageComplete || input.Inspection.Coverage == domain.RequestCoveragePartial) && input.Inspection.ErrorCode == "" && hasBlockingGateAlert(input.Inspection.Alerts, input.Inspection.RulesetID) {
 		decision.Coverage = input.Inspection.Coverage
 		decision.HTTPStatus, decision.ReasonCode = 403, "GATE_SIGNATURE_BLOCK"
 	} else if request.Truncated {
@@ -335,6 +338,11 @@ func (service *GateService) EvaluateRequest(ctx context.Context, input domain.Pr
 		if plan.FailMode == domain.GateFailOpen && plan.OversizeAction == "ALLOW_PARTIAL" {
 			decision.Verdict, decision.HTTPStatus = domain.RequestAllow, 0
 		}
+	} else if input.Inspection.RulesetID != plan.RulesetID {
+		decision.Coverage = domain.RequestCoverageUnavailable
+		decision.ReasonCode = "GATE_SENSOR_UNAVAILABLE"
+		failed := applyGateFailure(decision, plan.FailMode)
+		decision.Verdict, decision.HTTPStatus = failed.Verdict, failed.HTTPStatus
 	} else {
 		decision = decideInspectedRequest(decision, input.Inspection, plan.FailMode)
 	}
@@ -348,8 +356,17 @@ func (service *GateService) EvaluateRequest(ctx context.Context, input domain.Pr
 	return decision, nil
 }
 
-func hasBlockingGateAlert(alerts []domain.RequestAlert) bool {
+func hasBlockingGateAlert(alerts []domain.RequestAlert, rulesetID string) bool {
 	for _, alert := range alerts {
+		// PCAP workers run in passive mode: their alert.action may be
+		// "allowed" even for our blocking signatures. Enforcement intent
+		// belongs to the engine's request ruleset, not a packet drop flag.
+		if rulesetID == "m4-builtin-v1" && strings.EqualFold(alert.Detector, "suricata") {
+			switch alert.SignatureID {
+			case "9904001", "9904002", "9904003", "9904004":
+				return true
+			}
+		}
 		switch strings.ToLower(strings.TrimSpace(alert.Action)) {
 		case "blocked", "drop", "reject", "deny":
 			return true
@@ -385,6 +402,10 @@ func validGateRequest(request domain.RequestContext, inspection domain.RequestIn
 func decideInspectedRequest(base domain.RequestDecision, inspection domain.RequestInspectionResult, failMode domain.GateFailMode) domain.RequestDecision {
 	base.Coverage = inspection.Coverage
 	if inspection.Completed && inspection.Coverage == domain.CoverageComplete && inspection.ErrorCode == "" {
+		if hasBlockingGateAlert(inspection.Alerts, inspection.RulesetID) {
+			base.Verdict, base.HTTPStatus, base.ReasonCode = domain.RequestBlock, 403, "GATE_SIGNATURE_BLOCK"
+			return base
+		}
 		for _, alert := range inspection.Alerts {
 			switch strings.ToLower(strings.TrimSpace(alert.Action)) {
 			case "blocked", "drop", "reject", "deny":

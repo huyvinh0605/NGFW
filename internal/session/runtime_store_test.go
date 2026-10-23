@@ -47,7 +47,7 @@ func TestRuntimeStoreCombinedNATAlias(t *testing.T) {
 	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 4})
 	original := domain.Tuple{Family: domain.FamilyIPv4, SrcIP: netip.MustParseAddr("192.168.10.10"), SrcPort: 50000, DstIP: netip.MustParseAddr("192.0.2.2"), DstPort: 8443, Protocol: 6}
 	reply := domain.Tuple{Family: domain.FamilyIPv4, SrcIP: netip.MustParseAddr("10.20.0.10"), SrcPort: 443, DstIP: netip.MustParseAddr("198.51.100.20"), DstPort: 61000, Protocol: 6}
-	record := conntrack.Record{Identity: domain.ConntrackIdentity{BootID: "boot", NetworkNS: "init", Zone: 1, Family: domain.FamilyIPv4, ID: 12, KernelStart: 12, Original: original}, OriginalTuple: original, ReplyTuple: &reply, KernelStart: time.Unix(12, 0).UTC()}
+	record := conntrack.Record{Identity: domain.ConntrackIdentity{BootID: "boot", NetworkNS: "init", Zone: 1, Family: domain.FamilyIPv4, ID: 12, KernelStart: 12, Original: original}, OriginalTuple: original, ReplyTuple: &reply, KernelStart: time.Unix(12, 0).UTC(), Presence: conntrack.Presence{OriginalTuple: true, ReplyTuple: true, ID: true, Timestamp: true}}
 	v, _, err := s.Apply(record, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -172,15 +172,22 @@ func TestRuntimeStoreDestroyIdentityCollisionDoesNotCloseLiveSession(t *testing.
 	}
 }
 
-func TestRuntimeStoreCleanupRemovesExpiredIndexes(t *testing.T) {
+func TestRuntimeStoreVerifiedExpiryRemovesIndexes(t *testing.T) {
 	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 2, ClosedTTL: time.Second})
 	createdAt := time.Unix(100, 0).UTC()
 	v, _, err := s.Apply(testRecord(), createdAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed := s.Cleanup(createdAt.Add(2*time.Minute), 10); removed != 1 {
-		t.Fatalf("removed=%d", removed)
+	candidates, count, _ := s.ExpiredCandidates(createdAt.Add(2*time.Minute), 10)
+	if count != 1 || len(candidates) != 1 {
+		t.Fatalf("expiry candidates=%d count=%d", len(candidates), count)
+	}
+	if _, ok := s.Get(v.SessionID); !ok {
+		t.Fatal("expiry estimate closed a live session without kernel verification")
+	}
+	if _, closed := s.CloseVerifiedExpired(candidates[0], createdAt.Add(2*time.Minute)); !closed {
+		t.Fatal("verified expiry failed to close candidate")
 	}
 	if _, ok := s.Get(v.SessionID); ok {
 		t.Fatal("expired session remained active")
@@ -188,6 +195,147 @@ func TestRuntimeStoreCleanupRemovesExpiredIndexes(t *testing.T) {
 	alias := flow.Key{Scope: flow.Scope{NetworkNamespace: "init", ConntrackZone: 2}, Tuple: *v.TranslatedTuple}
 	if _, err := s.Resolve(alias); err != ErrSessionMissing {
 		t.Fatalf("stale alias resolved: %v", err)
+	}
+}
+
+func TestRuntimeStoreObservationDoesNotInventPacketActivityOrEraseMark(t *testing.T) {
+	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 2})
+	now := time.Unix(1000, 0).UTC()
+	record := testRecord()
+	record.Mark = 0x12345000
+	record.Presence.Mark = true
+	first, created, changed, err := s.ApplyObserved(record, now)
+	if err != nil || !created || !changed {
+		t.Fatalf("first observation: created=%v changed=%v err=%v", created, changed, err)
+	}
+	partial := record
+	partial.Mark = 0
+	partial.Presence.Mark = false
+	again, created, changed, err := s.ApplyObserved(partial, now.Add(time.Second))
+	if err != nil || created || changed {
+		t.Fatalf("unchanged observation: created=%v changed=%v err=%v", created, changed, err)
+	}
+	if again.KernelMark != record.Mark || !again.LastSeen.Equal(first.LastSeen) || again.Revision != first.Revision {
+		t.Fatalf("partial update changed mark/activity/revision: %+v", again)
+	}
+	if !again.LastObservedAt.Equal(now.Add(time.Second)) {
+		t.Fatalf("last observed was not refreshed: %v", again.LastObservedAt)
+	}
+	partial.Presence.Mark = true // Explicit zero is different from absent.
+	zero, _, changed, err := s.ApplyObserved(partial, now.Add(2*time.Second))
+	if err != nil || !changed || zero.KernelMark != 0 || zero.KernelEpoch != 0 {
+		t.Fatalf("explicit zero mark not merged: %+v changed=%v err=%v", zero, changed, err)
+	}
+	partial.PacketsOriginal++
+	active, _, changed, err := s.ApplyObserved(partial, now.Add(3*time.Second))
+	if err != nil || !changed || !active.LastSeen.Equal(now.Add(3*time.Second)) {
+		t.Fatalf("counter growth not counted as activity: %+v changed=%v err=%v", active, changed, err)
+	}
+}
+
+func TestRuntimeStoreMergesCounterDirectionsIndependently(t *testing.T) {
+	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 2})
+	now := time.Unix(1500, 0).UTC()
+	record := testRecord()
+	record.Presence.Counters = false
+	record.Presence.CountersOriginal = true
+	record.Presence.Timestamp = true
+	record.Presence.Mark = true
+	created, _, err := s.Apply(record, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.BytesOriginal != record.BytesOriginal || created.BytesReply != 0 ||
+		!hasMissing(created.Quality.MissingFields, "counters_reply") ||
+		!hasMissing(created.Quality.MissingFields, "counters") {
+		t.Fatalf("partial original counters: %+v", created)
+	}
+	reply := record
+	reply.Presence.CountersOriginal = false
+	reply.Presence.CountersReply = true
+	reply.BytesOriginal = 0 // absent direction must not erase prior observation
+	merged, _, changed, err := s.ApplyObserved(reply, now.Add(time.Second))
+	if err != nil || !changed {
+		t.Fatalf("reply observation: changed=%v err=%v", changed, err)
+	}
+	if merged.BytesOriginal != record.BytesOriginal || merged.BytesReply != record.BytesReply ||
+		hasMissing(merged.Quality.MissingFields, "counters") || merged.Quality.TrackingStatus != domain.TrackingComplete {
+		t.Fatalf("directional counters did not complete tracking: %+v", merged)
+	}
+}
+
+func TestRuntimeStoreExpiryVerificationIsConditionalAndBacksOff(t *testing.T) {
+	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 2})
+	now := time.Unix(2000, 0).UTC()
+	record := testRecord()
+	value, _, err := s.Apply(record, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := now.Add(2 * time.Minute)
+	candidates, _, _ := s.ExpiredCandidates(due, 10)
+	if len(candidates) != 1 {
+		t.Fatalf("expiry candidates=%d", len(candidates))
+	}
+	if !s.DeferExpired(candidates[0], due, "get unavailable") {
+		t.Fatal("failed to defer candidate")
+	}
+	if retry, _, _ := s.ExpiredCandidates(due.Add(time.Second), 10); len(retry) != 0 {
+		t.Fatal("unavailable Get was retried without backoff")
+	}
+	if _, ok := s.Get(value.SessionID); !ok {
+		t.Fatal("unavailable Get closed active session")
+	}
+	record.Timeout = 3 * time.Minute
+	if _, _, err := s.Apply(record, due.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, closed := s.CloseVerifiedExpired(candidates[0], due.Add(3*time.Second)); closed {
+		t.Fatal("old verification closed a refreshed session")
+	}
+	if _, ok := s.Get(value.SessionID); !ok {
+		t.Fatal("refreshed session was removed")
+	}
+}
+
+func TestRuntimeStorePresentZeroTimeoutIsDueForVerification(t *testing.T) {
+	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 2})
+	now := time.Unix(2500, 0).UTC()
+	record := testRecord()
+	record.Timeout = 0
+	record.Presence.Timeout = true
+	value, _, err := s.Apply(record, now)
+	if err != nil || value.ExpiresAt == nil || !value.ExpiresAt.Equal(now) {
+		t.Fatalf("explicit zero timeout was treated as absent: %+v err=%v", value, err)
+	}
+	candidates, _, _ := s.ExpiredCandidates(now, 1)
+	if len(candidates) != 1 {
+		t.Fatal("zero-timeout flow was not selected for verification")
+	}
+}
+
+func TestRuntimeStoreSameTupleNewIncarnationDoesNotMerge(t *testing.T) {
+	s := NewRuntimeStore(RuntimeLimits{MaxSessions: 4})
+	now := time.Unix(3000, 0).UTC()
+	old := testRecord()
+	first, _, err := s.Apply(old, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused := old
+	reused.Identity.ID++
+	reused.Identity.KernelStart++
+	reused.KernelStart = reused.KernelStart.Add(time.Second)
+	second, created, err := s.Apply(reused, now.Add(time.Second))
+	if err != nil || !created || first.SessionID == second.SessionID {
+		t.Fatalf("new incarnation merged with old: first=%s second=%s created=%v err=%v", first.SessionID, second.SessionID, created, err)
+	}
+	removed := s.ReconcileMissing([]domain.ConntrackIdentity{reused.Identity}, now, now.Add(2*time.Second), "verified absent")
+	if len(removed) != 1 || removed[0].SessionID != first.SessionID {
+		t.Fatalf("incorrect resync removal: %+v", removed)
+	}
+	if _, ok := s.Get(second.SessionID); !ok {
+		t.Fatal("new incarnation was closed by old cleanup")
 	}
 }
 

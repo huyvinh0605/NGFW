@@ -30,12 +30,30 @@ func (s *RuntimeServiceAdapter) RequestGateHealth(ctx context.Context) (domain.R
 		}, UpdatedAt: time.Now().UTC(),
 	}
 	running := s.Config.Running()
-	if !domain.UsesM4(running) {
-		return health, nil
+	health.Enabled = domain.UsesM4(running)
+	if health.Enabled {
+		health.Status = "down"
+		health.WorkersTotal = running.RequestGate.WithDefaults().WorkerCount
 	}
-	health.Enabled = true
-	health.Status = "down"
-	health.WorkersTotal = running.RequestGate.WithDefaults().WorkerCount
+	beat, observed, fresh := s.Gate.observedHealth(running, health.Generation)
+	if fresh {
+		health.ProxyReachable = true
+		health.UpdatedAt = observed
+		health.FailureCode = beat.FailureCode
+		for key, count := range beat.Counters {
+			health.Counters[key] = count
+		}
+		if health.Enabled && s.Gate.interceptionReady(health.Generation) {
+			health.HTTPListenerReady, health.HTTPSListenerReady = beat.HTTPListenerReady, beat.HTTPSListenerReady
+			health.CALoaded = beat.CALoaded
+			health.WorkersReady, health.QueueDepth = beat.WorkersReady, beat.QueueDepth
+			health.ActiveConnections, health.ActiveRequests = beat.ActiveConnections, beat.ActiveRequests
+			health.Status = "degraded"
+			if beat.HTTPListenerReady && beat.HTTPSListenerReady && beat.WorkersReady == health.WorkersTotal && (!gateRequiresCA(running) || beat.CALoaded) && beat.FailureCode == "" {
+				health.Status = "healthy"
+			}
+		}
+	}
 	return health, nil
 }
 
@@ -43,8 +61,9 @@ func (s *RuntimeServiceAdapter) RequestGateCapabilities(ctx context.Context) (do
 	if err := ctx.Err(); err != nil {
 		return domain.RequestGateCapabilities{}, err
 	}
+	health, _ := s.RequestGateHealth(ctx)
 	return domain.RequestGateCapabilities{
-		Supported: true, ProductionReady: false,
+		Supported: true, ProductionReady: health.Status == "healthy",
 		HTTPVersions: []string{"HTTP/1.1", "HTTP/2"},
 		ConnectionActions: []domain.TLSGateAction{
 			domain.TLSGateBypass, domain.TLSGateMetadataOnly,
@@ -55,9 +74,10 @@ func (s *RuntimeServiceAdapter) RequestGateCapabilities(ctx context.Context) (do
 		RuntimeIPCVersion: domain.RuntimeIPCProtocolVersion,
 		BuildVersion:      runtimeBuildVersion(),
 		Limitations: []string{
-			"Linux transparent interception and post-DNAT original destination require Ubuntu capability evidence",
-			"production proxy activation and live worker readiness are not verified",
+			"Transparent interception supports IPv4 TCP; TCP/80 is plaintext HTTP and other explicit TCP gate ports are TLS",
+			"Readiness requires verified kernel activation and fresh generation-bound proxy observations",
 			"HTTP/3 and ECH decryption are unsupported",
+			"Upstream mTLS impersonation and response-body scanning are unsupported",
 		},
 	}, nil
 }

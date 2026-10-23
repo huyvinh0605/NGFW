@@ -28,14 +28,21 @@ type SessionPage struct {
 }
 
 type RuntimeStats struct {
-	ActiveSessions uint64 `json:"active_sessions"`
-	Created        uint64 `json:"created"`
-	Closed         uint64 `json:"closed"`
-	Invalidated    uint64 `json:"invalidated"`
-	TrackingDrops  uint64 `json:"tracking_drops"`
-	CapacityDrops  uint64 `json:"capacity_drops"`
-	EventDrops     uint64 `json:"event_drops"`
-	Resyncs        uint64 `json:"resyncs"`
+	ActiveSessions      uint64 `json:"active_sessions"`
+	Created             uint64 `json:"created"`
+	Closed              uint64 `json:"closed"`
+	Invalidated         uint64 `json:"invalidated"`
+	TrackingDrops       uint64 `json:"tracking_drops"`
+	CapacityDrops       uint64 `json:"capacity_drops"`
+	EventDrops          uint64 `json:"event_drops"`
+	Resyncs             uint64 `json:"resyncs"`
+	DumpIncomplete      uint64 `json:"dump_incomplete"`
+	LastDumpBytes       uint64 `json:"last_dump_bytes"`
+	LastDumpMillis      uint64 `json:"last_dump_millis"`
+	GetChecks           uint64 `json:"get_checks"`
+	GetUnavailable      uint64 `json:"get_unavailable"`
+	ExpiryBacklog       uint64 `json:"expiry_backlog"`
+	ExpiryOldestSeconds uint64 `json:"expiry_oldest_seconds"`
 }
 
 type RuntimeHealth struct {

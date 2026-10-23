@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Installs M4 configuration and hardened units only. It intentionally does
-# not install/start the legacy proxy binary or change the nftables ruleset.
+# Installs M4 configuration, hardened units and optionally a built proxy.
+# Kernel interception is owned exclusively by engine config activation.
 [[ $EUID -eq 0 ]] || { echo 'run as root' >&2; exit 2; }
-for command in install getent groupadd useradd usermod id cmp suricata runuser systemctl; do
+proxy_binary=''
+if [[ ${1:-} == --proxy-binary && $# -eq 2 ]]; then
+  proxy_binary=$2
+  [[ -f $proxy_binary && -x $proxy_binary ]] || { echo 'proxy binary must be an executable regular file' >&2; exit 2; }
+elif [[ $# -ne 0 ]]; then
+  echo 'usage: install-m4-assets.sh [--proxy-binary /absolute/path/ngfw-proxy]' >&2
+  exit 2
+fi
+for command in install getent groupadd useradd usermod id cmp suricata setpriv runuser systemctl; do
   command -v "$command" >/dev/null 2>&1 || { echo "missing prerequisite: $command" >&2; exit 2; }
 done
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -35,6 +43,12 @@ if [[ ! -e /etc/ngfw/proxy.env ]]; then
 fi
 copy_once "$repo/deploy/ngfw-proxy.service" /etc/systemd/system/ngfw-proxy.service 0644 root root
 copy_once "$repo/deploy/ngfw-request-worker-preflight.service" /etc/systemd/system/ngfw-request-worker-preflight.service 0644 root root
+install -d -o root -g root -m 0755 /etc/systemd/system/ngfw-engine.service.d
+copy_once "$repo/deploy/ngfw-engine-m4.conf" /etc/systemd/system/ngfw-engine.service.d/40-m4.conf 0644 root root
+if [[ -n $proxy_binary ]]; then
+  install -d -o root -g root -m 0755 /usr/local/lib/ngfw
+  install -o root -g root -m 0755 -- "$proxy_binary" /usr/local/lib/ngfw/ngfw-proxy
+fi
 
 if [[ -e /var/lib/ngfw/ca/ca.key ]] && runuser -u ngfw -- test -r /var/lib/ngfw/ca/ca.key; then
   echo 'CA private key is readable by the API account; migrate ownership/mode before enabling M4' >&2
@@ -46,4 +60,4 @@ if [[ -e /var/lib/ngfw/ca/ca.key ]] && ! runuser -u ngfw-proxy -- test -r /var/l
 fi
 runuser -u ngfw-proxy -- suricata -T -c /etc/ngfw/request-gate/suricata.yaml -l /var/lib/ngfw/request-workers
 systemctl daemon-reload
-echo 'M4 assets installed and Suricata syntax checked. Proxy remains disabled pending T01/T06/T07/T28.'
+echo 'M4 assets installed and Suricata syntax checked. Provision CA if needed, restart engine for socket-group membership, then enable/start ngfw-proxy before committing M4.'

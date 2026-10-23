@@ -16,33 +16,43 @@ import (
 )
 
 type Runtime struct {
-	Store          *session.RuntimeStore
-	Source         conntrack.Source
-	Events         *RuntimeEventRing
-	mu             sync.RWMutex
-	program        connectivity.Program
-	generation     uint64
-	started        bool
-	degraded       bool
-	lastError      string
-	blocks         map[string]domain.TemporaryBlock
-	revoked        map[string]domain.RuntimeSession
-	maxRevoked     int
-	queue          chan conntrack.Event
-	dumpMu         sync.Mutex
-	applyMu        sync.Mutex
-	resyncing      bool
-	runCtx         context.Context
-	queueDrops     atomic.Uint64
-	trackingDrops  atomic.Uint64
-	created        atomic.Uint64
-	updated        atomic.Uint64
-	closed         atomic.Uint64
-	resyncs        atomic.Uint64
-	cancel         context.CancelFunc
-	guards         GuardEnforcer
-	resyncInterval time.Duration
-	inspection     *InspectionRuntime
+	Store             *session.RuntimeStore
+	Source            conntrack.Source
+	Events            *RuntimeEventRing
+	mu                sync.RWMutex
+	program           connectivity.Program
+	generation        uint64
+	started           bool
+	degraded          bool
+	eventSourceFailed bool
+	lastError         string
+	blocks            map[string]domain.TemporaryBlock
+	revoked           map[string]domain.RuntimeSession
+	maxRevoked        int
+	queue             chan conntrack.Event
+	dumpMu            sync.Mutex
+	applyMu           sync.Mutex
+	guardMu           sync.Mutex
+	resyncing         bool
+	runCtx            context.Context
+	queueDrops        atomic.Uint64
+	lossVersion       atomic.Uint64
+	trackingDrops     atomic.Uint64
+	created           atomic.Uint64
+	updated           atomic.Uint64
+	closed            atomic.Uint64
+	resyncs           atomic.Uint64
+	dumpIncomplete    atomic.Uint64
+	lastDumpBytes     atomic.Uint64
+	lastDumpMillis    atomic.Uint64
+	getChecks         atomic.Uint64
+	getUnavailable    atomic.Uint64
+	expiryBacklog     atomic.Uint64
+	expiryOldest      atomic.Uint64
+	cancel            context.CancelFunc
+	guards            GuardEnforcer
+	resyncInterval    time.Duration
+	inspection        *InspectionRuntime
 }
 
 const defaultRuntimeResyncInterval = 30 * time.Second
@@ -75,13 +85,18 @@ func (s runtimeSink) TryEnqueue(ev conntrack.Event) bool {
 		return true
 	default:
 		s.r.queueDrops.Add(1)
+		s.r.lossVersion.Add(1)
 		return false
 	}
 }
 func (s runtimeSink) ReportLoss(loss conntrack.Loss) {
+	s.r.lossVersion.Add(1)
 	s.r.mu.Lock()
 	s.r.degraded = true
 	s.r.lastError = loss.Reason
+	if loss.Fatal {
+		s.r.eventSourceFailed = true
+	}
 	shouldResync := s.r.started && !s.r.resyncing && s.r.Source != nil
 	if shouldResync {
 		s.r.resyncing = true
@@ -105,6 +120,8 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return nil
 	}
 	r.started = true
+	r.eventSourceFailed = false
+	r.resyncing = true // initial snapshot is itself a resync cutover
 	runCtx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
 	r.runCtx = runCtx
@@ -113,6 +130,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.setDegraded(err)
 		r.mu.Lock()
 		r.started = false
+		r.resyncing = false
 		r.runCtx = nil
 		r.cancel = nil
 		r.mu.Unlock()
@@ -123,6 +141,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	dumpStarted := time.Now().UTC()
 	seen := make([]domain.ConntrackIdentity, 0)
 	r.resyncs.Add(1)
+	lossBefore := r.lossVersion.Load()
 	// Serialize snapshot merge with queued event application. The bounded
 	// source queue can report loss while this lock is held, but a complete dump
 	// remains the cutover view and the queue is replayed immediately afterward.
@@ -135,8 +154,13 @@ func (r *Runtime) Start(ctx context.Context) error {
 	})
 	r.dumpMu.Unlock()
 	r.applyMu.Unlock()
+	r.recordDump(dumpResult, dumpStarted)
 	if dumpErr == nil && !dumpResult.Complete {
 		dumpErr = conntrack.ErrDumpIncomplete
+	}
+	if dumpErr == nil && lossBefore != r.lossVersion.Load() {
+		dumpErr = conntrack.ErrDumpIncomplete
+		r.dumpIncomplete.Add(1)
 	}
 	if dumpErr != nil {
 		r.setDegraded(dumpErr)
@@ -146,11 +170,19 @@ func (r *Runtime) Start(ctx context.Context) error {
 		// a loss report will schedule another bounded resync.
 		go r.consume(runCtx)
 		go r.periodicResync(runCtx)
+		go r.verifyExpiryLoop(runCtx)
+		r.mu.Lock()
+		r.resyncing = false
+		r.mu.Unlock()
 		return nil
 	}
 	r.reconcileMissing(seen, dumpStarted, time.Now().UTC(), "conntrack resync no longer contains flow")
 	go r.consume(runCtx)
 	go r.periodicResync(runCtx)
+	go r.verifyExpiryLoop(runCtx)
+	r.mu.Lock()
+	r.resyncing = false
+	r.mu.Unlock()
 	return nil
 }
 
@@ -197,6 +229,7 @@ func (r *Runtime) resync(source conntrack.Source, parent context.Context) {
 	dumpStarted := time.Now().UTC()
 	seen := make([]domain.ConntrackIdentity, 0)
 	r.resyncs.Add(1)
+	lossBefore := r.lossVersion.Load()
 	r.applyMu.Lock()
 	r.dumpMu.Lock()
 	result, err := source.Dump(ctx, r.dumpLimits(), func(record conntrack.Record) error {
@@ -205,8 +238,13 @@ func (r *Runtime) resync(source conntrack.Source, parent context.Context) {
 		return nil
 	})
 	r.dumpMu.Unlock()
+	r.recordDump(result, dumpStarted)
 	if err == nil && !result.Complete {
 		err = conntrack.ErrDumpIncomplete
+	}
+	if err == nil && lossBefore != r.lossVersion.Load() {
+		err = conntrack.ErrDumpIncomplete
+		r.dumpIncomplete.Add(1)
 	}
 	if err != nil {
 		r.applyMu.Unlock()
@@ -216,9 +254,109 @@ func (r *Runtime) resync(source conntrack.Source, parent context.Context) {
 	r.reconcileMissing(seen, dumpStarted, time.Now().UTC(), "conntrack resync no longer contains flow")
 	r.applyMu.Unlock()
 	r.mu.Lock()
-	r.degraded = false
-	r.lastError = ""
+	if !r.eventSourceFailed {
+		r.degraded = false
+		r.lastError = ""
+	}
 	r.mu.Unlock()
+}
+
+func (r *Runtime) recordDump(result conntrack.DumpResult, started time.Time) {
+	r.lastDumpBytes.Store(uint64(result.Bytes))
+	r.lastDumpMillis.Store(uint64(time.Since(started) / time.Millisecond))
+	if !result.Complete {
+		r.dumpIncomplete.Add(1)
+	}
+}
+
+// verifyExpiryLoop probes only a bounded number of due flows at a bounded
+// rate. Conntrack calls run outside the store and apply locks. An estimated
+// timeout is never itself a reason to close a live session.
+func (r *Runtime) verifyExpiryLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			r.Store.PruneClosed(now)
+			candidates, backlog, oldest := r.Store.ExpiredCandidates(now, 32)
+			r.expiryBacklog.Store(uint64(backlog))
+			r.expiryOldest.Store(uint64(oldest / time.Second))
+			if len(candidates) == 0 {
+				continue
+			}
+			work := make(chan domain.RuntimeSession, len(candidates))
+			for _, candidate := range candidates {
+				work <- candidate
+			}
+			close(work)
+			var workers sync.WaitGroup
+			for i := 0; i < 4; i++ {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					for candidate := range work {
+						if ctx.Err() != nil {
+							return
+						}
+						r.verifyExpiredCandidate(ctx, candidate)
+					}
+				}()
+			}
+			workers.Wait()
+		}
+	}
+}
+
+func (r *Runtime) verifyExpiredCandidate(parent context.Context, candidate domain.RuntimeSession) {
+	if r.Source == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 1500*time.Millisecond)
+	defer cancel()
+	r.getChecks.Add(1)
+	record, err := r.Source.Get(ctx, conntrack.Identity{
+		BootID: candidate.Identity.BootID, NetworkNS: candidate.Identity.NetworkNS,
+		Zone: candidate.Identity.Zone, Family: candidate.Identity.Family,
+		ID: candidate.Identity.ID, KernelStart: candidate.Identity.KernelStart,
+		Original: candidate.Identity.Original,
+	})
+	if parent.Err() != nil {
+		return
+	}
+	if err == nil && (record.Identity.Zone != candidate.Identity.Zone ||
+		record.Identity.Family != candidate.Identity.Family ||
+		record.Identity.Original != candidate.Identity.Original ||
+		candidate.Identity.ID != 0 && record.Identity.ID != candidate.Identity.ID ||
+		candidate.Identity.KernelStart != 0 && record.Identity.KernelStart != candidate.Identity.KernelStart ||
+		candidate.Identity.BootID != "" && record.Identity.BootID != candidate.Identity.BootID ||
+		candidate.Identity.NetworkNS != "" && record.Identity.NetworkNS != candidate.Identity.NetworkNS) {
+		err = conntrack.ErrAmbiguousIdentity
+	}
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+	now := time.Now().UTC()
+	if !r.Store.ExpiryCandidateCurrent(candidate, now) {
+		return
+	}
+	switch {
+	case err == nil && record.Presence.Timeout && record.Timeout > 0:
+		r.applyRecord(record, now, conntrack.EventUpdate, false)
+	case errors.Is(err, conntrack.ErrFlowNotFound):
+		if closed, ok := r.Store.CloseVerifiedExpired(candidate, now); ok {
+			r.releaseClosedSession(closed, "verified conntrack expiry")
+		}
+	default:
+		r.getUnavailable.Add(1)
+		reason := "conntrack expiry verification unavailable"
+		if err == nil {
+			reason = "conntrack Get omitted remaining timeout"
+		}
+		r.Store.DeferExpired(candidate, now, reason)
+		r.setDegraded(errors.New(reason))
+	}
 }
 
 func (r *Runtime) reconcileMissing(seen []domain.ConntrackIdentity, before, now time.Time, reason string) {
@@ -266,22 +404,22 @@ func (r *Runtime) applyEvent(ev conntrack.Event) {
 	r.applyRecord(ev.Record, time.Now().UTC(), ev.Kind, true)
 }
 
-func (r *Runtime) ReleaseExpiredSession(session domain.RuntimeSession) error {
-	r.releaseClosedSession(session, "session timeout cleanup")
-	return nil
-}
-
 func (r *Runtime) releaseClosedSession(value domain.RuntimeSession, reason string) {
 	r.mu.RLock()
 	guards := r.guards
 	r.mu.RUnlock()
 	r.mu.Lock()
+	_, trackedRevoked := r.revoked[value.SessionID]
 	delete(r.revoked, value.SessionID)
 	r.mu.Unlock()
-	if guards != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = guards.ReleaseSession(ctx, value)
-		cancel()
+	if guards != nil && (value.Revoked || trackedRevoked) {
+		r.guardMu.Lock()
+		if !r.Store.HasActiveRevokedConntrackID(value.Identity.ID) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = guards.ReleaseSession(ctx, value)
+			cancel()
+		}
+		r.guardMu.Unlock()
 	}
 	r.closed.Add(1)
 	r.publish(domain.RuntimeEvent{Kind: domain.EventSessionClosed, SessionID: value.SessionID, Reason: reason})
@@ -318,7 +456,7 @@ func eventTime(value time.Time) time.Time {
 }
 
 func (r *Runtime) applyRecord(record conntrack.Record, now time.Time, kind conntrack.EventKind, publishUpdate bool) {
-	v, created, err := r.Store.Apply(record, now)
+	v, created, changed, err := r.Store.ApplyObserved(record, now)
 	if err != nil {
 		if errors.Is(err, session.ErrStaleEvent) {
 			r.trackingDrops.Add(1)
@@ -336,21 +474,27 @@ func (r *Runtime) applyRecord(record conntrack.Record, now time.Time, kind connt
 	r.mu.RUnlock()
 	if sourceZone, destinationZone := inferSessionZones(program, v); sourceZone != "" || destinationZone != "" {
 		if enriched, enrichErr := r.Store.SetZones(v.SessionID, sourceZone, destinationZone); enrichErr == nil {
+			changed = changed || enriched.Revision != v.Revision
 			v = enriched
 		}
 	}
 	if created {
 		r.created.Add(1)
 		r.publish(domain.RuntimeEvent{Kind: domain.EventSessionCreated, SessionID: v.SessionID, Revision: v.Revision})
-	} else if publishUpdate {
+	} else if publishUpdate && changed {
 		r.updated.Add(1)
 		r.publish(domain.RuntimeEvent{Kind: domain.EventSessionUpdated, SessionID: v.SessionID, Revision: v.Revision, Reason: string(kind)})
 	}
-	r.evaluateObserved(v)
+	// A repeated snapshot is observation, not a retry trigger for an
+	// invalidated or unavailable decision. A live event may retry it.
+	if created || changed || v.PolicyGeneration != r.CurrentGeneration() ||
+		publishUpdate && v.CacheState != domain.CacheCached {
+		r.evaluateObserved(v)
+	}
 	r.mu.RLock()
 	inspectionRuntime := r.inspection
 	r.mu.RUnlock()
-	if inspectionRuntime != nil {
+	if inspectionRuntime != nil && (created || changed) {
 		inspectionRuntime.OnSessionChanged(v)
 	}
 }
@@ -558,6 +702,8 @@ func (r *Runtime) RevokeContext(ctx context.Context, id, reason string) error {
 	if !ok {
 		return session.ErrSessionMissing
 	}
+	r.guardMu.Lock()
+	defer r.guardMu.Unlock()
 	r.mu.RLock()
 	guards := r.guards
 	r.mu.RUnlock()
@@ -733,6 +879,13 @@ func (r *Runtime) Stats() session.RuntimeStats {
 	stats.Created = r.created.Load()
 	stats.Closed = r.closed.Load()
 	stats.Resyncs = r.resyncs.Load()
+	stats.DumpIncomplete = r.dumpIncomplete.Load()
+	stats.LastDumpBytes = r.lastDumpBytes.Load()
+	stats.LastDumpMillis = r.lastDumpMillis.Load()
+	stats.GetChecks = r.getChecks.Load()
+	stats.GetUnavailable = r.getUnavailable.Load()
+	stats.ExpiryBacklog = r.expiryBacklog.Load()
+	stats.ExpiryOldestSeconds = r.expiryOldest.Load()
 	return stats
 }
 func (r *Runtime) Health() (bool, string) {

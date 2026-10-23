@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -141,13 +142,20 @@ func isTCPListener(listener net.Listener) bool {
 	}
 	switch listener.Addr().Network() {
 	case "tcp", "tcp4", "tcp6":
-		return true
+		_, port, err := net.SplitHostPort(listener.Addr().String())
+		if err != nil {
+			return false
+		}
+		value, err := strconv.ParseUint(port, 10, 16)
+		return err == nil && value > 0
 	default:
 		return false
 	}
 }
 
 func (server *ConnectionServer) acceptLoop(ctx context.Context, listener net.Listener, tls bool, limit chan struct{}, flows *sync.WaitGroup) error {
+	_, portText, _ := net.SplitHostPort(listener.Addr().String()) // checked by Serve
+	port, _ := strconv.ParseUint(portText, 10, 16)
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -180,12 +188,12 @@ func (server *ConnectionServer) acceptLoop(ctx context.Context, listener net.Lis
 				server.active.Add(-1)
 				<-limit
 			}()
-			server.handleConnection(ctx, connection, tls, acceptedAt)
+			server.handleConnection(ctx, connection, tls, acceptedAt, uint16(port))
 		}()
 	}
 }
 
-func (server *ConnectionServer) handleConnection(ctx context.Context, connection net.Conn, tls bool, acceptedAt time.Time) {
+func (server *ConnectionServer) handleConnection(ctx context.Context, connection net.Conn, tls bool, acceptedAt time.Time, listenerPort uint16) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		server.setupFailed.Add(1)
@@ -197,7 +205,7 @@ func (server *ConnectionServer) handleConnection(ctx context.Context, connection
 		return
 	}
 	original, err := server.Resolver.ResolveOriginalDestination(ctx, connection)
-	if err != nil || !validOriginalDestination(original, connection.LocalAddr()) {
+	if err != nil || !validOriginalDestination(original, connection.LocalAddr(), listenerPort) {
 		server.resolveFailed.Add(1)
 		return
 	}

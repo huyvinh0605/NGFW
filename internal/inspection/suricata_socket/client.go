@@ -53,7 +53,7 @@ func Dial(ctx context.Context, socketPath string, timeout time.Duration) (*Clien
 		return nil, errors.Join(ErrUnavailable, err)
 	}
 	client := &Client{conn: connection, timeout: timeout}
-	if _, err = client.exchange(ctx, map[string]any{"version": protocolVersion}); err != nil {
+	if _, err = client.exchange(ctx, map[string]any{"version": protocolVersion}, true); err != nil {
 		_ = client.Close()
 		return nil, err
 	}
@@ -89,13 +89,24 @@ func (client *Client) Close() error {
 }
 
 func (client *Client) CommandList(ctx context.Context) ([]string, error) {
-	message, err := client.exchange(ctx, map[string]any{"command": "command-list"})
+	message, err := client.exchange(ctx, map[string]any{"command": "command-list"}, false)
 	if err != nil {
 		return nil, err
 	}
 	var commands []string
-	if err := json.Unmarshal(message, &commands); err != nil || commands == nil {
-		return nil, ErrProtocol
+	if len(message) > 0 && message[0] == '[' {
+		if err := json.Unmarshal(message, &commands); err != nil || commands == nil {
+			return nil, ErrProtocol
+		}
+	} else {
+		var result struct {
+			Count    *int     `json:"count"`
+			Commands []string `json:"commands"`
+		}
+		if err := json.Unmarshal(message, &result); err != nil || result.Count == nil || result.Commands == nil || *result.Count != len(result.Commands) {
+			return nil, ErrProtocol
+		}
+		commands = result.Commands
 	}
 	return commands, nil
 }
@@ -110,12 +121,12 @@ func (client *Client) Submit(ctx context.Context, pcapPath, outputDirectory stri
 	_, err := client.exchange(ctx, map[string]any{
 		"command":   "pcap-file",
 		"arguments": map[string]string{"filename": pcapPath, "output-dir": outputDirectory},
-	})
+	}, false)
 	return err
 }
 
 func (client *Client) Current(ctx context.Context) (string, error) {
-	message, err := client.exchange(ctx, map[string]any{"command": "pcap-current"})
+	message, err := client.exchange(ctx, map[string]any{"command": "pcap-current"}, false)
 	if err != nil {
 		return "", err
 	}
@@ -123,11 +134,14 @@ func (client *Client) Current(ctx context.Context) (string, error) {
 	if err := json.Unmarshal(message, &current); err != nil {
 		return "", ErrProtocol
 	}
+	if current == "None" { // Suricata 7 reports an idle PCAP worker this way.
+		return "", nil
+	}
 	return current, nil
 }
 
 func (client *Client) Queued(ctx context.Context) ([]string, error) {
-	message, err := client.exchange(ctx, map[string]any{"command": "pcap-file-list"})
+	message, err := client.exchange(ctx, map[string]any{"command": "pcap-file-list"}, false)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +156,7 @@ func (client *Client) Queued(ctx context.Context) ([]string, error) {
 }
 
 func (client *Client) QueueDepth(ctx context.Context) (int, error) {
-	message, err := client.exchange(ctx, map[string]any{"command": "pcap-file-number"})
+	message, err := client.exchange(ctx, map[string]any{"command": "pcap-file-number"}, false)
 	if err != nil {
 		return 0, err
 	}
@@ -156,7 +170,7 @@ func (client *Client) QueueDepth(ctx context.Context) (int, error) {
 	return depth, nil
 }
 
-func (client *Client) exchange(ctx context.Context, command map[string]any) (json.RawMessage, error) {
+func (client *Client) exchange(ctx context.Context, command map[string]any, initial bool) (json.RawMessage, error) {
 	if client == nil || ctx == nil {
 		return nil, ErrUnavailable
 	}
@@ -184,10 +198,16 @@ func (client *Client) exchange(ctx context.Context, command map[string]any) (jso
 		_ = client.conn.SetDeadline(time.Time{})
 	}()
 	encoded, err := json.Marshal(command)
-	if err != nil || len(encoded)+1 > maxResponseBytes {
+	terminatorBytes := 1
+	if initial {
+		terminatorBytes = 0 // Suricata 7's version greeting has no newline.
+	}
+	if err != nil || len(encoded)+terminatorBytes > maxResponseBytes {
 		return nil, ErrProtocol
 	}
-	encoded = append(encoded, '\n')
+	if !initial {
+		encoded = append(encoded, '\n')
+	}
 	for len(encoded) != 0 {
 		written, writeErr := client.conn.Write(encoded)
 		if writeErr != nil || written <= 0 {

@@ -37,18 +37,26 @@ func (f ConnectionAuthorizerFunc) OpenConnection(ctx context.Context, open domai
 
 // IPCConnectionAuthorizer forwards the connection context to ngfw-engine.
 // It contains no local policy/profile evaluation.
-type IPCConnectionAuthorizer struct{ Client *gateipc.Client }
+type IPCConnectionAuthorizer struct {
+	Client           *gateipc.Client
+	EngineInstanceID string
+	Generation       uint64
+}
 
 func (authorizer IPCConnectionAuthorizer) OpenConnection(ctx context.Context, open domain.ProxyConnectionOpen) (domain.ProxyConnectionDecision, error) {
 	if authorizer.Client == nil {
 		return domain.ProxyConnectionDecision{}, ErrGateDecisionInvalid
 	}
 	var decision domain.ProxyConnectionDecision
+	open.EngineInstanceID, open.ConfigGeneration = authorizer.EngineInstanceID, authorizer.Generation
 	meta, err := authorizer.Client.Call(ctx, gateipc.OpenConnection, open, &decision)
 	if err != nil {
 		return domain.ProxyConnectionDecision{}, err
 	}
 	if meta.DecisionID != decision.DecisionID || meta.ConfigGeneration != decision.ConfigGeneration {
+		return domain.ProxyConnectionDecision{}, ErrGateDecisionInvalid
+	}
+	if authorizer.Generation != 0 && decision.ConfigGeneration != authorizer.Generation {
 		return domain.ProxyConnectionDecision{}, ErrGateDecisionInvalid
 	}
 	return decision, nil
@@ -78,6 +86,8 @@ type GateConnectionHandler struct {
 	clientHelloInvalid  atomic.Uint64
 	tlsHandshakeFail    atomic.Uint64
 	upstreamConnectFail atomic.Uint64
+	bypassed            atomic.Uint64
+	decrypted           atomic.Uint64
 }
 
 type GateConnectionStats struct {
@@ -89,6 +99,7 @@ func (handler *GateConnectionHandler) Stats() GateConnectionStats {
 		return GateConnectionStats{}
 	}
 	return GateConnectionStats{Counters: map[string]uint64{
+		"bypassed": handler.bypassed.Load(), "decrypted": handler.decrypted.Load(),
 		"client_hello_timeout":  handler.clientHelloTimeout.Load(),
 		"client_hello_invalid":  handler.clientHelloInvalid.Load(),
 		"tls_handshake_fail":    handler.tlsHandshakeFail.Load(),
@@ -140,6 +151,7 @@ func (handler *GateConnectionHandler) ServeProxyConnection(ctx context.Context, 
 	case domain.TLSGateBlock:
 		return ErrGatePolicyBlocked
 	case domain.TLSGateBypass, domain.TLSGateMetadataOnly:
+		handler.bypassed.Add(1)
 		return handler.rawTunnel(ctx, downstream, value.OriginalDestination, buffered)
 	case domain.TLSGateInspectHTTP:
 		if handler.HTTPGate == nil {
@@ -245,5 +257,6 @@ func (handler *GateConnectionHandler) serveDecrypted(ctx context.Context, downst
 		handler.tlsHandshakeFail.Add(1)
 		return fmt.Errorf("%w: %v", ErrTLSHandshake, err)
 	}
+	handler.decrypted.Add(1)
 	return handler.HTTPGate.ServeHTTPConnection(ctx, secure, value, decision)
 }

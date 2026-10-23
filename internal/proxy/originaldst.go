@@ -11,9 +11,8 @@ import (
 // evidence that the original destination equals the proxy listener address.
 var ErrOriginalDestinationUnavailable = errors.New("PROXY_ORIGINAL_DST_UNAVAILABLE")
 
-// OriginalDestinationResolver is the T07 kernel boundary. T01 must establish
-// whether its Linux implementation uses REDIRECT's original-destination
-// getsockopt or a TPROXY-preserved local address before production wiring.
+// OriginalDestinationResolver is the T07 kernel boundary. T01 established
+// that the appliance needs TPROXY to preserve a post-DNAT destination.
 type OriginalDestinationResolver interface {
 	ResolveOriginalDestination(context.Context, net.Conn) (netip.AddrPort, error)
 }
@@ -32,13 +31,13 @@ func (UnavailableOriginalDestinationResolver) ResolveOriginalDestination(context
 	return netip.AddrPort{}, ErrOriginalDestinationUnavailable
 }
 
-func validOriginalDestination(original netip.AddrPort, local net.Addr) bool {
+func validOriginalDestination(original netip.AddrPort, local net.Addr, listenerPort uint16) bool {
 	if !original.IsValid() || original.Port() == 0 || original.Addr().IsUnspecified() || original.Addr().IsMulticast() {
 		return false
 	}
 	if local != nil {
-		if listener, err := netip.ParseAddrPort(local.String()); err == nil && listener == original {
-			return false // never connect a captured flow back into this listener
+		if acceptedLocal, err := netip.ParseAddrPort(local.String()); err == nil && acceptedLocal == original && original.Port() == listenerPort {
+			return false // a direct connection to this listener is not intercepted traffic
 		}
 	}
 	return true

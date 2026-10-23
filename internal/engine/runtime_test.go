@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,6 +183,211 @@ func TestM2RuntimeResyncCleansFlowMissingFromKernelDump(t *testing.T) {
 		t.Fatalf("stale session was not cleaned: %d", len(runtime.Store.List()))
 	}
 	_ = runtime.Stop()
+}
+
+func TestM2RuntimeExpiryRequiresKernelAbsence(t *testing.T) {
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	record := runtimeRecord(91)
+	record.Presence.Timeout = true
+	record.Timeout = time.Minute
+
+	present := conntrack.NewFakeSource(4)
+	present.SetSnapshot(record)
+	runtime := NewRuntime(present, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	created, _, err := runtime.Store.Apply(record, now.Add(-2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, _, _ := runtime.Store.ExpiredCandidates(now, 1)
+	if len(candidates) != 1 {
+		t.Fatal("missing due session")
+	}
+	runtime.verifyExpiredCandidate(context.Background(), candidates[0])
+	current, ok := runtime.Store.Get(created.SessionID)
+	if !ok || current.ExpiresAt == nil || !current.ExpiresAt.After(now) {
+		t.Fatalf("kernel-present session was closed or not refreshed: %+v", current)
+	}
+
+	absent := conntrack.NewFakeSource(4)
+	missingRuntime := NewRuntime(absent, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	created, _, err = missingRuntime.Store.Apply(record, now.Add(-2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, _, _ = missingRuntime.Store.ExpiredCandidates(now, 1)
+	missingRuntime.verifyExpiredCandidate(context.Background(), candidates[0])
+	if _, ok := missingRuntime.Store.Get(created.SessionID); ok || missingRuntime.Stats().Closed != 1 {
+		t.Fatal("confirmed kernel absence did not close the session")
+	}
+}
+
+type unavailableGetSource struct{ conntrack.Source }
+
+func (unavailableGetSource) Get(context.Context, conntrack.Identity) (conntrack.Record, error) {
+	return conntrack.Record{}, context.DeadlineExceeded
+}
+
+func TestM2RuntimeExpiryGetErrorKeepsSession(t *testing.T) {
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	record := runtimeRecord(92)
+	record.Presence.Timeout = true
+	record.Timeout = time.Second
+	runtime := NewRuntime(unavailableGetSource{conntrack.NewFakeSource(4)}, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	value, _, err := runtime.Store.Apply(record, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, _, _ := runtime.Store.ExpiredCandidates(now, 1)
+	runtime.verifyExpiredCandidate(context.Background(), candidates[0])
+	current, ok := runtime.Store.Get(value.SessionID)
+	if !ok || current.Quality.TrackingStatus != domain.TrackingStale || runtime.Stats().GetUnavailable != 1 {
+		t.Fatalf("Get error became a false close: %+v stats=%+v", current, runtime.Stats())
+	}
+}
+
+func TestM2RuntimeNoOpResyncPreservesActivityAndRevision(t *testing.T) {
+	source := conntrack.NewFakeSource(4)
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := runtimeRecord(93)
+	source.SetSnapshot(record)
+	runtime := NewRuntime(source, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	first := runtime.Store.List()[0]
+	runtime.resync(source, ctx)
+	second, ok := runtime.Store.Get(first.SessionID)
+	if !ok || second.Revision != first.Revision || !second.LastSeen.Equal(first.LastSeen) || runtime.updated.Load() != 0 {
+		t.Fatalf("no-op dump changed session activity/revision: before=%+v after=%+v", first, second)
+	}
+}
+
+func TestM2RuntimeNoOpResyncDoesNotReevaluateInvalidatedSession(t *testing.T) {
+	source := conntrack.NewFakeSource(4)
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := runtimeRecord(94)
+	source.SetSnapshot(record)
+	runtime := NewRuntime(source, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	before := runtime.Store.List()[0]
+	invalidated, err := runtime.Store.Invalidate(before.SessionID, 1, "test", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.resync(source, ctx)
+	after, ok := runtime.Store.Get(before.SessionID)
+	if !ok || after.Revision != invalidated.Revision || after.CacheState != domain.CacheInvalidated {
+		t.Fatalf("no-op resync retried policy evaluation: invalidated=%+v after=%+v", invalidated, after)
+	}
+}
+
+type lossDuringDumpSource struct {
+	conntrack.Source
+	onDump func()
+}
+
+func (s lossDuringDumpSource) Dump(ctx context.Context, limits conntrack.DumpLimits, visit func(conntrack.Record) error) (conntrack.DumpResult, error) {
+	result, err := s.Source.Dump(ctx, limits, visit)
+	s.onDump()
+	return result, err
+}
+
+func TestM2RuntimeEventLossDuringDumpPreventsNegativeSweep(t *testing.T) {
+	source := conntrack.NewFakeSource(4)
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(source, program, 1, session.RuntimeLimits{MaxSessions: 4})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	record := runtimeRecord(94)
+	source.SetSnapshot(record)
+	runtime.applyRecord(record, time.Now().UTC(), conntrack.EventNew, true)
+	source.Forget(record.Identity)
+	runtime.mu.Lock()
+	runtime.resyncing = true
+	runtime.mu.Unlock()
+	runtime.resync(lossDuringDumpSource{Source: source, onDump: func() { runtime.lossVersion.Add(1) }}, ctx)
+	if len(runtime.Store.List()) != 1 || runtime.Stats().DumpIncomplete == 0 {
+		t.Fatal("a dump with event loss incorrectly closed a session")
+	}
+}
+
+type recordingGuard struct{ released atomic.Int32 }
+
+func (*recordingGuard) AddSourceBlock(context.Context, string, time.Time) error { return nil }
+func (*recordingGuard) RemoveSourceBlock(context.Context, string) error         { return nil }
+func (*recordingGuard) RevokeSession(context.Context, domain.RuntimeSession) error {
+	return nil
+}
+func (g *recordingGuard) ReleaseSession(context.Context, domain.RuntimeSession) error {
+	g.released.Add(1)
+	return nil
+}
+
+func TestM2RuntimeOldClosePreservesReusedRevokedID(t *testing.T) {
+	program, err := connectivity.Compile(domain.Config{DefaultDeny: false}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(conntrack.NewFakeSource(4), program, 1, session.RuntimeLimits{MaxSessions: 4})
+	guard := &recordingGuard{}
+	runtime.SetGuardEnforcer(guard)
+	now := time.Now().UTC()
+	old := runtimeRecord(95)
+	first, _, err := runtime.Store.Apply(old, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := runtimeRecord(95)
+	newer.OriginalTuple.SrcPort++
+	newer.Identity.Original = newer.OriginalTuple
+	newer.Identity.KernelStart++
+	second, _, err := runtime.Store.Apply(newer, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Store.MarkRevoked(first.SessionID, 1, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Store.MarkRevoked(second.SessionID, 1, "test"); err != nil {
+		t.Fatal(err)
+	}
+	closed, ok := runtime.Store.Close(first.Identity, "old destroy", now.Add(2*time.Second))
+	if !ok {
+		t.Fatal("old session did not close")
+	}
+	runtime.releaseClosedSession(closed, "old destroy")
+	if guard.released.Load() != 0 {
+		t.Fatal("closing old incarnation removed guard owned by a newer revoked session")
+	}
 }
 
 func TestM2RuntimeEvaluatesDNATPolicyOnPostTranslationTuple(t *testing.T) {

@@ -15,6 +15,7 @@ type Server struct {
 	MaxFrameBytes int
 	MaxConcurrent int
 	MaxPending    int
+	SocketGroup   string
 }
 
 func NewServer(handler Handler) *Server {

@@ -154,6 +154,13 @@ func TestPoolCancellationCloseAndFlowIDExhaustion(t *testing.T) {
 		t.Fatalf("deadline not propagated: %v", err)
 	}
 	waitStats(t, pool, func(stats Stats) bool { return stats.InFlightItems == 0 && stats.QueuedBytes == 0 })
+	// A timed-out detector is retired; exercise the independent flow-ID
+	// boundary with a fresh, healthy pool.
+	pool.Close()
+	pool, err = New(context.Background(), config, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pool.flowID.Store(^uint32(0))
 	if _, err := pool.Inspect(context.Background(), "wrapped", sampleRequest()); !errors.Is(err, ErrFlowIDLimit) {
 		t.Fatalf("flowID wrap not rejected: %v", err)

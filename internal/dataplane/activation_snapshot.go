@@ -11,28 +11,35 @@ import (
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
-const ActivationSnapshotSchema = 1
+const ActivationSnapshotSchema = 2
 
 // ActivationSnapshot is the immutable compiler input and output identity for
 // one Linux dataplane generation.  Keeping the previous snapshot in the
 // activation journal prevents rollback from accidentally compiling the old
 // Config with the target generation's epoch, zone slots, or inspection plan.
 type ActivationSnapshot struct {
-	Schema            int              `json:"schema"`
-	Config            domain.Config    `json:"config"`
-	Generation        uint64           `json:"generation"`
-	M2Options         M2CompileOptions `json:"m2_options"`
-	InspectionPlan    InspectionPlan   `json:"inspection_plan"`
-	UsesM3            bool             `json:"uses_m3"`
-	ArtifactHash      string           `json:"artifact_hash"`
-	StaticRulesetHash string           `json:"static_ruleset_hash"`
+	Schema            int                          `json:"schema"`
+	Config            domain.Config                `json:"config"`
+	Generation        uint64                       `json:"generation"`
+	M2Options         M2CompileOptions             `json:"m2_options"`
+	InspectionPlan    InspectionPlan               `json:"inspection_plan"`
+	UsesM3            bool                         `json:"uses_m3"`
+	ArtifactHash      string                       `json:"artifact_hash"`
+	StaticRulesetHash string                       `json:"static_ruleset_hash"`
+	ProxyPlan         *ProxySelectionPlan          `json:"proxy_plan,omitempty"`
+	ProxyArtifacts    *domain.RequestGateArtifacts `json:"proxy_artifacts,omitempty"`
+	ProxyRoute        *TPROXYRoutePlan             `json:"proxy_route,omitempty"`
 }
 
 // PrepareM3Activation compiles all policy and inspection selection state
 // before any kernel mutation.  It is valid for an inspection-OFF target too;
 // the resulting empty inspection chain is what removes a previous M3 selector.
 func PrepareM3Activation(value domain.Config, generation uint64, options M2CompileOptions) (ActivationSnapshot, connectivity.Program, RulesetBundle, error) {
-	program, err := connectivity.CompileForCapabilities(value, generation, connectivity.Capabilities{Inspection: true})
+	program, err := connectivity.CompileForCapabilities(value, generation, connectivity.Capabilities{Inspection: true, RequestGate: true})
+	if err != nil {
+		return ActivationSnapshot{}, connectivity.Program{}, RulesetBundle{}, err
+	}
+	proxyPlan, err := CompileM4ProxySelection(value, generation)
 	if err != nil {
 		return ActivationSnapshot{}, connectivity.Program{}, RulesetBundle{}, err
 	}
@@ -61,6 +68,15 @@ func PrepareM3Activation(value domain.Config, generation uint64, options M2Compi
 		M2Options:      options.Clone(),
 		InspectionPlan: cloneInspectionPlan(plan),
 		UsesM3:         usesM3,
+		ProxyPlan:      &proxyPlan,
+	}
+	if proxyPlan.Enabled {
+		route := M4TPROXYRoutePlan()
+		snapshot.ProxyRoute = &route
+	}
+	bundle, err = withM4Bundle(bundle, value, proxyPlan)
+	if err != nil {
+		return ActivationSnapshot{}, connectivity.Program{}, RulesetBundle{}, err
 	}
 	snapshot.ArtifactHash, err = activationArtifactHash(snapshot)
 	if err != nil {
@@ -77,7 +93,7 @@ func PrepareM3Activation(value domain.Config, generation uint64, options M2Compi
 // exact static bundle represented by the snapshot.  A corrupt/stale journal is
 // rejected before network or nftables state is touched.
 func CompileActivationSnapshot(snapshot ActivationSnapshot) (RulesetBundle, error) {
-	if snapshot.Schema != ActivationSnapshotSchema {
+	if snapshot.Schema != ActivationSnapshotSchema && snapshot.Schema != 1 {
 		return RulesetBundle{}, fmt.Errorf("unsupported activation snapshot schema %d", snapshot.Schema)
 	}
 	expectedArtifact, err := activationArtifactHash(snapshot)
@@ -96,6 +112,24 @@ func CompileActivationSnapshot(snapshot ActivationSnapshot) (RulesetBundle, erro
 	if err != nil {
 		return RulesetBundle{}, err
 	}
+	if snapshot.Schema >= 2 {
+		if snapshot.ProxyPlan == nil || snapshot.ProxyPlan.Generation != snapshot.Generation {
+			return RulesetBundle{}, errors.New("activation snapshot lacks matching proxy plan")
+		}
+		if snapshot.ProxyPlan.Enabled {
+			if snapshot.ProxyRoute == nil || *snapshot.ProxyRoute != M4TPROXYRoutePlan() {
+				return RulesetBundle{}, errors.New("activation snapshot has inconsistent M4 policy routing")
+			}
+		} else if snapshot.ProxyRoute != nil {
+			return RulesetBundle{}, errors.New("disabled proxy snapshot contains policy routing")
+		}
+		bundle, err = withM4Bundle(bundle, snapshot.Config, *snapshot.ProxyPlan)
+		if err != nil {
+			return RulesetBundle{}, err
+		}
+	} else if domain.UsesM4(snapshot.Config) {
+		return RulesetBundle{}, errors.New("legacy activation snapshot cannot enable M4")
+	}
 	expectedRules, err := rulesetBundleHash(bundle)
 	if err != nil {
 		return RulesetBundle{}, err
@@ -112,6 +146,18 @@ func cloneActivationSnapshot(value ActivationSnapshot) ActivationSnapshot {
 	}
 	value.M2Options = value.M2Options.Clone()
 	value.InspectionPlan = cloneInspectionPlan(value.InspectionPlan)
+	if value.ProxyPlan != nil {
+		plan := value.ProxyPlan.Clone()
+		value.ProxyPlan = &plan
+	}
+	if value.ProxyArtifacts != nil {
+		artifacts := *value.ProxyArtifacts
+		value.ProxyArtifacts = &artifacts
+	}
+	if value.ProxyRoute != nil {
+		route := *value.ProxyRoute
+		value.ProxyRoute = &route
+	}
 	return value
 }
 

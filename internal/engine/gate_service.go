@@ -26,6 +26,20 @@ import (
 type GateService struct {
 	Runtime *Runtime
 	Scope   flow.Scope
+	// RunningConfig returns a coherent Running config/version, never Candidate.
+	RunningConfig func() (domain.Config, uint64)
+	// InterceptionReady is supplied by verified kernel activation. Nil is OFF.
+	InterceptionReady   func(uint64) bool
+	ActivationArtifacts func(uint64) domain.RequestGateArtifacts
+	preparationMu       sync.RWMutex
+	preparation         *domain.RequestGateRuntime
+	instanceOnce        sync.Once
+	instanceID          string
+	instanceErr         error
+	healthMu            sync.Mutex
+	heartbeat           domain.RequestGateHeartbeat
+	heartbeatAt         time.Time
+	healthNow           func() time.Time
 	// M4 connection/request records are engine-owned, bounded and never copied
 	// into the proxy. They do not replace the M2 session store.
 	gateMu            sync.Mutex
@@ -41,6 +55,16 @@ type GateService struct {
 
 func (service *GateService) HandleGate(ctx context.Context, operation gateipc.Operation, payload json.RawMessage) (gateipc.Result, error) {
 	switch operation {
+	case gateipc.GateHealthPing:
+		var heartbeat domain.RequestGateHeartbeat
+		if err := json.Unmarshal(payload, &heartbeat); err != nil {
+			return gateipc.Result{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
+		}
+		runtime, err := service.SyncProxy(ctx, heartbeat)
+		if err != nil {
+			return gateipc.Result{}, err
+		}
+		return gateipc.Result{Meta: gateipc.ResponseMeta{ConfigGeneration: runtime.ConfigGeneration, DecisionID: runtime.EngineInstanceID}, Data: runtime}, nil
 	case gateipc.OpenConnection:
 		var open domain.ProxyConnectionOpen
 		if err := json.Unmarshal(payload, &open); err != nil {
@@ -73,6 +97,9 @@ func (service *GateService) OpenConnection(ctx context.Context, open domain.Prox
 		return domain.ProxyConnectionDecision{}, &gateipc.ProtocolError{Code: gateipc.CodeEngineDown}
 	}
 	if err := ctx.Err(); err != nil {
+		return domain.ProxyConnectionDecision{}, err
+	}
+	if err := service.checkProxyRuntime(open.EngineInstanceID, open.ConfigGeneration); err != nil {
 		return domain.ProxyConnectionDecision{}, err
 	}
 	client, upstream, err := validateGateOpen(open)

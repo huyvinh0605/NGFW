@@ -8,8 +8,8 @@ import (
 )
 
 // CompileM4ProxySelection builds only the mechanism-neutral first-match
-// selector. It cannot mutate nftables or mark REDIRECT/TPROXY as supported.
-// The Linux T01 probe is required before rendering/applying this plan.
+// selector. It cannot mutate nftables or activate the TPROXY route. T01 has
+// selected TPROXY; T28 still owns applying this plan and rollback.
 func CompileM4ProxySelection(config domain.Config, generation uint64) (ProxySelectionPlan, error) {
 	plan := ProxySelectionPlan{SchemaVersion: ProxySelectionSchema, Generation: generation}
 	if !domain.UsesM4(config) {

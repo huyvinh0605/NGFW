@@ -15,7 +15,7 @@ while (($#)); do
   esac
 done
 [[ $EUID -eq 0 ]] || { echo 'root required for nft and private-key permission checks' >&2; exit 2; }
-for command in systemctl nft ip conntrack curl python3 runuser stat timeout id; do
+for command in systemctl nft ip conntrack curl python3 runuser setpriv stat timeout id; do
   command -v "$command" >/dev/null 2>&1 || { echo "missing prerequisite: $command" >&2; exit 2; }
 done
 id ngfw >/dev/null 2>&1 || { echo 'M1/M2 ngfw API account is missing' >&2; exit 2; }
@@ -34,7 +34,10 @@ go version > "$evidence_dir/go-version.txt" 2>&1 || true
 nft --version > "$evidence_dir/nft-version.txt" 2>&1 || true
 suricata --build-info > "$evidence_dir/suricata-build.txt" 2>&1 || true
 ip -brief address > "$evidence_dir/interfaces.txt" 2>&1 || true
+ip -j -4 rule show > "$evidence_dir/policy-rules.json" 2>&1 || true
+ip -j -4 route show table 140 > "$evidence_dir/tproxy-routes.json" 2>&1 || true
 nft -a list ruleset > "$evidence_dir/nft-ruleset.txt" 2>&1 || true
+journalctl -u ngfw-proxy -u ngfw-engine -b --no-pager -n 200 > "$evidence_dir/runtime-journal.txt" 2>&1 || true
 conntrack -L -o extended > "$evidence_dir/conntrack.txt" 2>&1 || true
 systemctl show ngfw-engine.service ngfw-api.service ngfw-proxy.service ngfw-request-worker-preflight.service \
   -p Id -p ActiveState -p SubState -p User -p Group -p SupplementaryGroups \

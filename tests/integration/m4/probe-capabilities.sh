@@ -4,18 +4,21 @@ set -Eeuo pipefail
 # M4 T01: live capability probe. All nftables and addresses stay in temporary
 # network namespaces. Exit 0 only after every network, TLS and Suricata check.
 usage() {
-  echo 'Usage: sudo bash tests/integration/m4/probe-capabilities.sh [--evidence-dir DIR]' >&2
+  echo 'Usage: sudo bash tests/integration/m4/probe-capabilities.sh [--mechanism redirect|tproxy] [--evidence-dir DIR]' >&2
   echo 'Exit 0 = all probes passed; 1 = capability failed; 2 = missing prerequisite.' >&2
 }
 
 evidence_dir=''
+mechanism='redirect'
 while (($#)); do
   case "$1" in
     --evidence-dir) (($# >= 2)) || { usage; exit 2; }; evidence_dir=$2; shift 2 ;;
+    --mechanism) (($# >= 2)) || { usage; exit 2; }; mechanism=$2; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
 done
+[[ $mechanism == redirect || $mechanism == tproxy ]] || { usage; exit 2; }
 [[ $EUID -eq 0 ]] || { echo 'root is required for network namespaces' >&2; exit 2; }
 for dependency in ip nft ss sysctl python3 openssl suricata timeout; do
   command -v "$dependency" >/dev/null 2>&1 || { echo "missing prerequisite: $dependency" >&2; exit 2; }
@@ -46,6 +49,8 @@ cleanup() {
     for artifact in nft-ruleset.txt original-dst.jsonl client.jsonl backend.jsonl backend-errors.jsonl proxy-errors.jsonl proxy.log backend.log suricata-control.json suricata.log suricata-config.log; do
       [[ -f "$work/$artifact" ]] && cp -- "$work/$artifact" "$evidence_dir/$artifact"
     done
+    [[ ! -f "$work/suricata-log/suricata.log" ]] || cp -- "$work/suricata-log/suricata.log" "$evidence_dir/suricata-engine.log"
+    [[ ! -d "$work/suricata-output" ]] || cp -r -- "$work/suricata-output" "$evidence_dir/suricata-output"
   fi
   rm -rf -- "$work"
 }
@@ -74,9 +79,27 @@ ip netns exec "$router" sysctl -q -w net.ipv4.ip_forward=1
 
 # DNAT at -100, proxy redirect at -90. Output is deliberately untouched:
 # upstream sockets opened by the proxy must not re-enter the redirect chain.
-cat >"$work/redirect.nft" <<EOF
+if [[ $mechanism == tproxy ]]; then
+  ip -n "$router" rule add fwmark 0x4 lookup 100
+  ip -n "$router" route add local 0.0.0.0/0 dev lo table 100
+  cat >"$work/redirect.nft" <<EOF
 table ip ngfw_m4_probe {
-  chain dnat {
+  chain dnat_pre {
+    type nat hook prerouting priority -100; policy accept;
+    ip daddr 198.51.100.20 tcp dport 443 dnat to 10.251.0.2:443
+  }
+  chain intercept {
+    type filter hook prerouting priority -90; policy accept;
+    fib daddr type local return
+    iifname "$client_router" fib daddr oifname "$server_router" tcp dport 80 tproxy ip to :18080 meta mark set 0x4 accept
+    iifname "$client_router" fib daddr oifname "$server_router" tcp dport 443 tproxy ip to :18443 meta mark set 0x4 accept
+  }
+}
+EOF
+else
+  cat >"$work/redirect.nft" <<EOF
+table ip ngfw_m4_probe {
+  chain dnat_pre {
     type nat hook prerouting priority -100; policy accept;
     ip daddr 198.51.100.20 tcp dport 443 dnat to 10.251.0.2:443
   }
@@ -87,6 +110,7 @@ table ip ngfw_m4_probe {
   }
 }
 EOF
+fi
 ip netns exec "$router" nft -c -f "$work/redirect.nft"
 ip netns exec "$router" nft -f "$work/redirect.nft"
 ip netns exec "$router" nft -a list table ip ngfw_m4_probe >"$work/nft-ruleset.txt"
@@ -110,6 +134,8 @@ def record(filename, value):
 def listen(port):
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if mode == 'proxy' and sys.argv[3] == 'tproxy':
+        sock.setsockopt(socket.SOL_IP, 19, 1)  # IP_TRANSPARENT
     sock.bind(('0.0.0.0', port))
     sock.listen(16)
     return sock
@@ -153,10 +179,14 @@ def relay(left, right):
 
 def proxy_connection(conn, listener_port):
     try:
-        raw = conn.getsockopt(socket.SOL_IP, 80, 16)  # SO_ORIGINAL_DST
-        family = struct.unpack_from('=H', raw, 0)[0]
-        port = struct.unpack_from('!H', raw, 2)[0]
-        address = socket.inet_ntop(socket.AF_INET, raw[4:8])
+        if sys.argv[3] == 'tproxy':
+            address, port = conn.getsockname()[:2]
+            family = socket.AF_INET
+        else:
+            raw = conn.getsockopt(socket.SOL_IP, 80, 16)  # SO_ORIGINAL_DST
+            family = struct.unpack_from('=H', raw, 0)[0]
+            port = struct.unpack_from('!H', raw, 2)[0]
+            address = socket.inet_ntop(socket.AF_INET, raw[4:8])
         if family != socket.AF_INET:
             raise ValueError('original destination was not IPv4')
         record('original-dst.jsonl', {'listener': listener_port, 'address': address, 'port': port})
@@ -213,7 +243,7 @@ else:
 PY
 
 ip netns exec "$server" python3 "$work/netprobe.py" backend "$work" >"$work/backend.log" 2>&1 & backend_pid=$!
-ip netns exec "$router" python3 "$work/netprobe.py" proxy "$work" >"$work/proxy.log" 2>&1 & proxy_pid=$!
+ip netns exec "$router" python3 "$work/netprobe.py" proxy "$work" "$mechanism" >"$work/proxy.log" 2>&1 & proxy_pid=$!
 for _ in {1..50}; do
   kill -0 "$backend_pid" 2>/dev/null && kill -0 "$proxy_pid" 2>/dev/null || { echo 'probe server exited' >&2; exit 1; }
   if ip netns exec "$server" ss -lnt | grep -q ':80 ' &&
@@ -232,7 +262,7 @@ ip netns exec "$client" timeout 10 python3 "$work/netprobe.py" client "$work" 19
 
 # Keep the nft rules, restart only the proxy and prove the path still works.
 kill "$proxy_pid"; wait "$proxy_pid" 2>/dev/null || true; proxy_pid=''
-ip netns exec "$router" python3 "$work/netprobe.py" proxy "$work" >>"$work/proxy.log" 2>&1 & proxy_pid=$!
+ip netns exec "$router" python3 "$work/netprobe.py" proxy "$work" "$mechanism" >>"$work/proxy.log" 2>&1 & proxy_pid=$!
 for _ in {1..50}; do
   ip netns exec "$router" ss -lnt | grep -q ':18080 ' && break
   kill -0 "$proxy_pid" 2>/dev/null || { echo 'proxy restart failed' >&2; exit 1; }
@@ -314,42 +344,62 @@ for _ in {1..80}; do
   sleep 0.1
 done
 [[ -S "$work/suricata.sock" ]] || { echo 'Suricata control socket unavailable' >&2; exit 1; }
-timeout 20 python3 - "$work" <<'PY' >"$work/suricata-control.json"
+timeout 30 python3 - "$work" <<'PY' >"$work/suricata-control.json"
 import json, pathlib, socket, sys, time
 work = pathlib.Path(sys.argv[1])
 sock = socket.socket(socket.AF_UNIX)
-sock.settimeout(3)
+sock.settimeout(10)
 sock.connect(str(work/'suricata.sock'))
-stream = sock.makefile('rb')
-def exchange(value):
-    sock.sendall((json.dumps(value)+'\n').encode())
-    line = stream.readline()
-    if not line:
-        raise RuntimeError('Suricata closed the control socket')
-    reply = json.loads(line)
+decoder = json.JSONDecoder()
+response_buffer = ''
+def exchange(value, initial=False):
+    global response_buffer
+    # Suricata 7 requires the version greeting without a trailing newline;
+    # subsequent commands are newline terminated.
+    sock.sendall((json.dumps(value)+('' if initial else '\n')).encode())
+    while True:
+        response_buffer = response_buffer.lstrip()
+        try:
+            reply, consumed = decoder.raw_decode(response_buffer)
+            response_buffer = response_buffer[consumed:]
+            break
+        except json.JSONDecodeError:
+            part = sock.recv(4096)
+            if not part:
+                raise RuntimeError('Suricata closed the control socket')
+            response_buffer += part.decode('utf-8')
+            if len(response_buffer) > 65536:
+                raise RuntimeError('Suricata control response exceeded limit')
     if reply.get('return') != 'OK':
         raise RuntimeError('Suricata rejected command: '+str(reply))
     return reply
-exchange({'version': '0.1'})
-commands = exchange({'command': 'command-list'})['message']
+exchange({'version': '0.1'}, initial=True)
+command_reply = exchange({'command': 'command-list'})['message']
+commands = command_reply['commands'] if isinstance(command_reply, dict) else command_reply
+if isinstance(command_reply, dict) and command_reply.get('count') != len(commands):
+    raise RuntimeError('Suricata command-list count mismatch')
 required = {'pcap-file', 'pcap-current', 'pcap-file-list', 'pcap-file-number'}
 if not required.issubset(set(commands)):
     raise RuntimeError('required PCAP commands unavailable: '+str(required-set(commands)))
 added = exchange({'command': 'pcap-file', 'arguments': {'filename': str(work/'probe.pcap'), 'output-dir': str(work/'suricata-output')}})
 deadline = time.monotonic() + 10
 observed = False
+last = {}
 while time.monotonic() < deadline:
     current = exchange({'command': 'pcap-current'})['message']
+    if current == 'None':
+        current = ''  # Suricata 7 idle PCAP sentinel.
     listed = exchange({'command': 'pcap-file-list'})['message']
     number = exchange({'command': 'pcap-file-number'})['message']
     count = listed.get('count', 0) if isinstance(listed, dict) else len(listed)
+    last = {'current': current, 'listed': listed, 'number': number, 'output_files': [p.name for p in (work/'suricata-output').iterdir()]}
     observed = observed or bool(current) or int(number) > 0 or int(count) > 0 or any((work/'suricata-output').iterdir())
     if observed and not current and int(number) == 0 and int(count) == 0:
         print(json.dumps({'commands': sorted(required), 'enqueued': added, 'drained': True}, sort_keys=True))
         break
     time.sleep(0.05) # bounded queue-state poll, not a completion assumption
 else:
-    raise RuntimeError('PCAP job did not drain before deadline')
+    raise RuntimeError('PCAP job did not drain before deadline: '+json.dumps(last, sort_keys=True))
 sock.close()
 PY
 echo 'PASS: Suricata Unix-socket PCAP commands and bounded queue drain'

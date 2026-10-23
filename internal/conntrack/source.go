@@ -21,19 +21,24 @@ var (
 	ErrUnsupportedPlatform = errors.New("conntrack source is unsupported on this platform")
 	ErrSourceClosed        = errors.New("conntrack source is closed")
 	ErrDumpIncomplete      = errors.New("conntrack dump incomplete")
+	ErrFlowNotFound        = errors.New("conntrack flow confirmed absent")
 	ErrAmbiguousIdentity   = errors.New("conntrack identity is ambiguous")
 )
 
 type Presence struct {
 	OriginalTuple bool
 	ReplyTuple    bool
-	Counters      bool
-	Timeout       bool
-	Timestamp     bool
-	ID            bool
-	Mark          bool
-	Zone          bool
-	ProtoInfo     bool
+	// Counters remains the all-directions flag for existing Source users.
+	// The directional flags preserve partial netlink updates.
+	Counters         bool
+	CountersOriginal bool
+	CountersReply    bool
+	Timeout          bool
+	Timestamp        bool
+	ID               bool
+	Mark             bool
+	Zone             bool
+	ProtoInfo        bool
 }
 
 type Record struct {
@@ -66,6 +71,7 @@ type Loss struct {
 	Count    uint64
 	At       time.Time
 	ResyncID uint64
+	Fatal    bool
 }
 
 type EventSink interface {
@@ -114,10 +120,8 @@ type SourceHealth struct {
 }
 
 func estimateRecordBytes(record Record) int64 {
-	// A conservative accounting unit for the decoded attributes handed to the
-	// runtime. The Linux adapter cannot expose the kernel's raw multipart byte
-	// count through the ti-mo API, so it charges tuple/counter metadata before
-	// invoking the bounded visitor rather than allowing an unbounded callback.
+	// FakeSource uses an approximate decoded-record charge in unit tests.
+	// LinuxSource enforces its byte limit against raw netlink datagrams.
 	return int64(256 + len(record.OriginalTuple.String()) + len(record.RawState))
 }
 
@@ -282,11 +286,26 @@ func (f *FakeSource) Get(ctx context.Context, id Identity) (Record, error) {
 	if f.closed {
 		return Record{}, ErrSourceClosed
 	}
-	r, ok := f.records[domain.ConntrackIdentity{BootID: id.BootID, NetworkNS: id.NetworkNS, Zone: id.Zone, Family: id.Family, ID: id.ID, KernelStart: id.KernelStart, Original: id.Original}]
-	if !ok {
-		return Record{}, errors.New("conntrack record not found")
+	if !id.Original.Valid() || id.ID == 0 && id.KernelStart == 0 {
+		return Record{}, ErrAmbiguousIdentity
 	}
-	return r, nil
+	var found *Record
+	for identity, record := range f.records {
+		if identity.BootID != id.BootID || identity.NetworkNS != id.NetworkNS ||
+			identity.Zone != id.Zone || identity.Family != id.Family || identity.Original != id.Original {
+			continue
+		}
+		if id.ID != 0 && identity.ID != id.ID ||
+			id.KernelStart != 0 && identity.KernelStart != id.KernelStart || found != nil {
+			return Record{}, ErrAmbiguousIdentity
+		}
+		copy := record
+		found = &copy
+	}
+	if found == nil {
+		return Record{}, ErrFlowNotFound
+	}
+	return *found, nil
 }
 
 func (f *FakeSource) Close() error {

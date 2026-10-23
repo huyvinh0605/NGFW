@@ -367,10 +367,7 @@ func (s *RuntimeServiceAdapter) RollbackConfig(ctx context.Context, author, comm
 }
 
 func compileRuntimeProgram(value domain.Config, generation uint64) (connectivity.Program, error) {
-	if domain.UsesM3(value) {
-		return connectivity.CompileM3(value, generation)
-	}
-	return connectivity.CompileM2(value, generation)
+	return connectivity.CompileForCapabilities(value, generation, connectivity.Capabilities{Inspection: true, RequestGate: true})
 }
 
 func (s *RuntimeServiceAdapter) ListSessions(_ context.Context, query domain.SessionQuery) (domain.SessionPage, error) {
@@ -398,7 +395,7 @@ func (s *RuntimeServiceAdapter) SessionStats(context.Context) (domain.RuntimeSta
 		return domain.RuntimeStats{}, errors.New("runtime unavailable")
 	}
 	v := s.Runtime.Stats()
-	return domain.RuntimeStats{ActiveSessions: v.Active, Created: v.Created, Closed: v.Closed, Invalidated: v.Invalidated, TrackingDrops: v.TrackingDrops, CapacityDrops: v.CapacityDrops, EventDrops: v.EventDrops, Resyncs: v.Resyncs}, nil
+	return domain.RuntimeStats{ActiveSessions: v.Active, Created: v.Created, Closed: v.Closed, Invalidated: v.Invalidated, TrackingDrops: v.TrackingDrops, CapacityDrops: v.CapacityDrops, EventDrops: v.EventDrops, Resyncs: v.Resyncs, DumpIncomplete: v.DumpIncomplete, LastDumpBytes: v.LastDumpBytes, LastDumpMillis: v.LastDumpMillis, GetChecks: v.GetChecks, GetUnavailable: v.GetUnavailable, ExpiryBacklog: v.ExpiryBacklog, ExpiryOldestSeconds: v.ExpiryOldestSeconds}, nil
 }
 func (s *RuntimeServiceAdapter) RuntimeHealth(context.Context) (domain.RuntimeHealth, error) {
 	if s.Runtime == nil {

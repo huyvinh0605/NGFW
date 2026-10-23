@@ -33,8 +33,14 @@ func TestDialFragmentedResponsesAndCommands(t *testing.T) {
 		}
 		defer connection.Close()
 		reader := bufio.NewReader(connection)
+		initial := true
 		for {
-			line, err := reader.ReadBytes('\n')
+			terminator := byte('\n')
+			if initial {
+				terminator = '}' // Suricata's version greeting has no newline.
+				initial = false
+			}
+			line, err := reader.ReadBytes(terminator)
 			if err != nil {
 				serverDone <- err
 				return
@@ -56,7 +62,7 @@ func TestDialFragmentedResponsesAndCommands(t *testing.T) {
 					return
 				}
 			case "command-list":
-				message = requiredCommands
+				message = `{"count":4,"commands":` + requiredCommands + `}`
 			case "pcap-file":
 				submitted <- request.Arguments
 				message = `"added"`
@@ -70,7 +76,10 @@ func TestDialFragmentedResponsesAndCommands(t *testing.T) {
 				serverDone <- ErrProtocol
 				return
 			}
-			response := []byte(`{"return":"OK","message":` + message + `}` + "\n")
+			response := []byte(`{"return":"OK","message":` + message + `}`)
+			if request.Command != "" {
+				response = append(response, '\n')
+			}
 			for _, octet := range response { // prove byte-fragmented responses are reassembled
 				if _, err := connection.Write([]byte{octet}); err != nil {
 					serverDone <- err
@@ -129,7 +138,7 @@ func TestClientRejectsMissingCapabilities(t *testing.T) {
 		}
 		defer connection.Close()
 		reader := bufio.NewReader(connection)
-		_, _ = reader.ReadBytes('\n')
+		_, _ = reader.ReadBytes('}')
 		_, _ = connection.Write([]byte(`{"return":"OK"}` + "\n"))
 		_, _ = reader.ReadBytes('\n')
 		_, _ = connection.Write([]byte(`{"return":"OK","message":["pcap-file"]}` + "\n"))
@@ -233,5 +242,20 @@ func TestClientRejectsUnownedPathsAndNullQueueState(t *testing.T) {
 	}
 	if _, err := client.QueueDepth(context.Background()); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("unknown queue depth interpreted as zero: %v", err)
+	}
+}
+
+func TestCurrentNormalizesSuricataSevenIdleSentinel(t *testing.T) {
+	clientConnection, serverConnection := net.Pipe()
+	defer serverConnection.Close()
+	client := &Client{conn: clientConnection, timeout: time.Second}
+	defer client.Close()
+	go func() {
+		_, _ = bufio.NewReader(serverConnection).ReadBytes('\n')
+		_, _ = serverConnection.Write([]byte(`{"return":"OK","message":"None"}`))
+	}()
+	current, err := client.Current(context.Background())
+	if err != nil || current != "" {
+		t.Fatalf("idle worker reported current=%q error=%v", current, err)
 	}
 }

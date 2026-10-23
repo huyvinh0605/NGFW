@@ -30,6 +30,16 @@ at most seven days, are generated only for a valid DNS/IP target, and carry
 the correct DNS or IP SAN. A client without SNI requires a verified original
 destination IP for certificate selection; no placeholder certificate is made.
 
-The current M1/M3 installer does not install the production M4 proxy command
-yet. That deployment wiring belongs to T28/T29; these commands are for
-provisioning once the M4 binary is installed, not evidence of VM acceptance.
+Install matching engine/API/proxy builds from the same checkout. The M4 asset
+installer accepts `--proxy-binary /absolute/path/ngfw-proxy` and installs an
+engine systemd drop-in adding the `ngfw-proxy` supplementary group. Restart
+the engine once after installing that drop-in: it needs this membership to
+assign its owned IPC socket to `root:ngfw-proxy` without CAP_CHOWN. The API
+account remains outside that group.
+
+After provisioning the CA, run `systemctl enable --now ngfw-proxy.service`.
+The proxy waits for the engine. Commit the M4 Candidate through the API; the
+engine first requests listener/CA/worker preparation, then applies the kernel
+snapshot. A failed preflight rejects activation. Do not install nft selector
+or policy routing by hand. Use `scripts/verify-m4-linux.sh` for collection;
+these installation steps do not by themselves constitute traffic acceptance.

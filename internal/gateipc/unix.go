@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -45,6 +47,19 @@ func (server *Server) ServeUnix(ctx context.Context, path string) error {
 	defer listener.Close()
 	if err := os.Chmod(path, 0660); err != nil {
 		return fmt.Errorf("set request-gate socket permissions: %w", err)
+	}
+	if server.SocketGroup != "" {
+		group, err := user.LookupGroup(server.SocketGroup)
+		if err != nil {
+			return fmt.Errorf("lookup request-gate socket group: %w", err)
+		}
+		gid, err := strconv.Atoi(group.Gid)
+		if err != nil {
+			return fmt.Errorf("invalid request-gate socket group ID")
+		}
+		if err := os.Chown(path, -1, gid); err != nil {
+			return fmt.Errorf("set request-gate socket group: %w", err)
+		}
 	}
 	return server.Serve(ctx, listener)
 }
