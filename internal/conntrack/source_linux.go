@@ -65,35 +65,64 @@ func (s *LinuxSource) Subscribe(ctx context.Context, sink EventSink) error {
 	s.mu.Unlock()
 	go func() {
 		buffer := make([]byte, maxConntrackDatagram)
-		for {
+		err := receiveConntrackEvents(ctx, s.networkNS, s.bootID, sink, func() ([]netlink.Message, error) {
 			messages, _, err := readNetlinkDatagram(ctx, conn, buffer)
-			if ctx.Err() != nil {
-				return
+			return messages, err
+		})
+		if err != nil {
+			// A permanently failed subscriber must not remain joined with an
+			// unread receive queue. Runtime health retains the fatal loss.
+			s.mu.Lock()
+			closeSocket := s.events == conn
+			if s.events == conn {
+				s.events = nil
 			}
-			if isReadTimeout(err) {
-				continue
-			}
-			if err != nil {
-				sink.ReportLoss(Loss{Reason: err.Error(), Count: 1, At: time.Now().UTC(), Fatal: true})
-				return
-			}
-			for _, msg := range messages {
-				if msg.Header.Type == netlink.Overrun || msg.Header.Type == netlink.Error {
-					sink.ReportLoss(Loss{Reason: "conntrack event stream overrun/error", Count: 1, At: time.Now().UTC()})
-					continue
-				}
-				record, kind, decodeErr := decodeConntrackMessage(msg, s.networkNS, s.bootID)
-				if decodeErr != nil {
-					sink.ReportLoss(Loss{Reason: decodeErr.Error(), Count: 1, At: time.Now().UTC()})
-					continue
-				}
-				if !sink.TryEnqueue(Event{Kind: kind, Record: record, Received: time.Now().UTC()}) {
-					sink.ReportLoss(Loss{Reason: "event sink queue full", Count: 1, At: time.Now().UTC()})
-				}
+			s.mu.Unlock()
+			if closeSocket {
+				_ = conn.Close()
 			}
 		}
 	}()
 	return nil
+}
+
+func receiveConntrackEvents(ctx context.Context, networkNS, bootID string, sink EventSink, read func() ([]netlink.Message, error)) error {
+	for {
+		messages, err := read()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if isReadTimeout(err) || errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			// ENOBUFS reports lost multicast messages, not a broken socket.
+			// A malformed/truncated datagram has also already been consumed.
+			// Report the gap for resync and keep draining; otherwise one burst
+			// (including events queued while a VM was suspended) permanently
+			// stops NEW/UPDATE/DESTROY observation until engine restart.
+			fatal := !errors.Is(err, unix.ENOBUFS) && !errors.Is(err, ErrDumpIncomplete)
+			sink.ReportLoss(Loss{Reason: err.Error(), Count: 1, At: time.Now().UTC(), Fatal: fatal})
+			if fatal {
+				return err
+			}
+			continue
+		}
+		for _, msg := range messages {
+			if msg.Header.Type == netlink.Overrun || msg.Header.Type == netlink.Error {
+				sink.ReportLoss(Loss{Reason: "conntrack event stream overrun/error", Count: 1, At: time.Now().UTC()})
+				continue
+			}
+			record, kind, decodeErr := decodeConntrackMessage(msg, networkNS, bootID)
+			if decodeErr != nil {
+				sink.ReportLoss(Loss{Reason: decodeErr.Error(), Count: 1, At: time.Now().UTC()})
+				continue
+			}
+			if !sink.TryEnqueue(Event{Kind: kind, Record: record, Received: time.Now().UTC()}) {
+				sink.ReportLoss(Loss{Reason: "event sink queue full", Count: 1, At: time.Now().UTC()})
+			}
+		}
+	}
 }
 
 func (s *LinuxSource) Dump(ctx context.Context, limits DumpLimits, visit func(Record) error) (DumpResult, error) {
@@ -155,6 +184,7 @@ func (s *LinuxSource) Close() error {
 	}
 	s.closed = true
 	events := s.events
+	s.events = nil
 	s.mu.Unlock()
 	if events != nil {
 		return events.Close()
