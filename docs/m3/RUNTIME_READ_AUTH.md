@@ -16,9 +16,11 @@ selected protocol. Malformed and multiple credential protocols are rejected.
 The console reopens its sockets when its token changes and does not dial while
 no token is set. Production access should use a TLS-protected management channel.
 
-Embedded test APIs without either authentication mechanism retain their
-existing unauthenticated behavior. This is not an anonymous-read exception for
-an appliance configured with a token.
+The production API executable refuses to start without an API token or a
+complete admin credential pair. It rejects that configuration before opening
+a listener or creating state. Embedded APIs without either authentication
+mechanism retain their existing behavior for compatibility; that mode cannot
+be exposed by an appliance that uses the production executable.
 
 Regressions exercise anonymous/invalid credentials, all three roles, configuration
 write denial, logout, WebSocket authentication before upgrade, ambiguous

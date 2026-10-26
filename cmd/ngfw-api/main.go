@@ -19,6 +19,12 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Embedded APIs may omit auth in tests. The appliance executable must never
+	// expose runtime data in that mode because credentials were left unset.
+	if os.Getenv("NGFW_API_TOKEN") == "" && (os.Getenv("NGFW_ADMIN_USER") == "" || os.Getenv("NGFW_ADMIN_PASSWORD") == "") {
+		logger.Error("management authentication not configured; set NGFW_API_TOKEN or both NGFW_ADMIN_USER and NGFW_ADMIN_PASSWORD")
+		os.Exit(1)
+	}
 	stateRoot := os.Getenv("NGFW_STATE_DIR")
 	if stateRoot == "" {
 		stateRoot = filepath.Join(".", "state")
