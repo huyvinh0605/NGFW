@@ -113,14 +113,14 @@ if [[ $skip_apt -eq 0 ]]; then
     tcpdump
   )
   if [[ $with_inspection -eq 1 ]]; then
-    packages+=(python3 suricata)
+    packages+=(acl python3 suricata)
   fi
   apt-get install -y --no-install-recommends "${packages[@]}"
 fi
 
 required_commands=(go ip nft sysctl systemctl curl jq tcpdump conntrack openssl)
 if [[ $with_inspection -eq 1 ]]; then
-  required_commands+=(python3 suricata sha256sum)
+  required_commands+=(python3 suricata sha256sum setfacl runuser)
 fi
 for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null 2>&1 || die "required command is missing: $command_name"
@@ -193,6 +193,7 @@ install -o root -g root -m 0644 deploy/91-ngfw-conntrack.conf /etc/sysctl.d/91-n
 
 if [[ $with_inspection -eq 1 ]]; then
   info "Installing opt-in M3 inspection assets"
+  install -o root -g root -m 0755 scripts/configure-inspection-access.sh /usr/local/lib/ngfw/configure-inspection-access.sh
   install -o root -g root -m 0755 scripts/start-suricata-sensor.sh /usr/local/libexec/ngfw/start-suricata-sensor.sh
   install -o root -g root -m 0755 scripts/rotate-suricata-logs.sh /usr/local/libexec/ngfw/rotate-suricata-logs.sh
   install -o root -g root -m 0755 tests/integration/m3/probe-capabilities.sh /usr/local/lib/ngfw/probe-m3-capabilities.sh
@@ -250,8 +251,9 @@ if [[ $with_inspection -eq 1 ]]; then
   chmod 0640 "$manifest_tmp"
   mv -f -- "$manifest_tmp" /etc/ngfw/inspection/manifest.json
 
-  suricata -T -c /etc/ngfw/inspection/ids.yaml || die "Suricata rejected /etc/ngfw/inspection/ids.yaml"
-  suricata -T -c /etc/ngfw/inspection/ips.yaml || die "Suricata rejected /etc/ngfw/inspection/ips.yaml"
+  /usr/local/lib/ngfw/configure-inspection-access.sh
+  runuser -u ngfw-inspect -- suricata -T -c /etc/ngfw/inspection/ids.yaml -l /var/lib/ngfw/inspection/ids || die "Sensor user cannot load /etc/ngfw/inspection/ids.yaml"
+  runuser -u ngfw-inspect -- suricata -T -c /etc/ngfw/inspection/ips.yaml -l /var/lib/ngfw/inspection/ips || die "Sensor user cannot load /etc/ngfw/inspection/ips.yaml"
   /usr/local/lib/ngfw/replay-m3-suricata.sh --evidence-dir /var/lib/ngfw/inspection/install-replay || die "Suricata offline marker replay failed"
 fi
 
@@ -306,6 +308,8 @@ if [[ $with_inspection -eq 1 ]]; then
   chmod 0750 /var/lib/ngfw/inspection
   chown ngfw-inspect:ngfw-inspect /var/lib/ngfw/inspection/ids /var/lib/ngfw/inspection/ips
   chmod 0750 /var/lib/ngfw/inspection/ids /var/lib/ngfw/inspection/ips
+  # Recheck after the final parent chmod and management environment creation.
+  /usr/local/lib/ngfw/configure-inspection-access.sh
 fi
 
 info "Enabling IPv4 forwarding"

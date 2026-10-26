@@ -44,6 +44,7 @@ mv -f -- "$epoch_tmp" "$runtime_path/sensor.epoch"
 
 common_args=(
   -c "$config_path"
+  -l "$runtime_path"
   --runmode workers
   --pidfile "$runtime_path/suricata.pid"
 )

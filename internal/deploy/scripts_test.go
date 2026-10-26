@@ -130,7 +130,7 @@ func TestM3DeploymentContractsAreExplicitAndLeastPrivilege(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(data)
+		return strings.ReplaceAll(string(data), "\r\n", "\n")
 	}
 	apiUnit := read("deploy/ngfw-api.service")
 	if strings.Contains(apiUnit, "CAP_NET_ADMIN") || strings.Contains(apiUnit, "ngfw-inspect") {
