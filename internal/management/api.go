@@ -131,7 +131,10 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 		}
 		if a.Auth != nil {
 			if user, ok := a.Auth.Validate(provided); ok {
-				if r.Method != http.MethodGet && user.Role == auth.RoleViewer {
+				// Logging out only revokes the caller's own session. A viewer must
+				// be able to revoke its token even though other writes are forbidden.
+				viewerLogout := r.URL.Path == "/api/v1/auth/logout" && r.Method == http.MethodPost
+				if r.Method != http.MethodGet && user.Role == auth.RoleViewer && !viewerLogout {
 					writeError(w, http.StatusForbidden, "FORBIDDEN", "viewer role is read-only")
 					return
 				}
@@ -170,6 +173,10 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"success": true, "data": map[string]any{"token": token, "user": user}})
 }
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "POST required")
+		return
+	}
 	a.auditAction(r, "LOGOUT", "auth", "", "SUCCESS", "")
 	if a.Auth != nil {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")

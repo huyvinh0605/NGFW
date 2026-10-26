@@ -68,7 +68,16 @@ func TestInspectionReadsRequireAuthenticatedViewer(t *testing.T) {
 			t.Fatalf("%s config mutation status=%d", role, response.StatusCode)
 		}
 	}
-	api.Auth.Logout(tokens["viewer"])
+	logout, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/auth/logout", nil)
+	logout.Header.Set("Authorization", "Bearer "+tokens["viewer"])
+	loggedOut, err := http.DefaultClient.Do(logout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loggedOut.Body.Close()
+	if loggedOut.StatusCode != http.StatusOK {
+		t.Fatalf("viewer logout status=%d, want 200", loggedOut.StatusCode)
+	}
 	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/sessions", nil)
 	request.Header.Set("Authorization", "Bearer "+tokens["viewer"])
 	response, err := http.DefaultClient.Do(request)
@@ -78,6 +87,26 @@ func TestInspectionReadsRequireAuthenticatedViewer(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatal("logged-out token still reads sessions")
+	}
+	getLogout, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/auth/logout", nil)
+	getLogout.Header.Set("Authorization", "Bearer "+tokens["operator"])
+	methodResponse, err := http.DefaultClient.Do(getLogout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methodResponse.Body.Close()
+	if methodResponse.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET logout status=%d, want 405", methodResponse.StatusCode)
+	}
+	stillValid, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/sessions", nil)
+	stillValid.Header.Set("Authorization", "Bearer "+tokens["operator"])
+	validResponse, err := http.DefaultClient.Do(stillValid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validResponse.Body.Close()
+	if validResponse.StatusCode != http.StatusOK {
+		t.Fatalf("GET logout revoked operator token: status=%d", validResponse.StatusCode)
 	}
 }
 
