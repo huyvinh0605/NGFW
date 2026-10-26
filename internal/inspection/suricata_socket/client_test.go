@@ -186,7 +186,7 @@ func TestClientResponseLimitAndCancellation(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := client.CommandList(ctx); !errors.Is(err, ErrUnavailable) {
+	if _, err := client.CommandList(ctx); !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout was not unavailable: %v", err)
 	}
 	if _, err := client.CommandList(context.Background()); !errors.Is(err, ErrUnavailable) {

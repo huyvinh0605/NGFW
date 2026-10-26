@@ -31,7 +31,9 @@ func (session *fakeSession) Close() error {
 
 func poolConfig(t *testing.T) Config {
 	t.Helper()
-	return Config{RootDir: t.TempDir(), WorkerCount: 1, QueueItems: 1, QueueBytes: 64 << 10, RequestTimeout: time.Second}
+	// Let the pool provision its private directory; Go 1.22's t.TempDir
+	// itself can be 0755 under the normal Ubuntu umask.
+	return Config{RootDir: filepath.Join(t.TempDir(), "pool"), WorkerCount: 1, QueueItems: 1, QueueBytes: 64 << 10, RequestTimeout: time.Second}
 }
 
 func sampleRequest() inspection.GateHTTPRequest {
@@ -66,6 +68,12 @@ func TestPoolJobIsolationAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(config.RootDir)
+		if err != nil || info.Mode().Perm() != 0700 {
+			t.Fatalf("pool root is not private: %v %v", info, err)
+		}
+	}
 	result, err := pool.Inspect(context.Background(), "request-1", sampleRequest())
 	if err != nil || result.RequestID != "request-1" || result.WorkerID != 0 || len(result.EVE) == 0 {
 		t.Fatalf("wrong result: %#v %v", result, err)

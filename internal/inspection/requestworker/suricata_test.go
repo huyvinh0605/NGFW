@@ -1,7 +1,6 @@
 package requestworker
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,18 +37,26 @@ func TestSuricataSessionRequiresDrainAndJobLocalEVE(t *testing.T) {
 					return
 				}
 				defer connection.Close()
-				reader := bufio.NewReader(connection)
+				// Negotiate the same JSON stream as Suricata: the initial
+				// version object has no newline, subsequent commands do.
+				decoder := json.NewDecoder(connection)
+				negotiated := false
 				pcap := ""
 				for {
-					line, err := reader.ReadBytes('\n')
-					if err != nil {
-						return
-					}
 					var request struct {
+						Version   string            `json:"version"`
 						Command   string            `json:"command"`
 						Arguments map[string]string `json:"arguments"`
 					}
-					if json.Unmarshal(line, &request) != nil {
+					if decoder.Decode(&request) != nil {
+						return
+					}
+					if !negotiated {
+						if request.Version != "0.1" || request.Command != "" {
+							return
+						}
+						negotiated = true
+					} else if request.Version != "" || request.Command == "" {
 						return
 					}
 					message := any(nil)

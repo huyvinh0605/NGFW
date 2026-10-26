@@ -51,7 +51,7 @@ func testVerifiedTLSServer(t *testing.T, cert tls.Certificate) (netip.AddrPort, 
 }
 
 func TestDialVerifiedUpstreamUsesOriginalIPAndHostname(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	certPath := filepath.Join(dir, "ca.crt")
 	ca, err := inspection.InitMITMCA(certPath, filepath.Join(dir, "ca.key"))
 	if err != nil {
@@ -96,7 +96,7 @@ func TestDialVerifiedUpstreamUsesOriginalIPAndHostname(t *testing.T) {
 }
 
 func TestDialVerifiedUpstreamIPCertificateAndConnectFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	certPath := filepath.Join(dir, "ca.crt")
 	ca, err := inspection.InitMITMCA(certPath, filepath.Join(dir, "ca.key"))
 	if err != nil {

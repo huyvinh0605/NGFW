@@ -245,7 +245,7 @@ func TestHTTP1RequestGateRejectsInvalidEngineAllow(t *testing.T) {
 }
 
 func TestHTTP1RequestGateVerifiedHTTPSHTTP1(t *testing.T) {
-	directory := t.TempDir()
+	directory := filepath.Join(t.TempDir(), "ca")
 	certPath := filepath.Join(directory, "ca.crt")
 	ca, err := inspection.InitMITMCA(certPath, filepath.Join(directory, "ca.key"))
 	if err != nil {
@@ -405,7 +405,7 @@ func TestHTTP1RequestGateOversizeUsesEngineVerdictAndRawReplay(t *testing.T) {
 }
 
 func TestHTTP2RequestGateIsolatesConcurrentStreamsBeforeUpstream(t *testing.T) {
-	directory := t.TempDir()
+	directory := filepath.Join(t.TempDir(), "ca")
 	certPath := filepath.Join(directory, "ca.crt")
 	ca, err := inspection.InitMITMCA(certPath, filepath.Join(directory, "ca.key"))
 	if err != nil {

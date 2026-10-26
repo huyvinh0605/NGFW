@@ -212,7 +212,7 @@ func TestGateConnectionTLSTunnelReplaysExactClientHello(t *testing.T) {
 }
 
 func TestGateConnectionDecryptTerminatesTLSWithoutUpstreamDial(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	ca, err := inspection.InitMITMCA(filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key"))
 	if err != nil {
 		t.Fatal(err)

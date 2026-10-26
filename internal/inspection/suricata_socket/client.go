@@ -258,6 +258,15 @@ func transportError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return errors.Join(ErrUnavailable, ctx.Err())
 	}
+	// The socket deadline and the context timer expire independently. Network
+	// I/O can report its timeout just before the context timer is scheduled;
+	// preserve the deadline cause even in that ordering.
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			return errors.Join(ErrUnavailable, context.DeadlineExceeded, err)
+		}
+	}
 	if err == nil {
 		return ErrUnavailable
 	}

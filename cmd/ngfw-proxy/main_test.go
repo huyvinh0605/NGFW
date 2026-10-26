@@ -7,7 +7,7 @@ import (
 )
 
 func TestCACommandRequiresExplicitInit(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	certPath, keyPath := filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key")
 	t.Setenv("NGFW_PROXY_CA_CERT", certPath)
 	t.Setenv("NGFW_PROXY_CA_KEY", keyPath)

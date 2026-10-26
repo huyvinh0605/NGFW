@@ -11,7 +11,7 @@ import (
 )
 
 func TestMITMCAExplicitInitAndNoRuntimeFallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	certPath, keyPath := filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key")
 	if _, err := LoadMITMCA(certPath, keyPath); err == nil {
 		t.Fatal("runtime silently generated a missing CA")
@@ -24,6 +24,10 @@ func TestMITMCAExplicitInitAndNoRuntimeFallback(t *testing.T) {
 		t.Fatalf("explicit init failed: %v", err)
 	}
 	if runtime.GOOS != "windows" {
+		directory, err := os.Stat(dir)
+		if err != nil || directory.Mode().Perm() != 0700 {
+			t.Fatalf("CA directory mode = %v, %v", directory, err)
+		}
 		stat, err := os.Stat(keyPath)
 		if err != nil || stat.Mode().Perm() != 0600 {
 			t.Fatalf("private key mode = %v, %v", stat, err)
@@ -60,7 +64,7 @@ func TestMITMCAExplicitInitAndNoRuntimeFallback(t *testing.T) {
 }
 
 func TestMITMCABoundedLRUTTLAndConcurrentDedup(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	ca, err := InitMITMCA(filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key"))
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +128,7 @@ func TestMITMCABoundedLRUTTLAndConcurrentDedup(t *testing.T) {
 }
 
 func TestMITMCARejectsUnsafeArtifacts(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ca")
 	certPath, keyPath := filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key")
 	if _, err := InitMITMCA(certPath, keyPath); err != nil {
 		t.Fatal(err)
@@ -140,7 +144,7 @@ func TestMITMCARejectsUnsafeArtifacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	otherDir := t.TempDir()
+	otherDir := filepath.Join(t.TempDir(), "other-ca")
 	_, err := InitMITMCA(filepath.Join(otherDir, "other.crt"), filepath.Join(otherDir, "other.key"))
 	if err != nil {
 		t.Fatal(err)
