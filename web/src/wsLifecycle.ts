@@ -13,6 +13,16 @@ export const SOCKET_OPEN = 1;
 // without opening a WebSocket which would immediately be closed again.
 export const INITIAL_WEBSOCKET_DIAL_DELAY_MS = 150;
 
+// Browser WebSocket has no Authorization header option. Keep credentials out
+// of URLs; the server selects ngfw.v1 and never echoes the credential protocol.
+export function authenticatedSocketProtocols(token: string): string[] {
+  if (!token) return [];
+  const bytes = new TextEncoder().encode(token);
+  const encoded = btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return ["ngfw.v1", `ngfw.auth.${encoded}`];
+}
+
 export function reconnectDelay(attempt: number, baseMillis = 1000, maximumMillis = 30000): number {
   const exponent = Math.max(0, Math.min(10, Math.floor(attempt)));
   return Math.min(maximumMillis, baseMillis * (2 ** exponent));

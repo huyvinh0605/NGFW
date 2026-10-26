@@ -108,19 +108,23 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/stats/threats", a.stats)
 	mux.HandleFunc("/api/v1/ml/status", a.mlStatus)
 	mux.HandleFunc("/api/v1/reputation", a.reputation)
-	mux.Handle("/ws/events", websocket.Handler(a.wsEvents))
-	mux.Handle("/ws/stats", websocket.Handler(a.wsStats))
+	mux.Handle("/ws/events", authenticatedWebSocket(a.wsEvents))
+	mux.Handle("/ws/stats", authenticatedWebSocket(a.wsStats))
 	return logging(recoverer(a.authMiddleware(mux)), a.Logger)
 }
 
 func (a *API) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		publicRead := r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/v1/users") && r.URL.Path != "/api/v1/request-gate/evidence"
-		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/v1/auth/login" || publicRead {
+		protectedRead := runtimeReadPath(r.URL.Path) && (a.Token != "" || a.Auth != nil)
+		publicRead := r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/v1/users") && r.URL.Path != "/api/v1/request-gate/evidence" && !protectedRead
+		if (!strings.HasPrefix(r.URL.Path, "/api/") && !protectedRead) || r.URL.Path == "/api/v1/auth/login" || publicRead {
 			next.ServeHTTP(w, r)
 			return
 		}
 		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if provided == "" && protectedRead && strings.HasPrefix(r.URL.Path, "/ws/") {
+			provided = webSocketCredential(r)
+		}
 		if a.Token != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(a.Token)) == 1 {
 			next.ServeHTTP(w, r)
 			return
@@ -811,8 +815,12 @@ func validateCandidateConfig(candidate domain.Config) []string {
 	if errs := config.UnreachablePolicyErrorsForConfig(candidate); len(errs) != 0 {
 		return errs
 	}
-	if _, err := connectivity.CompileM2(candidate, 1); err != nil {
-		return []string{"M2 runtime compatibility: " + err.Error()}
+	// Match the authoritative engine's milestone selection. CompileM2 is
+	// intentionally strict and rejects profile references; applying it to an
+	// enabled M3/M4 candidate makes a valid request-gate policy impossible to
+	// save through the management API.
+	if _, err := connectivity.CompileForCapabilities(candidate, 1, connectivity.Capabilities{Inspection: true, RequestGate: true}); err != nil {
+		return []string{"runtime compatibility: " + err.Error()}
 	}
 	return nil
 }

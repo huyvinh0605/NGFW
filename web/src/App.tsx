@@ -22,7 +22,7 @@ import {
 import { normalizeServiceList } from "./policy";
 import { normalizeInspectionCapabilities, normalizeInspectionHealth, normalizeThreatEventPageData } from "./inspectionData";
 import { ApplicationBadge, InspectionBadge, InspectionHealthPanel, SessionInspectionDetails } from "./inspectionComponents";
-import { closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay, requiresEventCatchup } from "./wsLifecycle";
+import { authenticatedSocketProtocols, closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay, requiresEventCatchup } from "./wsLifecycle";
 import type {
   AuditEntry,
   ConfigExport,
@@ -366,6 +366,7 @@ export default function App() {
   }, [initialNavigation]);
 
   useEffect(() => {
+    if (!token) return;
     let stopped = false;
     const sockets = new Set<WebSocket>();
     const timers = new Set<number>();
@@ -378,7 +379,7 @@ export default function App() {
         if (stopped) return;
         const active = current.get(path);
         if (active && (active.readyState === WebSocket.CONNECTING || active.readyState === WebSocket.OPEN)) return;
-        const socket = new WebSocket(`${scheme}://${window.location.host}${path}`);
+        const socket = new WebSocket(`${scheme}://${window.location.host}${path}`, authenticatedSocketProtocols(token));
         sockets.add(socket);
         current.set(path, socket);
         socket.onopen = () => {
@@ -439,7 +440,7 @@ export default function App() {
       sockets.forEach((socket) => closeSocketAfterOpen(socket));
       current.clear();
     };
-  }, [loadLive]);
+  }, [loadLive, token]);
 
   const requireAccess = useCallback(() => {
     if (token) return true;
