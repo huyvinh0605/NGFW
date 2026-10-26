@@ -1,6 +1,6 @@
 # M3 acceptance matrix
 
-Trạng thái acceptance 2026-09-28: **tất cả kịch bản Ubuntu dưới đây NOT_RUN**.
+M3-03 Candidate workflow: **PASS on the Ubuntu VM on 2026-10-26**. See its row for evidence and scope; other recorded rows are outside this repair.
 Source đã được triển khai và các gate cục bộ được ghi riêng trong
 [implementation status](m3/IMPLEMENTATION_STATUS.md). Tài liệu này không phải
 bằng chứng M3 đã chạy trên appliance. Xem [master spec](M3_IMPLEMENTATION_PLAN.md),
@@ -18,7 +18,7 @@ integration và live network evidence ghi ở hai cột trạng thái khác nhau
 | M3-00 | M1/M2 baseline trên cùng topology hoạt động trước khi bật M3 | T00/T29 | Existing suites | M1/M2 matrices, original configs, versions | NOT_RUN | NOT_RUN |
 | M3-01 | Suricata có NFLOG/NFQ/socket và nft support đúng schema | T01/T16/T17 | Fake capability failure | build-info, nft syntax, namespace capture/queue probe | NOT_RUN | NOT_RUN |
 | M3-02 | M3 OFF giữ L3 routing/firewall/NAT/cache M2; không cần sensor | T03/T18/T21 | OFF compile equivalence | LAN/WAN, DNAT, established, default deny khi không Suricata | NOT_RUN | NOT_RUN |
-| M3-03 | Candidate save/load/validate không apply/version increment | T03/T26 | No-side-effect + revision tests | Running hash/nft hash trước-sau; audit không COMMIT | NOT_RUN | NOT_RUN |
+| M3-03 | Candidate save/load/validate không apply/version increment | T03/T26 | No-side-effect + revision tests | Running hash/nft hash trước-sau; audit không COMMIT | PASS (7 runner regressions; management no-activation/revision tests) | PASS (25 VM assertions; [root cause and accepted scope](m3/M3_03_CANDIDATE_ACCEPTANCE.md)) |
 | M3-04 | Bad profile/mode/fail mode/risk/TLS/app config bị từ chối backend | T03/T04/T05 | Table-driven validation | API400, kernel/running unchanged | NOT_RUN | NOT_RUN |
 | M3-05 | Rules early-App-ID chạy trước khi long-lived flow đóng | T10/T16 | EVE parser + real PCAP replay | HTTP/TLS/DNS/SSH observation khi connection còn active | NOT_RUN | NOT_RUN |
 | M3-06 | HTTP nhận diện bằng evidence, có source/confidence | T10/T15 | Request/response + wrong-port fixtures | API context+EVE cùng session; HTTP cổng khác80 vẫn đúng nếu parser hỗ trợ | NOT_RUN | NOT_RUN |

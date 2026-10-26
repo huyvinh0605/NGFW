@@ -223,3 +223,20 @@ Nghiệm thu cần toàn ma trận mandatory PASS, không chỉ checklist A–I 
 
 Mọi fixture/harness mới cần giữ raw results đủ để một người khác lặp lại.
 Không ghi “pass toàn bộ” nếu chỉ chạy unit tests trên Windows.
+
+### M3-03 Candidate operations without activation
+
+`lab_candidate_acceptance.py` saves an IDS Candidate, reads it back, validates
+it, edits the revision and validates again without committing. It records full
+API responses and before/after kernel/service snapshots, then restores the
+operator draft. Supply `NGFW_LAB_PASSWORD` and use a fresh evidence directory:
+
+```bash
+python -m unittest discover -s tests/integration/m3 -p test_lab_candidate_acceptance.py -v
+python tests/integration/m3/lab_candidate_acceptance.py --evidence-dir artifacts/m3-03-new-run
+```
+
+See [scope, corrected runner failure and VM result](../../../docs/m3/M3_03_CANDIDATE_ACCEPTANCE.md).
+A missing or null config member fails explicitly; it is never substituted for
+an absent envelope-level key. Candidate normalization during restore is checked
+without allowing real policy changes. No Commit/Rollback request is made.
