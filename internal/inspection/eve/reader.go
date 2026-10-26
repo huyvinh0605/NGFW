@@ -172,7 +172,41 @@ func (r *Reader) Run(ctx context.Context, sink inspection.ObservationSink) error
 					continue
 				}
 			}
-			generation = observedGeneration
+			// The path may have rotated between Stat and Open. Attribute bytes
+			// to the inode actually opened, and re-read the launcher's epoch
+			// after Open. It publishes the new epoch before creating new EVE;
+			// an earlier epoch read in this loop can therefore be stale.
+			openedInfo, statErr := current.Stat()
+			if statErr != nil {
+				_ = current.Close()
+				current = nil
+				r.setHealth("DEGRADED", "opened EVE stat failed: "+statErr.Error(), nil)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-ticker.C:
+				}
+				continue
+			}
+			if r.EpochPath != "" {
+				openedEpoch, epochErr := readSensorEpoch(r.EpochPath)
+				if epochErr != nil || openedEpoch != r.sourcePosition().SensorEpoch {
+					_ = current.Close()
+					current = nil
+					generation, offset = "", 0
+					if epochErr != nil {
+						r.setHealth("DEGRADED", "sensor epoch unavailable: "+epochErr.Error(), nil)
+						select {
+						case <-ctx.Done():
+							return nil
+						case <-ticker.C:
+						}
+					} // A changed valid epoch is handled at the top of the next loop.
+					continue
+				}
+			}
+			info = openedInfo
+			generation = r.Files.Generation(info)
 			offset = 0
 			if checkpoint.FileGeneration == generation && checkpoint.SensorEpoch == r.sourcePosition().SensorEpoch && checkpoint.Offset <= info.Size() {
 				offset = checkpoint.Offset

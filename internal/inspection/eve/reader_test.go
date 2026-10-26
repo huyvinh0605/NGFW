@@ -108,6 +108,31 @@ func TestReaderCountsQueueLossWithoutBlocking(t *testing.T) {
 	}
 }
 
+// Block the second path Stat after the reader has read the previous epoch.
+// The launcher can complete a real rotation during that gap.
+type epochRaceFileSource struct {
+	OSFileSource
+	mu      sync.Mutex
+	stats   int
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *epochRaceFileSource) Stat(path string) (os.FileInfo, error) {
+	f.mu.Lock()
+	f.stats++
+	count := f.stats
+	f.mu.Unlock()
+	if count == 2 {
+		close(f.entered)
+		<-f.release
+	}
+	return f.OSFileSource.Stat(path)
+}
+
+func (f *epochRaceFileSource) unblock() { f.once.Do(func() { close(f.release) }) }
+
 func TestReaderSwitchesSensorEpochWithoutReusingEventIdentity(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "eve.json")
@@ -120,32 +145,52 @@ func TestReaderSwitchesSensorEpochWithoutReusingEventIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := NewReader(path, inspection.SourcePosition{SensorID: "ids", SensorEpoch: "install-epoch", Mode: domain.InspectionModeIDS}, nil)
+	source := &epochRaceFileSource{entered: make(chan struct{}), release: make(chan struct{})}
+	reader.Files = source
 	reader.EpochPath = epochPath
 	reader.PollInterval = 5 * time.Millisecond
 	sink := &collectingSink{}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer source.unblock()
 	done := make(chan error, 1)
 	go func() { done <- reader.Run(ctx, sink) }()
 	waitForItems(t, sink, 1)
+	select {
+	case <-source.entered:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not reach the epoch/Stat rotation window")
+	}
 
 	if err := os.Rename(path, filepath.Join(dir, "eve.json.old")); err != nil {
+		source.unblock()
 		cancel()
 		<-done
 		t.Skipf("platform cannot rename an open EVE fixture: %v", err)
+	}
+	// Match the launcher contract: rotate the old EVE, atomically publish
+	// the new epoch, then let the new process create its EVE file.
+	epochTemporary := filepath.Join(dir, ".sensor.epoch.new")
+	if err := os.WriteFile(epochTemporary, []byte("epoch-two\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(epochTemporary, epochPath); err != nil {
+		t.Fatal(err)
 	}
 	second := []byte("{\"timestamp\":\"2026-09-23T00:00:01Z\",\"event_type\":\"flow\",\"flow_id\":2}\n")
 	if err := os.WriteFile(path, second, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(epochPath, []byte("epoch-two\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	source.unblock()
 	waitForItems(t, sink, 2)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	items := sink.Items()
+	if len(items) != 2 {
+		t.Fatalf("rotated EVE produced %d observations, want exactly 2: %#v", len(items), items)
+	}
 	if items[0].Source.SensorEpoch != "epoch-one" || items[1].Source.SensorEpoch != "epoch-two" {
 		t.Fatalf("sensor epochs were not separated: %#v", items)
 	}
