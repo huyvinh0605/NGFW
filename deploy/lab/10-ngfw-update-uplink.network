@@ -1,0 +1,37 @@
+# Optional lab update uplink. Install in /etc/systemd/network/ explicitly.
+# Reserve IPv4 rule priorities 10000/10010 and routing table 108 first.
+[Match]
+Name=ens40
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=no
+DNSDefaultRoute=yes
+Domains=~.
+
+[DHCPv4]
+UseDNS=yes
+UseDomains=no
+UseHostname=no
+UseMTU=no
+UseRoutes=yes
+RouteTable=108
+RouteMetric=200
+
+# Keep specific main-table routes for locally generated lab/MGMT traffic.
+[RoutingPolicyRule]
+Family=ipv4
+IncomingInterface=lo
+Table=main
+Priority=10000
+SuppressPrefixLength=0
+
+# Only locally generated traffic can use this DHCP-provided Internet default.
+[RoutingPolicyRule]
+Family=ipv4
+IncomingInterface=lo
+Table=108
+Priority=10010
