@@ -145,10 +145,25 @@ func ThreatFromObservation(obs inspection.Observation, session domain.RuntimeSes
 			event.PacketVerdict = *obs.Alert.PacketVerdict
 		}
 		event.Severity = mapSuricataSeverity(obs.Alert.Severity)
-		if strings.EqualFold(event.PacketVerdict, "drop") || strings.EqualFold(event.PacketVerdict, "blocked") {
-			event.Verdict = domain.VerdictDrop
-			if selection.Mode == domain.InspectionModeIPS {
-				event.Enforcement = domain.EnforcementResult{Mechanism: domain.EnforcementSuricataNFQueue, Scope: domain.EnforcementScopePacket, RequestedAction: domain.DecisionDrop, Status: domain.EnforcementReported, Reason: "packet verdict reported by Suricata", ObservedAt: cloneTime(obs.ObservedAt)}
+		packetDrop := strings.EqualFold(event.PacketVerdict, "drop") || strings.EqualFold(event.PacketVerdict, "blocked")
+		signatureBlocked := strings.EqualFold(event.SignatureAction, "blocked")
+		if obs.Source.Mode != domain.InspectionModeIPS && (packetDrop || signatureBlocked) {
+			// IDS cannot enforce an inline verdict. Preserve the raw evidence
+			// and expose the inconsistency instead of claiming a kernel DROP.
+			event.Verdict = domain.VerdictUnknown
+			event.Enforcement.Reason = "non-inline sensor reported blocked traffic; inline enforcement unavailable"
+		} else if obs.Source.Mode == domain.InspectionModeIPS {
+			reason := ""
+			if packetDrop {
+				reason = "packet verdict reported by Suricata"
+			} else if signatureBlocked && strings.TrimSpace(event.PacketVerdict) == "" {
+				// Suricata 7 may emit only alert.action. This is a signature's
+				// report, so keep packet_verdict absent and never mark APPLIED.
+				reason = "signature action reported blocked; final packet verdict unavailable"
+			}
+			if reason != "" {
+				event.Verdict = domain.VerdictDrop
+				event.Enforcement = domain.EnforcementResult{Mechanism: domain.EnforcementSuricataNFQueue, Scope: domain.EnforcementScopePacket, RequestedAction: domain.DecisionDrop, Status: domain.EnforcementReported, Reason: reason, ObservedAt: cloneTime(obs.ObservedAt)}
 			}
 		}
 	}
