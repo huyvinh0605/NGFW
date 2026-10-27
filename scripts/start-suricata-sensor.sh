@@ -46,8 +46,11 @@ common_args=(
   -c "$config_path"
   -l "$runtime_path"
   --runmode workers
-  --pidfile "$runtime_path/suricata.pid"
 )
+
+# Type=simple tracks this foreground process directly. An explicit Suricata
+# pidfile survives initialization failures and would block every subsequent
+# systemd retry even though the previous process has exited.
 
 if [[ "$mode" == "ids" ]]; then
   exec "$suricata_binary" "${common_args[@]}" --nflog=100

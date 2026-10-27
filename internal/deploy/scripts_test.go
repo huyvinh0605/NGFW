@@ -112,6 +112,9 @@ func TestSensorLauncherUsesLiveCaptureModeAndNotPCAPSocketMode(t *testing.T) {
 		if strings.Contains(joined, "--unix-socket") {
 			t.Fatalf("%s launcher selected Suricata PCAP socket runmode: %s", test.mode, joined)
 		}
+		if strings.Contains(joined, "--pidfile") || strings.Contains(argsAsLines(payload), "\n-D\n") {
+			t.Fatalf("%s Type=simple launcher must stay foreground without a stale pidfile: %s", test.mode, joined)
+		}
 		for _, expected := range test.want {
 			if !strings.Contains(argsAsLines(payload), expected) {
 				t.Fatalf("%s launcher missing %q: %s", test.mode, expected, joined)

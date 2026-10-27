@@ -13,6 +13,7 @@ rule-files:
 nflog:
   - group: 100
     buffer-size: 18432
+    max-size: 20000
     qthreshold: 1
     qtimeout: 100
 stream:
