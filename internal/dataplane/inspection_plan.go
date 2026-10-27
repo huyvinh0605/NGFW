@@ -143,7 +143,9 @@ func renderInspectionDirection(policy domain.SecurityPolicy, selection connectiv
 		comment := fmt.Sprintf(`comment "m3:%s:%s"`, policy.ID, map[bool]string{true: "reply", false: "original"}[reverse])
 		switch selection.Mode {
 		case domain.InspectionModeIDS:
-			lines = append(lines, strings.Join(append(parts, "counter", "log group 100 snaplen 0 queue-threshold 1", comment), " "))
+			// An explicit zero snaplen sets NF_LOG_F_COPY_LEN and copies no
+			// packet bytes. IDS needs the packet payload for stream/App-ID.
+			lines = append(lines, strings.Join(append(parts, "counter", "log group 100 snaplen 65535 queue-threshold 1", comment), " "))
 			lines = append(lines, strings.Join(append(parts, "counter", "accept", comment), " "))
 		case domain.InspectionModeIPS:
 			withLease := append(append([]string(nil), parts...), "meta nfproto . meta l4proto @ips_ready", "counter", "queue num 100 bypass", comment)
