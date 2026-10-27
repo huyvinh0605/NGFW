@@ -71,8 +71,8 @@ type RawTLS struct {
 	ALPN    json.RawMessage `json:"alpn"`
 }
 type RawSSH struct {
-	Client string `json:"client"`
-	Server string `json:"server"`
+	Client json.RawMessage `json:"client"`
+	Server json.RawMessage `json:"server"`
 }
 type RawStats struct {
 	Uptime   json.RawMessage `json:"uptime"`
@@ -283,7 +283,7 @@ func normalizeProtocol(raw RawEnvelope, kind string) *inspection.ProtocolMetadat
 		p.ALPN = parseALPN(raw.TLS.ALPN)
 	}
 	if raw.SSH != nil {
-		p.SSHBanner = truncate(strings.TrimSpace(raw.SSH.Client+" "+raw.SSH.Server), MaxMetadataString)
+		p.SSHBanner = truncate(strings.TrimSpace(sshPeerBanner(raw.SSH.Client)+" "+sshPeerBanner(raw.SSH.Server)), MaxMetadataString)
 	}
 	if kind == "dns" && len(raw.DNS) > 0 && string(raw.DNS) != "null" {
 		var dns struct {
@@ -308,6 +308,33 @@ func normalizeProtocol(raw RawEnvelope, kind string) *inspection.ProtocolMetadat
 		return nil
 	}
 	return p
+}
+
+func sshPeerBanner(raw json.RawMessage) string {
+	// Suricata emits an object for each SSH peer. Older stored fixtures use
+	// full banner strings; accept both without letting absent or malformed
+	// optional metadata discard the whole application/alert observation.
+	var legacy string
+	if json.Unmarshal(raw, &legacy) == nil {
+		return truncate(strings.TrimSpace(legacy), MaxMetadataString)
+	}
+	var peer struct {
+		ProtocolVersion string `json:"proto_version"`
+		SoftwareVersion string `json:"software_version"`
+	}
+	if json.Unmarshal(raw, &peer) != nil {
+		return ""
+	}
+	protocol := strings.TrimSpace(peer.ProtocolVersion)
+	software := strings.TrimSpace(peer.SoftwareVersion)
+	if protocol == "" {
+		return truncate(software, MaxMetadataString)
+	}
+	banner := "SSH-" + protocol
+	if software != "" {
+		banner += "-" + software
+	}
+	return truncate(banner, MaxMetadataString)
 }
 
 func normalizeStats(raw *RawStats) *inspection.SensorCounters {
