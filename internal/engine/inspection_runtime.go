@@ -378,8 +378,8 @@ func (r *InspectionRuntime) executeIntent(parent context.Context, intent domain.
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	// Serialize kernel guard IO with activation.  The preflight check binds the
-	// intent to the exact session incarnation, inspection revision and current
-	// policy generation before any nft mutation occurs.
+	// intent to the exact session incarnation, current policy generation and
+	// still-pending operation before any nft mutation occurs.
 	r.gate.RLock()
 	current, ok := r.runtime.Store.Get(intent.SessionID)
 	closedCleanup := intent.Kind == domain.IntentRemoveAppGuard && !ok
@@ -390,7 +390,7 @@ func (r *InspectionRuntime) executeIntent(parent context.Context, intent domain.
 		r.stale.Add(1)
 		return
 	}
-	if (!ok && !closedCleanup) || (ok && (!sameRuntimeIdentity(current.Identity, intent.Identity) || r.runtime.CurrentGeneration() != intent.Generation || current.Inspection == nil || current.Inspection.Revision != intent.ExpectedInspectionRevision)) {
+	if (!ok && !closedCleanup) || (ok && !intent.MatchesSession(current, r.runtime.CurrentGeneration())) {
 		r.gate.RUnlock()
 		r.stale.Add(1)
 		return
@@ -420,7 +420,7 @@ func (r *InspectionRuntime) executeIntent(parent context.Context, intent domain.
 		}
 	}
 	after, stillCurrent := r.runtime.Store.Get(intent.SessionID)
-	validResult := closedCleanup || (stillCurrent && sameRuntimeIdentity(after.Identity, intent.Identity) && r.runtime.CurrentGeneration() == intent.Generation && after.Inspection != nil && after.Inspection.Revision == intent.ExpectedInspectionRevision)
+	validResult := closedCleanup || (stillCurrent && intent.MatchesSession(after, r.runtime.CurrentGeneration()))
 	if !validResult && result.Status == domain.EnforcementApplied && (intent.Kind == domain.IntentInstallAppGuard || intent.Kind == domain.IntentRenewAppGuard) && executor != nil {
 		cleanup := intent
 		cleanup.Kind = domain.IntentRemoveAppGuard
@@ -449,9 +449,7 @@ func (r *InspectionRuntime) completeIntent(intent domain.InspectionIntent, resul
 	if current.Inspection == nil {
 		return
 	}
-	next := current.Inspection.Clone()
-	next.Enforcement = result
-	updated, err := r.runtime.Store.UpdateInspection(current.SessionID, current.Identity, intent.Generation, current.Inspection.Revision, next)
+	updated, err := r.runtime.Store.CompleteInspectionIntent(intent, result)
 	if err != nil {
 		return
 	}
@@ -539,6 +537,9 @@ func (r *InspectionRuntime) handleSessionChanged(change sessionChange) {
 			}
 		}
 	}
+	if installGuard {
+		next.Enforcement = domain.EnforcementResult{Mechanism: domain.EnforcementNFTSessionGuard, Scope: domain.EnforcementScopeSession, RequestedAction: domain.DecisionDrop, Status: domain.EnforcementPending, OperationID: fmt.Sprintf("app-guard-install-%s-%d", current.SessionID, expected+1), Reason: "known application is outside policy allowlist"}
+	}
 	updated, err := r.runtime.Store.UpdateInspection(current.SessionID, current.Identity, selection.Generation, expected, next)
 	if err != nil {
 		return
@@ -549,7 +550,7 @@ func (r *InspectionRuntime) handleSessionChanged(change sessionChange) {
 		r.enqueueIntent(intent)
 	}
 	if installGuard {
-		intent := domain.InspectionIntent{Kind: domain.IntentInstallAppGuard, OperationID: fmt.Sprintf("app-guard-install-%s-%d", current.SessionID, updated.Inspection.Revision), SessionID: current.SessionID, Identity: current.Identity, Generation: selection.Generation, ExpectedInspectionRevision: updated.Inspection.Revision, RequestedAction: domain.DecisionDrop, Owner: "APP_POLICY", Reason: "known application is outside policy allowlist"}
+		intent := domain.InspectionIntent{Kind: domain.IntentInstallAppGuard, OperationID: updated.Inspection.Enforcement.OperationID, SessionID: current.SessionID, Identity: current.Identity, Generation: selection.Generation, ExpectedInspectionRevision: updated.Inspection.Revision, RequestedAction: domain.DecisionDrop, Owner: "APP_POLICY", Reason: "known application is outside policy allowlist"}
 		r.enqueueIntent(intent)
 	}
 }

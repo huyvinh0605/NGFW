@@ -64,11 +64,17 @@ func ReduceInspection(current domain.RuntimeSession, selection connectivity.Insp
 			next.LastEventID = threat.EventID
 			next.MaxSeverity = maxThreatSeverity(next.MaxSeverity, threat.Severity)
 			next.LatestVerdict = threat.Verdict
-			next.Enforcement = threat.Enforcement
+			if next.Enforcement.Mechanism != domain.EnforcementNFTSessionGuard || (next.Enforcement.Status != domain.EnforcementPending && next.Enforcement.Status != domain.EnforcementApplied) {
+				next.Enforcement = threat.Enforcement
+			}
 		}
 	}
 	state, reason := EvaluateAppRestriction(selection, next.Application, next.AppDeadline, now)
 	next.AppPolicyState, next.Reason = state, reason
+	if next.Enforcement.Mechanism == domain.EnforcementNFTSessionGuard && next.Enforcement.Status == domain.EnforcementPending && (state != domain.AppPolicyMismatch || selection.Mode != domain.InspectionModeIPS || !strongApplication(next.Application)) {
+		next.Enforcement.Status = domain.EnforcementUnavailable
+		next.Enforcement.Reason = "pending application guard superseded by current evidence"
+	}
 	if len(selection.AllowedApps) > 0 && next.AppDeadline == nil {
 		timeout := time.Duration(selection.AppDetectionTimeoutMillis) * time.Millisecond
 		if timeout <= 0 {

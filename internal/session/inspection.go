@@ -34,8 +34,30 @@ func (s *RuntimeStore) UpdateInspection(id string, identity domain.ConntrackIden
 	if revision != expectedInspectionRevision || revision == math.MaxUint64 {
 		return domain.RuntimeSession{}, ErrStaleInspection
 	}
+	return s.updateInspectionLocked(current, next, expectedInspectionRevision+1), nil
+}
+
+// CompleteInspectionIntent merges only the enforcement result into the latest
+// metadata under the store lock. The semantic operation fence prevents a
+// packet/metadata update from stranding an acknowledged guard in PENDING.
+func (s *RuntimeStore) CompleteInspectionIntent(intent domain.InspectionIntent, result domain.EnforcementResult) (domain.RuntimeSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.byID[intent.SessionID]
+	if !ok {
+		return domain.RuntimeSession{}, ErrSessionMissing
+	}
+	if !intent.MatchesSession(*current, intent.Generation) || current.Inspection.Revision == math.MaxUint64 {
+		return domain.RuntimeSession{}, ErrStaleInspection
+	}
+	next := current.Inspection.Clone()
+	next.Enforcement = result
+	return s.updateInspectionLocked(current, next, current.Inspection.Revision+1), nil
+}
+
+func (s *RuntimeStore) updateInspectionLocked(current *domain.RuntimeSession, next domain.SessionInspection, revision uint64) domain.RuntimeSession {
 	nextCopy := next.Clone()
-	nextCopy.Revision = expectedInspectionRevision + 1
+	nextCopy.Revision = revision
 	current.Inspection = &nextCopy
 	if current.Revoked {
 		current.EffectiveDecision = domain.DecisionDrop
@@ -46,7 +68,7 @@ func (s *RuntimeStore) UpdateInspection(id string, identity domain.ConntrackIden
 	}
 	current.Revision++
 	s.revision++
-	return current.Clone(), nil
+	return current.Clone()
 }
 
 // ResolveCandidates returns active and recently closed sessions whose indexed
