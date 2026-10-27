@@ -24,7 +24,7 @@ fi
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
 rotate_sensor() {
-  local mode=$1 directory="$root/$1" current="$root/$1/eve.json" pid_file="$root/$1/suricata.pid"
+  local mode=$1 directory="$root/$1" current="$root/$1/eve.json" unit="ngfw-suricata-$1.service"
   [[ -d "$directory" ]] || return 0
   local size=0
   if [[ -f "$current" ]]; then
@@ -35,12 +35,10 @@ rotate_sensor() {
   stamp=$(date -u +%Y%m%dT%H%M%S)
   rotated="$directory/eve.json.$stamp-$$"
   mv -- "$current" "$rotated"
-  if [[ -r "$pid_file" ]]; then
-    local pid
-    pid=$(cat "$pid_file")
-    if [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/comm" ]] && grep -qx 'Suricata-Main\|suricata' "/proc/$pid/comm"; then
-      kill -HUP "$pid"
-    fi
+  # Type=simple owns the foreground process. Its MainPID is authoritative;
+  # a leftover pidfile can refer to an exited or reused process.
+  if systemctl is-active --quiet "$unit"; then
+    systemctl kill --kill-whom=main --signal=HUP "$unit"
   fi
   printf 'rotated %s EVE to %s\n' "$mode" "$rotated"
 }

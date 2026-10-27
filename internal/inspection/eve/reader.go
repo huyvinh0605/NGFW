@@ -126,7 +126,12 @@ func (r *Reader) Run(ctx context.Context, sink inspection.ObservationSink) error
 				current = nil
 			}
 			r.setSensorEpoch(epoch)
-			checkpoint = Checkpoint{}
+			// The manifest retains its install epoch while the launcher
+			// publishes a live epoch. After engine restart, a durable checkpoint
+			// already bound to that live epoch must survive this initialization.
+			if checkpoint.SensorEpoch != epoch {
+				checkpoint = Checkpoint{}
+			}
 			generation, offset = "", 0
 			r.setHealth("STARTING", "sensor epoch changed; resynchronizing EVE", nil)
 		}
