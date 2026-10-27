@@ -30,6 +30,7 @@ type Runtime struct {
 	revoked           map[string]domain.RuntimeSession
 	maxRevoked        int
 	queue             chan conntrack.Event
+	refreshSlots      chan struct{}
 	dumpMu            sync.Mutex
 	applyMu           sync.Mutex
 	guardMu           sync.Mutex
@@ -57,6 +58,11 @@ type Runtime struct {
 
 const defaultRuntimeResyncInterval = 30 * time.Second
 
+const (
+	maxQueryCounterRefresh     = 8
+	queryCounterRefreshTimeout = 750 * time.Millisecond
+)
+
 type GuardEnforcer interface {
 	AddSourceBlock(context.Context, string, time.Time) error
 	RemoveSourceBlock(context.Context, string) error
@@ -74,7 +80,62 @@ func NewRuntime(source conntrack.Source, program connectivity.Program, generatio
 	if queueSize <= 0 {
 		queueSize = session.DefaultRuntimeLimits().MaxEventQueue
 	}
-	return &Runtime{Store: store, Source: source, Events: NewRuntimeEventRing(queueSize), program: program, generation: generation, blocks: map[string]domain.TemporaryBlock{}, revoked: map[string]domain.RuntimeSession{}, maxRevoked: 10000, queue: make(chan conntrack.Event, queueSize), resyncInterval: defaultRuntimeResyncInterval}
+	return &Runtime{Store: store, Source: source, Events: NewRuntimeEventRing(queueSize), program: program, generation: generation, blocks: map[string]domain.TemporaryBlock{}, revoked: map[string]domain.RuntimeSession{}, maxRevoked: 10000, queue: make(chan conntrack.Event, queueSize), refreshSlots: make(chan struct{}, 4), resyncInterval: defaultRuntimeResyncInterval}
+}
+
+// RefreshSessionCounters reads one exact kernel flow for an API query. Kernel
+// events may omit counters and a short flow can finish before the next bounded
+// dump. A failed or ambiguous Get leaves the tracked session partial; it is
+// never evidence that the kernel flow has disappeared.
+func (r *Runtime) RefreshSessionCounters(ctx context.Context, candidate domain.RuntimeSession) {
+	if r == nil || r.Source == nil || candidate.Identity.ID == 0 || !candidate.Identity.Original.Valid() {
+		return
+	}
+	select {
+	case r.refreshSlots <- struct{}{}:
+		defer func() { <-r.refreshSlots }()
+	default:
+		return
+	}
+	identity := candidate.Identity
+	record, err := r.Source.Get(ctx, conntrack.Identity{
+		BootID: identity.BootID, NetworkNS: identity.NetworkNS,
+		Zone: identity.Zone, Family: identity.Family, ID: identity.ID,
+		KernelStart: identity.KernelStart, Original: identity.Original,
+	})
+	if err != nil || ctx.Err() != nil ||
+		record.Identity.BootID != identity.BootID || record.Identity.NetworkNS != identity.NetworkNS ||
+		record.Identity.Zone != identity.Zone || record.Identity.Family != identity.Family ||
+		record.Identity.Original != identity.Original || !record.Presence.ID || record.Identity.ID != identity.ID ||
+		identity.KernelStart != 0 && (!record.Presence.Timestamp || record.Identity.KernelStart != identity.KernelStart) {
+		return
+	}
+	// Events and dump cutovers remain serialized with this merge. Recheck the
+	// incarnation after I/O so a late Get cannot recreate or overwrite a flow.
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+	current, ok := r.Store.Get(candidate.SessionID)
+	if !ok || current.Identity != identity ||
+		!record.ObservedAt.IsZero() && current.LastObservedAt.After(record.ObservedAt) {
+		return
+	}
+	r.applyRecord(record, time.Now().UTC(), conntrack.EventUpdate, false)
+}
+
+// RefreshPageCounters bounds both the number of targeted Get calls and their
+// total wait. Other page items retain their explicit quality metadata.
+func (r *Runtime) RefreshPageCounters(ctx context.Context, items []domain.RuntimeSession) {
+	if r == nil || r.Source == nil || len(items) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, queryCounterRefreshTimeout)
+	defer cancel()
+	for i, item := range items {
+		if i >= maxQueryCounterRefresh || ctx.Err() != nil {
+			return
+		}
+		r.RefreshSessionCounters(ctx, item)
+	}
 }
 
 type runtimeSink struct{ r *Runtime }
