@@ -67,6 +67,7 @@ type RuntimeStats struct {
 	EventDrops, Resyncs                                                uint64
 	DumpIncomplete, LastDumpBytes, LastDumpMillis                      uint64
 	GetChecks, GetUnavailable, ExpiryBacklog, ExpiryOldestSeconds      uint64
+	HistoryEvictions, HistoryExpired                                   uint64
 }
 
 type tombstone struct {
@@ -96,6 +97,8 @@ type RuntimeStore struct {
 	tombstones          []tombstone
 	expiryRetryAfter    map[string]time.Time
 	limits              RuntimeLimits
+	baseHistoryMax      int
+	baseHistoryTTL      time.Duration
 	revision            uint64
 	stats               RuntimeStats
 }
@@ -120,7 +123,7 @@ func NewRuntimeStore(limits RuntimeLimits) *RuntimeStore {
 	if limits.MaxEventQueue <= 0 {
 		limits.MaxEventQueue = defaults.MaxEventQueue
 	}
-	return &RuntimeStore{byID: map[string]*domain.RuntimeSession{}, byIdentity: map[domain.ConntrackIdentity]string{}, byConntrack: map[conntrackKey]string{}, byTuple: map[flow.Key]map[string]struct{}{}, aliasesBySession: map[string][]flow.Key{}, identitiesBySession: map[string][]domain.ConntrackIdentity{}, conntracksBySession: map[string][]conntrackKey{}, expiryRetryAfter: map[string]time.Time{}, limits: limits}
+	return &RuntimeStore{byID: map[string]*domain.RuntimeSession{}, byIdentity: map[domain.ConntrackIdentity]string{}, byConntrack: map[conntrackKey]string{}, byTuple: map[flow.Key]map[string]struct{}{}, aliasesBySession: map[string][]flow.Key{}, identitiesBySession: map[string][]domain.ConntrackIdentity{}, conntracksBySession: map[string][]conntrackKey{}, expiryRetryAfter: map[string]time.Time{}, limits: limits, baseHistoryMax: limits.MaxClosed, baseHistoryTTL: limits.ClosedTTL}
 }
 
 // HasActiveKernelKey reports whether an active session currently owns the
@@ -751,14 +754,7 @@ func (s *RuntimeStore) closeLocked(id string, v *domain.RuntimeSession, reason s
 		v.Quality.Reason = reason
 	}
 	closed := v.Clone()
-	s.closed = append(s.closed, closed)
-	if len(s.closed) > s.limits.MaxClosed {
-		s.closed = s.closed[len(s.closed)-s.limits.MaxClosed:]
-	}
-	s.tombstones = append(s.tombstones, tombstone{ID: id, Identity: v.Identity, At: now})
-	if len(s.tombstones) > s.limits.MaxClosed {
-		s.tombstones = s.tombstones[len(s.tombstones)-s.limits.MaxClosed:]
-	}
+	s.appendClosedLocked(closed, tombstone{ID: id, Identity: v.Identity, At: now})
 	s.removeIndexesLocked(id)
 	delete(s.byID, id)
 	s.stats.Closed++
@@ -782,14 +778,7 @@ func (s *RuntimeStore) Delete(id string, reason string, now time.Time) error {
 	v.ClosedAt = &closedAt
 	v.Quality.Reason = reason
 	closed := v.Clone()
-	s.closed = append(s.closed, closed)
-	if len(s.closed) > s.limits.MaxClosed {
-		s.closed = s.closed[len(s.closed)-s.limits.MaxClosed:]
-	}
-	s.tombstones = append(s.tombstones, tombstone{ID: id, Identity: v.Identity, At: closedAt})
-	if len(s.tombstones) > s.limits.MaxClosed {
-		s.tombstones = s.tombstones[len(s.tombstones)-s.limits.MaxClosed:]
-	}
+	s.appendClosedLocked(closed, tombstone{ID: id, Identity: v.Identity, At: closedAt})
 	s.removeIndexesLocked(id)
 	delete(s.byID, id)
 	s.stats.Closed++
@@ -1142,6 +1131,10 @@ func (s *RuntimeStore) DeferExpired(candidate domain.RuntimeSession, now time.Ti
 func (s *RuntimeStore) PruneClosed(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneClosedLocked(now)
+}
+
+func (s *RuntimeStore) pruneClosedLocked(now time.Time) {
 	cutoff := now.Add(-s.limits.ClosedTTL)
 	kept := s.closed[:0]
 	for _, value := range s.closed {
@@ -1149,6 +1142,7 @@ func (s *RuntimeStore) PruneClosed(now time.Time) {
 			kept = append(kept, value)
 		}
 	}
+	s.stats.HistoryExpired += uint64(len(s.closed) - len(kept))
 	clear(s.closed[len(kept):])
 	s.closed = kept
 	tombs := s.tombstones[:0]
@@ -1207,14 +1201,7 @@ func (s *RuntimeStore) ReconcileMissing(seen []domain.ConntrackIdentity, before 
 		}
 		value.Revision++
 		closed := value.Clone()
-		s.closed = append(s.closed, closed)
-		if len(s.closed) > s.limits.MaxClosed {
-			s.closed = s.closed[len(s.closed)-s.limits.MaxClosed:]
-		}
-		s.tombstones = append(s.tombstones, tombstone{ID: id, Identity: value.Identity, At: now})
-		if len(s.tombstones) > s.limits.MaxClosed {
-			s.tombstones = s.tombstones[len(s.tombstones)-s.limits.MaxClosed:]
-		}
+		s.appendClosedLocked(closed, tombstone{ID: id, Identity: value.Identity, At: now})
 		s.removeIndexesLocked(id)
 		delete(s.byID, id)
 		removed = append(removed, closed)

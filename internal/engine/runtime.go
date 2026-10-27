@@ -433,6 +433,11 @@ func (r *Runtime) releaseClosedSession(value domain.RuntimeSession, reason strin
 
 func (r *Runtime) SetInspectionRuntime(value *InspectionRuntime) {
 	r.mu.Lock()
+	if value == nil {
+		r.Store.SetInspectionHistoryLimits(0, 0)
+	} else {
+		r.Store.SetInspectionHistoryLimits(value.recentSessions, value.recentSessionTTL)
+	}
 	r.inspection = value
 	r.mu.Unlock()
 }

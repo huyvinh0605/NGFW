@@ -50,6 +50,8 @@ type InspectionRuntime struct {
 	identityRefreshDrops    atomic.Uint64
 	queueBytes              int64
 	maxQueueBytes           int64
+	recentSessions          int
+	recentSessionTTL        time.Duration
 	appTimeout              time.Duration
 	drops                   atomic.Uint64
 	intentDrops             atomic.Uint64
@@ -102,6 +104,8 @@ func NewInspectionRuntimeWithScope(runtime *Runtime, limits domain.InspectionLim
 	}
 	value.identityQueue = make(chan sessionChange, identityItems)
 	value.identityPending = make(map[string]struct{}, identityItems+2)
+	value.recentSessions = limits.RecentSessions
+	value.recentSessionTTL = time.Duration(limits.RecentSessionTTLSeconds) * time.Second
 	if runtime != nil {
 		value.resolver = correlation.NewResolver(runtime.Store, scope, 10000)
 	}
@@ -690,6 +694,11 @@ func (r *InspectionRuntime) Stats() map[string]uint64 {
 	result["identity_refresh_attempts"] = r.identityRefreshAttempts.Load()
 	result["identity_refresh_drops"] = r.identityRefreshDrops.Load()
 	result["identity_refresh_queue_items"] = uint64(len(r.identityQueue))
+	if r.runtime != nil && r.runtime.Store != nil {
+		stats := r.runtime.Store.Stats()
+		result["recent_session_evictions"] = stats.HistoryEvictions
+		result["recent_session_expired"] = stats.HistoryExpired
+	}
 	for _, source := range r.Health() {
 		for name, count := range source.ReaderStats {
 			result[name] += count
