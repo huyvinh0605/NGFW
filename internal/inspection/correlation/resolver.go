@@ -29,6 +29,9 @@ type Resolution struct {
 	Session *domain.RuntimeSession
 	Reason  string
 	Recent  bool
+	// RefreshCandidate is never an enforcement/correlation result. It names
+	// one active partial identity whose exact kernel ID may be verified.
+	RefreshCandidate *domain.RuntimeSession
 }
 
 type Resolver struct {
@@ -68,6 +71,9 @@ func (r *Resolver) Resolve(obs inspection.Observation) Resolution {
 				if truncated {
 					return Resolution{State: domain.CorrelationAmbiguous, Reason: "candidate limit exceeded"}
 				}
+				if len(items) > 1 {
+					return Resolution{State: domain.CorrelationAmbiguous, Reason: "multiple session tuple matches"}
+				}
 				for _, item := range items {
 					if item.SessionID == known.SessionID && strongIdentity(item.Identity) && sameIncarnation(item.Identity, known.Identity) {
 						copy := item.Clone()
@@ -88,13 +94,11 @@ func (r *Resolver) Resolve(obs inspection.Observation) Resolution {
 			return Resolution{State: domain.CorrelationAmbiguous, Reason: "candidate limit exceeded"}
 		}
 		for _, item := range items {
-			if strongIdentity(item.Identity) {
-				candidates[item.SessionID] = item
-			}
+			candidates[item.SessionID] = item
 		}
 	}
 	if len(candidates) == 0 {
-		return Resolution{State: domain.CorrelationUncorrelated, Reason: "no strong session tuple match"}
+		return Resolution{State: domain.CorrelationUncorrelated, Reason: "no session tuple match"}
 	}
 	if len(candidates) != 1 {
 		return Resolution{State: domain.CorrelationAmbiguous, Reason: "multiple session tuple matches"}
@@ -102,6 +106,14 @@ func (r *Resolver) Resolve(obs inspection.Observation) Resolution {
 	var selected domain.RuntimeSession
 	for _, item := range candidates {
 		selected = item
+	}
+	if !strongIdentity(selected.Identity) {
+		result := Resolution{State: domain.CorrelationUncorrelated, Reason: "no strong session tuple match"}
+		if selected.State != domain.SessionClosed && selected.Identity.ID != 0 && selected.Identity.Original.Valid() {
+			copy := selected.Clone()
+			result.RefreshCandidate = &copy
+		}
+		return result
 	}
 	if obs.HasFlowID {
 		r.remember(key, binding{SessionID: selected.SessionID, Identity: selected.Identity})

@@ -84,6 +84,18 @@ func TestResolverDoesNotEnforceAgainstSessionMissingKernelStart(t *testing.T) {
 	}
 }
 
+func TestResolverDoesNotHidePartialCandidateBehindStrongMatch(t *testing.T) {
+	tuple := domain.Tuple{Family: domain.FamilyIPv4, SrcIP: netip.MustParseAddr("192.0.2.1"), SrcPort: 1234, DstIP: netip.MustParseAddr("198.51.100.1"), DstPort: 443, Protocol: 6}
+	key := flow.Key{Tuple: tuple}
+	strong := domain.RuntimeSession{SessionID: "old", Identity: domain.ConntrackIdentity{ID: 7, KernelStart: 1, Original: tuple}, OriginalTuple: tuple}
+	partial := domain.RuntimeSession{SessionID: "new", Identity: domain.ConntrackIdentity{ID: 8, Original: tuple}, OriginalTuple: tuple}
+	now := time.Now().UTC()
+	result := NewResolver(fakeLookup{byKey: map[flow.Key][]domain.RuntimeSession{key: {strong, partial}}}, flow.Scope{}, 10).Resolve(inspection.Observation{Tuple: &tuple, ObservedAt: &now})
+	if result.State != domain.CorrelationAmbiguous || result.Session != nil || result.RefreshCandidate != nil {
+		t.Fatalf("partial incarnation was silently ignored: %#v", result)
+	}
+}
+
 func TestPendingBoundedAndExpires(t *testing.T) {
 	p := NewPendingCorrelations(1, time.Second)
 	now := time.Now()

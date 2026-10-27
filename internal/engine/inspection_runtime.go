@@ -34,32 +34,37 @@ type sessionChange struct {
 }
 
 type InspectionRuntime struct {
-	runtime       *Runtime
-	sources       []inspection.EventSource
-	security      *SecurityEventStore
-	resolver      *correlation.Resolver
-	pending       *correlation.PendingCorrelations
-	deduper       *eve.Deduper
-	queue         chan queuedObservation
-	sessionQueue  chan sessionChange
-	intentQueue   chan domain.InspectionIntent
-	queueBytes    int64
-	maxQueueBytes int64
-	appTimeout    time.Duration
-	drops         atomic.Uint64
-	intentDrops   atomic.Uint64
-	sessionDrops  atomic.Uint64
-	processed     atomic.Uint64
-	duplicates    atomic.Uint64
-	stale         atomic.Uint64
-	gate          sync.RWMutex
-	mu            sync.RWMutex
-	started       bool
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	executor      InspectionIntentExecutor
-	health        map[string]inspection.SourceHealth
-	healthVersion map[string]string
+	runtime                 *Runtime
+	sources                 []inspection.EventSource
+	security                *SecurityEventStore
+	resolver                *correlation.Resolver
+	pending                 *correlation.PendingCorrelations
+	deduper                 *eve.Deduper
+	queue                   chan queuedObservation
+	sessionQueue            chan sessionChange
+	intentQueue             chan domain.InspectionIntent
+	identityQueue           chan sessionChange
+	identityMu              sync.Mutex
+	identityPending         map[string]struct{}
+	identityRefreshAttempts atomic.Uint64
+	identityRefreshDrops    atomic.Uint64
+	queueBytes              int64
+	maxQueueBytes           int64
+	appTimeout              time.Duration
+	drops                   atomic.Uint64
+	intentDrops             atomic.Uint64
+	sessionDrops            atomic.Uint64
+	processed               atomic.Uint64
+	duplicates              atomic.Uint64
+	stale                   atomic.Uint64
+	gate                    sync.RWMutex
+	mu                      sync.RWMutex
+	started                 bool
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
+	executor                InspectionIntentExecutor
+	health                  map[string]inspection.SourceHealth
+	healthVersion           map[string]string
 }
 
 func NewInspectionRuntime(runtime *Runtime, limits domain.InspectionLimits, sources []inspection.EventSource) *InspectionRuntime {
@@ -91,6 +96,12 @@ func NewInspectionRuntimeWithScope(runtime *Runtime, limits domain.InspectionLim
 		sessionItems = 50000
 	}
 	value := &InspectionRuntime{runtime: runtime, sources: append([]inspection.EventSource(nil), sources...), security: NewSecurityEventStore(limits.SecurityEvents, limits.SecurityEventBytes), queue: make(chan queuedObservation, queueItems), sessionQueue: make(chan sessionChange, sessionItems), intentQueue: make(chan domain.InspectionIntent, intentItems), maxQueueBytes: int64(maxBytes), appTimeout: time.Duration(limits.AppDetectionTimeoutMillis) * time.Millisecond, pending: correlation.NewPendingCorrelations(limits.CorrelationPending, time.Duration(limits.CorrelationWaitMillis)*time.Millisecond), deduper: eve.NewDeduper(20000, 4<<20, 10*time.Minute), health: map[string]inspection.SourceHealth{}, healthVersion: map[string]string{}}
+	identityItems := queueItems
+	if identityItems > 128 {
+		identityItems = 128
+	}
+	value.identityQueue = make(chan sessionChange, identityItems)
+	value.identityPending = make(map[string]struct{}, identityItems+2)
 	if runtime != nil {
 		value.resolver = correlation.NewResolver(runtime.Store, scope, 10000)
 	}
@@ -135,6 +146,8 @@ func (r *InspectionRuntime) Start(ctx context.Context) error {
 	for i := 0; i < 2; i++ {
 		r.wg.Add(1)
 		go r.intentWorker(runCtx)
+		r.wg.Add(1)
+		go r.identityRefreshWorker(runCtx)
 	}
 	for _, source := range r.sources {
 		source := source
@@ -285,6 +298,9 @@ func (r *InspectionRuntime) handleObservation(ctx context.Context, obs inspectio
 	}
 	resolution := r.resolver.Resolve(obs)
 	if resolution.State != domain.CorrelationCorrelated || resolution.Session == nil {
+		if resolution.State == domain.CorrelationUncorrelated && resolution.RefreshCandidate != nil {
+			r.enqueueIdentityRefresh(*resolution.RefreshCandidate)
+		}
 		if obs.Alert != nil && securityStored {
 			before, _ := r.security.Get(obs.ID)
 			if updated, updateErr := r.security.UpdateCorrelation(obs.ID, "", "", 0, resolution.State, resolution.Reason); updateErr == nil && updated.CorrelationRevision != before.CorrelationRevision {
@@ -671,6 +687,9 @@ func (r *InspectionRuntime) HasSource(sensorID string) bool {
 }
 func (r *InspectionRuntime) Stats() map[string]uint64 {
 	result := map[string]uint64{"processed": r.processed.Load(), "duplicates": r.duplicates.Load(), "observation_drops": r.drops.Load(), "session_signal_drops": r.sessionDrops.Load(), "enforcement_drops": r.intentDrops.Load(), "stale_updates": r.stale.Load(), "queue_bytes": uint64(maxInt64(0, atomic.LoadInt64(&r.queueBytes))), "queue_items": uint64(len(r.queue)), "session_queue_items": uint64(len(r.sessionQueue)), "enforcement_queue_items": uint64(len(r.intentQueue))}
+	result["identity_refresh_attempts"] = r.identityRefreshAttempts.Load()
+	result["identity_refresh_drops"] = r.identityRefreshDrops.Load()
+	result["identity_refresh_queue_items"] = uint64(len(r.identityQueue))
 	for _, source := range r.Health() {
 		for name, count := range source.ReaderStats {
 			result[name] += count
