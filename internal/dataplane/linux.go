@@ -38,8 +38,7 @@ func (r *ExecIPCommandRunner) Run(ctx context.Context, args ...string) ([]byte, 
 	if err == nil {
 		return out, nil
 	}
-	message := strings.ToLower(string(out))
-	if strings.Contains(message, "cannot find device") || strings.Contains(message, "does not exist") || strings.Contains(message, "no such process") || strings.Contains(message, "cannot find") || strings.Contains(message, "cannot assign requested address") {
+	if isIPObjectNotFound(string(out)) {
 		return out, fmt.Errorf("%w: ip %s: %v: %s", ErrIPObjectNotFound, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, fmt.Errorf("ip %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
