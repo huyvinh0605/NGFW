@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -34,7 +35,11 @@ func NewExecIPCommandRunner(binary string) *ExecIPCommandRunner {
 
 func (r *ExecIPCommandRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return out, fmt.Errorf("ip %s: %w", strings.Join(args, " "), ctx.Err())
+	}
 	if err == nil {
 		return out, nil
 	}
@@ -88,23 +93,26 @@ func (r *NetworkReconciler) Reconcile(ctx context.Context, previous, desired dom
 	if err != nil {
 		return err
 	}
-	if err := r.applyPlan(ctx, plan); err != nil {
-		rollbackPlan, planErr := PlanNetwork(desired, previous)
-		if planErr != nil {
-			return errors.Join(err, fmt.Errorf("build network rollback plan: %w", planErr))
-		}
+	applyErr := r.applyPlan(ctx, plan)
+	if applyErr == nil {
+		applyErr = r.VerifyTransition(ctx, previous, desired)
+	}
+	if applyErr != nil {
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if rollbackErr := r.applyPlan(rollbackCtx, rollbackPlan); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("restore previous network snapshot: %w", rollbackErr))
+		if rollbackErr := r.Restore(rollbackCtx, desired, previous); rollbackErr != nil {
+			return errors.Join(applyErr, fmt.Errorf("restore previous network snapshot: %w", rollbackErr))
 		}
-		return err
+		return applyErr
 	}
 	return nil
 }
 
 func (r *NetworkReconciler) applyPlan(ctx context.Context, plan []NetworkOperation) error {
 	for _, operation := range plan {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var err error
 		switch operation.Kind {
 		case OperationCommand:
@@ -311,6 +319,10 @@ func addressSet(config domain.Config) map[string]struct{} {
 }
 
 func addressKey(family, iface, address string) string {
+	if ip, prefix, err := net.ParseCIDR(address); err == nil {
+		bits, _ := prefix.Mask.Size()
+		address = ip.String() + "/" + strconv.Itoa(bits)
+	}
 	return strings.Join([]string{family, iface, address}, "\x00")
 }
 
@@ -334,7 +346,27 @@ func routeSignature(args []string) string {
 	if len(args) < 4 {
 		return strings.Join(args, "\x00")
 	}
-	withoutAction := append(append([]string{}, args[:2]...), args[3:]...)
+	canonical := append([]string(nil), args...)
+	if _, prefix, err := net.ParseCIDR(canonical[3]); err == nil {
+		canonical[3] = prefix.String()
+	}
+	hasMetric := false
+	for i := 4; i+1 < len(canonical); i += 2 {
+		if canonical[i] == "via" {
+			if ip := net.ParseIP(canonical[i+1]); ip != nil {
+				canonical[i+1] = ip.String()
+			}
+		}
+		hasMetric = hasMetric || canonical[i] == "metric"
+	}
+	if !hasMetric {
+		metric := "0"
+		if canonical[0] == "-6" {
+			metric = "1024"
+		}
+		canonical = append(canonical, "metric", metric)
+	}
+	withoutAction := append(append([]string{}, canonical[:2]...), canonical[3:]...)
 	return strings.Join(withoutAction, "\x00")
 }
 

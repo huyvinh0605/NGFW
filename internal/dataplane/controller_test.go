@@ -109,6 +109,8 @@ type reconcileCall struct {
 
 type fakeNetworkReconciler struct{ calls []reconcileCall }
 
+func (f *fakeNetworkReconciler) Verify(context.Context, domain.Config) error { return nil }
+
 func (f *fakeNetworkReconciler) Reconcile(_ context.Context, previous, desired domain.Config) error {
 	f.calls = append(f.calls, reconcileCall{previous: previous, desired: desired})
 	return nil

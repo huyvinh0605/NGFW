@@ -88,6 +88,8 @@ func TestM4RuntimeCompilerRetainsGateOnCommit(t *testing.T) {
 
 type gateActivationNetwork struct{}
 
+func (gateActivationNetwork) Verify(context.Context, domain.Config) error { return nil }
+
 func (gateActivationNetwork) Reconcile(context.Context, domain.Config, domain.Config) error {
 	return nil
 }

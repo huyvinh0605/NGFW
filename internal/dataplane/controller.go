@@ -305,7 +305,7 @@ func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapsho
 			return fmt.Errorf("persist activation journal: %w", err)
 		}
 	}
-	if err := c.network.Reconcile(ctx, source, desired); err != nil {
+	if err := c.reconcileNetwork(ctx, source, desired, c.recoveryPending); err != nil {
 		return c.restoreM3AfterFailure(applier, source, target, rollback, rollbackKnown, previousSnapshot, oldBundle, fmt.Errorf("reconcile network: %w", err))
 	}
 	if snapshotUsesM4(&target) {
@@ -397,6 +397,13 @@ func (c *Controller) ApplyRuntimePrepared(ctx context.Context, desired domain.Co
 // VerifyActivation checks the persisted compiler identity and kernel objects
 // without changing them.
 func (c *Controller) VerifyActivation(ctx context.Context, snapshot ActivationSnapshot) error {
+	networkVerifier, ok := c.network.(NetworkStateVerifier)
+	if !ok {
+		return errors.New("configured network adapter cannot verify activation")
+	}
+	if err := networkVerifier.Verify(ctx, snapshot.Config); err != nil {
+		return err
+	}
 	bundle, err := CompileActivationSnapshot(snapshot)
 	if err != nil {
 		return err
@@ -500,10 +507,10 @@ func (c *Controller) restoreM3AfterFailure(applier RulesetBundleApplier, source 
 			errs = append(errs, fmt.Errorf("restore M4 routing: %w", err))
 		}
 	}
-	if err := c.network.Reconcile(rollbackCtx, attempted.Config, rollback); err != nil {
+	if err := c.reconcileNetwork(rollbackCtx, attempted.Config, rollback, true); err != nil {
 		errs = append(errs, fmt.Errorf("restore previous network snapshot: %w", err))
 	}
-	if err := c.network.Reconcile(rollbackCtx, source, rollback); err != nil {
+	if err := c.reconcileNetwork(rollbackCtx, source, rollback, true); err != nil {
 		errs = append(errs, fmt.Errorf("remove source leftovers while restoring network snapshot: %w", err))
 	}
 	if len(errs) == 0 {
@@ -516,7 +523,11 @@ func (c *Controller) restoreM3AfterFailure(applier RulesetBundleApplier, source 
 		}
 	}
 	if len(errs) == 0 {
-		_ = os.Remove(c.journalPath)
+		if err := os.Remove(c.journalPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove rolled-back activation journal: %w", err))
+		}
+	}
+	if len(errs) == 0 {
 		c.prepared = false
 		c.current = rollback
 		c.hasCurrent = rollbackKnown
@@ -603,7 +614,7 @@ func (c *Controller) apply(ctx context.Context, desired domain.Config, compiler 
 			return fmt.Errorf("persist activation journal: %w", err)
 		}
 	}
-	if err := c.network.Reconcile(ctx, source, desired); err != nil {
+	if err := c.reconcileNetwork(ctx, source, desired, c.recoveryPending); err != nil {
 		return c.restoreAfterFailure(source, desired, rollback, rollbackKnown, oldRules, fmt.Errorf("reconcile network: %w", err))
 	}
 	if err := c.rules.ApplyRuleset(ctx, desiredRules); err != nil {
@@ -633,10 +644,10 @@ func (c *Controller) restoreAfterFailure(source, attempted, rollback domain.Conf
 			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore previous nftables snapshot: %w", err))
 		}
 	}
-	if err := c.network.Reconcile(rollbackCtx, attempted, rollback); err != nil {
+	if err := c.reconcileNetwork(rollbackCtx, attempted, rollback, true); err != nil {
 		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore previous network snapshot: %w", err))
 	}
-	if err := c.network.Reconcile(rollbackCtx, source, rollback); err != nil {
+	if err := c.reconcileNetwork(rollbackCtx, source, rollback, true); err != nil {
 		rollbackErrors = append(rollbackErrors, fmt.Errorf("remove source leftovers while restoring network snapshot: %w", err))
 	}
 	if len(rollbackErrors) == 0 {

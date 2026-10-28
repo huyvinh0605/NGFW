@@ -63,7 +63,9 @@ func TestPlanNetworkDoesNotDeleteUnchangedRoute(t *testing.T) {
 }
 
 func TestReconcilerCreatesMissingVLAN(t *testing.T) {
-	runner := &fakeIPRunner{missingVLAN: true}
+	runner := &fakeIPRunner{missingVLAN: true, observations: map[string]string{
+		"-details -json link show": `[{"ifindex":1,"ifname":"eth1","flags":["UP"]},{"ifindex":2,"ifname":"eth1.42","flags":["UP"],"link_index":1,"linkinfo":{"info_kind":"vlan","info_data":{"id":42}}}]`,
+	}}
 	reconciler := NewNetworkReconciler(runner)
 	desired := domain.Config{Interfaces: []domain.Interface{
 		{ID: "parent", SystemName: "eth1", Mode: domain.InterfaceVLANParent, AdminState: true},
@@ -99,6 +101,7 @@ type fakeIPRunner struct {
 	missingVLAN      bool
 	failOnceContains string
 	failed           bool
+	observations     map[string]string
 }
 
 func (f *fakeIPRunner) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -112,6 +115,15 @@ func (f *fakeIPRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 	if !f.failed && f.failOnceContains != "" && strings.Contains(command, f.failOnceContains) {
 		f.failed = true
 		return nil, errors.New("injected ip failure")
+	}
+	if out, ok := f.observations[command]; ok {
+		return []byte(out), nil
+	}
+	switch command {
+	case "-details -json link show":
+		return []byte(`[{"ifindex":1,"ifname":"eth1","mtu":1500,"flags":["UP"]}]`), nil
+	case "-json address show":
+		return []byte(`[{"ifname":"eth1","addr_info":[{"local":"10.0.0.1","prefixlen":24}]}]`), nil
 	}
 	return []byte(`[{"ifindex":1,"ifname":"eth1"}]`), nil
 }
