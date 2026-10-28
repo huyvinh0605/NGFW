@@ -219,6 +219,9 @@ func (c *Controller) ApplySnapshotPrepared(ctx context.Context, target Activatio
 func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapshot, retainJournal bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.validateRecoveryTarget(target.Config); err != nil {
+		return err
+	}
 	c.m4Runtime.Store(nil)
 	target = cloneActivationSnapshot(target)
 	desired := target.Config
@@ -305,7 +308,7 @@ func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapsho
 			return fmt.Errorf("persist activation journal: %w", err)
 		}
 	}
-	if err := c.reconcileNetwork(ctx, source, desired, c.recoveryPending); err != nil {
+	if err := c.reconcileActivationNetwork(ctx, source, desired, rollback, rollbackKnown); err != nil {
 		return c.restoreM3AfterFailure(applier, source, target, rollback, rollbackKnown, previousSnapshot, oldBundle, fmt.Errorf("reconcile network: %w", err))
 	}
 	if snapshotUsesM4(&target) {
@@ -576,6 +579,9 @@ func (c *Controller) apply(ctx context.Context, desired domain.Config, compiler 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.validateRecoveryTarget(desired); err != nil {
+		return err
+	}
 	if snapshotUsesM4(c.currentSnapshot) || snapshotUsesM4(c.recoverySnapshot) {
 		return ErrM4ActivationUnavailable
 	}
@@ -614,7 +620,7 @@ func (c *Controller) apply(ctx context.Context, desired domain.Config, compiler 
 			return fmt.Errorf("persist activation journal: %w", err)
 		}
 	}
-	if err := c.reconcileNetwork(ctx, source, desired, c.recoveryPending); err != nil {
+	if err := c.reconcileActivationNetwork(ctx, source, desired, rollback, rollbackKnown); err != nil {
 		return c.restoreAfterFailure(source, desired, rollback, rollbackKnown, oldRules, fmt.Errorf("reconcile network: %w", err))
 	}
 	if err := c.rules.ApplyRuleset(ctx, desiredRules); err != nil {

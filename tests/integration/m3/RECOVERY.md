@@ -25,6 +25,11 @@ Assertions require the baseline network/nft snapshot, no stale managed
 objects, unchanged applied generation and correct journal lifecycle.
 Unmanaged addresses/routes are allowed.
 
+Pending-journal cases also replay the published target after an interrupted
+compensation and verify cleanup of both possible kernel snapshots. A third
+configuration must be rejected before mutation until one journaled state has
+been recovered and finalized; a subsequent new commit must then succeed.
+
 The process-crash probe reproduces the original invalid-next-hop failure and
 kills a child process after `ApplyRuntimePrepared` has applied the target and
 retained its journal. A new Controller then recovers the previous snapshot

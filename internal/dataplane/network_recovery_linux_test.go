@@ -285,3 +285,69 @@ func TestLinuxNetworkRecoveryNftAndPersistentFailure(t *testing.T) {
 		saveRecoveryEvidence(t, "persistent-failure-restart", map[string]any{"status": "PASS", "initial_error": err.Error(), "journal_retained_until_recovery": true, "commands": ip.trace})
 	})
 }
+
+func TestLinuxNetworkRecoveryPendingJournal(t *testing.T) {
+	requireNetworkRecoveryNamespace(t)
+	for _, scenario := range []string{"replay-journaled-target", "new-target-until-recovered"} {
+		t.Run(scenario, func(t *testing.T) {
+			controller, network, ip, rules, state, base, target := recoveryFixture(t)
+			if err := controller.ApplyRuntimePrepared(context.Background(), target, M2CompileOptions{}, 2); err != nil {
+				t.Fatal(err)
+			}
+			// Real prepared target/journal, followed by the kernel-only part of
+			// compensation: simulate termination before its journal was removed.
+			if err := network.Restore(context.Background(), target, base); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := NewController(network, rules, &fakeForwarding{}, state)
+			if err != nil || !restarted.RecoveryPending() {
+				t.Fatalf("interrupted compensation journal missing: %v", err)
+			}
+			if scenario == "replay-journaled-target" {
+				if err := restarted.ApplyRuntimePrepared(context.Background(), target, M2CompileOptions{}, 2); err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.FinalizeActivation(context.Background(), target, 2); err != nil {
+					t.Fatal(err)
+				}
+				if err := network.VerifyTransition(context.Background(), base, target); err != nil {
+					t.Fatal("replaying journaled target retained previous kernel objects:", err)
+				}
+			} else {
+				newTarget := cloneNetworkTestConfig(t, base)
+				newTarget.Interfaces[0].IPv4Addresses = []string{"192.0.2.4/24"}
+				newTarget.Interfaces[0].IPv6Addresses = []string{"2001:db8:27::4/64"}
+				before, err := os.ReadFile(state + ".activation")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.ApplyRuntimePrepared(context.Background(), newTarget, M2CompileOptions{}, 3); !errors.Is(err, ErrActivationRecoveryPending) {
+					t.Fatal("unrelated target did not report pending recovery before mutation:", err)
+				}
+				after, err := os.ReadFile(state + ".activation")
+				if err != nil || string(before) != string(after) {
+					t.Fatal("rejected new target replaced the original recovery journal")
+				}
+				if err := network.VerifyTransition(context.Background(), target, base); err != nil {
+					t.Fatal("rejected new target mutated the current network:", err)
+				}
+				if err := restarted.ApplyRuntimePrepared(context.Background(), base, M2CompileOptions{}, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.FinalizeActivation(context.Background(), base, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.ApplyRuntimePrepared(context.Background(), newTarget, M2CompileOptions{}, 2); err != nil {
+					t.Fatal("new activation remained blocked after recovery:", err)
+				}
+				if err := restarted.FinalizeActivation(context.Background(), newTarget, 2); err != nil {
+					t.Fatal(err)
+				}
+				if err := network.VerifyTransition(context.Background(), base, newTarget); err != nil {
+					t.Fatal(err)
+				}
+			}
+			saveRecoveryEvidence(t, scenario, map[string]any{"status": "PASS", "commands": ip.trace, "addresses": networkRecoveryCommand(t, "ip", "-json", "address", "show")})
+		})
+	}
+}

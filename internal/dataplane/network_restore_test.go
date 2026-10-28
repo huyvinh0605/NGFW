@@ -75,9 +75,26 @@ func TestControllerCompensationAndStartupUseDirectedRestore(t *testing.T) {
 		if err := apply(restarted, previous, 1); err != nil {
 			t.Fatal(err)
 		}
-		if len(network.calls) != 2 || len(network.restored) != 3 {
-			t.Fatal("startup recovery used forward reconciliation")
+		if len(network.calls) != 2 || len(network.restored) != 4 {
+			t.Fatal("startup recovery must directly reconcile both journaled sources")
 		}
+	}
+}
+
+func TestRecoveryOnlyAcceptsJournaledConfigurations(t *testing.T) {
+	previous := baseM1Config()
+	attempted := cloneNetworkTestConfig(t, previous)
+	attempted.DefaultDeny = !previous.DefaultDeny
+	controller := &Controller{current: attempted, recoveryPending: true, recoveryPrevious: previous, recoveryPreviousKnown: true}
+	for _, known := range []domain.Config{previous, attempted} {
+		if err := controller.validateRecoveryTarget(known); err != nil {
+			t.Fatal("journaled recovery target rejected:", err)
+		}
+	}
+	third := cloneNetworkTestConfig(t, previous)
+	third.MaxSessions++
+	if err := controller.validateRecoveryTarget(third); !errors.Is(err, ErrActivationRecoveryPending) {
+		t.Fatal("unrecorded target accepted during recovery:", err)
 	}
 }
 
