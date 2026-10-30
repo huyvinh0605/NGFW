@@ -455,3 +455,200 @@ Validation is recorded in `artifacts/m4-code-completion-20261023/RESULTS.md`.
 Local/fake-adapter checks establish code behavior, not Ubuntu traffic acceptance.
 The remaining task is deploying matching binaries/assets and executing the
 M4 acceptance matrix, including the new complete nft/route transaction on Linux.
+
+## Post-checkpoint hardening — 2026-10-23
+
+The M4 asset installer no longer adds `ngfw-proxy` to the privileged `ngfw`
+group. It grants search-only ACLs on the M1/M2 parent directories; the engine
+drop-in refreshes the `/run/ngfw` search ACL at every service start. The proxy
+unit no longer requests the `ngfw` group or write access to `/var/log/ngfw`.
+The verifier now reports account, unit and live-process group isolation plus
+management-token, privileged-IPC and gate-IPC access. On the Ubuntu NGFW VM,
+the asset install and engine restart passed: the proxy can write only the gate
+socket; the Running file SHA-256 was identical before and after restart.
+
+HTTP forwarding now uses a bounded transport per downstream connection rather
+than allocating one per request. A local regression sends two allowed requests
+over a single upstream TCP connection and proves a blocked request creates no
+upstream application request. Full Go tests, vet, proxy race tests and web
+tests pass locally. M4 traffic acceptance remains **NOT_RUN**: no M4 profile,
+CA, proxy binary, or TPROXY selector was enabled for this permission test.
+
+## Ubuntu activation and HTTP fixes — 2026-10-24
+
+Real deployment uncovered three defects that local contract tests had missed:
+
+- Management Candidate validation always invoked the M2-only compiler and
+  rejected valid M4 profile references. It now selects the same capability
+  compiler as the authoritative engine.
+- The M3/M4 App-ID guard concatenated seven fields. Ubuntu nft 1.0.9 truncated
+  its datatype encoding and crashed on readback, breaking activation and its
+  compensation. Inspection schema 2 uses a scalar CT-ID verdict map, a zone
+  condition and a private five-tuple timeout set; all seven identity fields
+  remain enforced. Real namespace traffic proves wrong-zone/protocol/port
+  isolation, exact blocking, renew/remove, TTL expiry and startup cleanup.
+  Activation snapshot schema 3 authenticates older schema-1/2 hashes before
+  recompiling their configuration/generation for the corrected guard.
+- A conntrack event arriving after proxy connection-open caused an erroneous
+  request denial when the proxy still carried an empty session ID. The engine
+  now binds this session once and records it in request evidence; a different
+  nonempty session cannot inherit the connection.
+
+Matching binaries are installed on the NGFW VM. The previously interrupted
+activation was recovered from Running without editing Running, and its journal
+was removed. HTTP/1.1 clean/SQLi/XSS now have real LAN→NGFW→DMZ evidence:
+clean reaches the origin; the two attacks return 403 with the expected Suricata
+SID and `GATE_SIGNATURE_BLOCK`, and their nonces are absent upstream.
+
+The final test restores both the original Running configuration and Candidate
+draft, verifies that the proxy selector and policy route are withdrawn, and
+leaves M4 OFF. M1/M2 non-traffic preflight scripts pass. This does **not** close
+the full M4 matrix: HTTPS/CA, HTTP/2, M4 with NAT, failure/overload/restart,
+secret-redaction, QUIC, soak and performance acceptance remain pending.
+See `artifacts/m4-fix-20261024/RESULTS.md` and
+`docs/m4/INSPECTION_GUARD_SCHEMA.md` for evidence and the legacy-table upgrade
+restriction. Historical checkpoints above describe their state at that time.
+
+## HTTPS health-counter recheck — 2026-10-24 05:58 UTC
+
+The first HTTPS run's zero-counter assertion was made against a heartbeat
+older than its request evidence. It was a test false failure. The maintained
+HTTPS runner now waits at most eight seconds for a healthy same-generation
+heartbeat after the engine request timestamp and the required counter deltas.
+Seven polling regressions and targeted proxy/engine race tests pass.
+
+With the same installed NGFW binaries, M4-07 and M4-08 pass on the Ubuntu
+LAN/NGFW/DMZ lab: clean verified TLS reaches the origin; SQLi/XSS return 403
+with SID 9904003/9904004 and never reach it. Final counters are decrypted=3,
+intercepted=3, request_allowed=1 and request_blocked=2. The verified client
+uses NGFW UTC plus five minutes to account for the documented VM clock skew.
+
+Running baseline and the separate Candidate draft are restored at version 66,
+M4 is OFF, and all temporary CA/server/systemd resources are confirmed removed.
+Rows 09 onward still require their own acceptance runs; the full matrix remains
+pending. See [the recheck report](../../artifacts/m4-health-recheck-20261024T0558Z/RESULTS.md).
+
+## TLS continuation: first unaccepted requirement at M4-15, 2026-10-24
+
+With synchronized VM OS clocks and the same installed NGFW binaries, rows
+M4-09/10/11/14 now have PASS evidence. This includes bidirectional BYPASS TLS
+byte identity, 11 exclusion selector cases with actual engine connection
+decisions, fragmented ClientHello in BYPASS/DECRYPT, and client distrust/pinning
+with no silent bypass. Rows 12 and 13 remain partial: no-SNI and hostname
+mismatch pass; ECH traffic and an independent untrusted chain remain unrun.
+
+M4-15 is FAIL for diagnostic completeness. An origin requiring a client
+certificate causes HTTP 502 with zero origin HTTP requests, but only the
+generic upstream_connect_fail counter advances. There is no request-correlated
+upstream mTLS failure reason as required by specification section 14.3 and the
+reason-code contract. The inspection ALLOW/COMPLETE event is a pre-forward
+content verdict, not an upstream success result. No product fix was made;
+testing stopped here so subsequent rows remain pending.
+
+Running was restored at version 88 with checksum 850b10c2...b8d19d, the separate
+Candidate was restored, and temporary CA/origin/capture/systemd resources were
+removed. M4 is OFF and engine/API/proxy are active. See the
+[report](../../artifacts/m4-tls-continuation-20261024T1120Z/RESULTS.md) and its
+ACCEPTANCE_ASSESSMENT.json; the raw runner's deferred partial classification
+is preserved separately from this final specification review.
+
+## M4-15 fixed and accepted, 2026-10-24 12:32 UTC
+
+The proxy now observes upstream certificate requests per TLS socket and
+classifies a peer certificate rejection as TLS_UPSTREAM_MTLS_UNSUPPORTED.
+Optional client authentication still succeeds; verification, unrelated TLS
+alerts and network failures retain separate outcomes. No raw error-string
+matching, client impersonation or insecure TLS fallback was added.
+
+The existing report_request_result IPC operation is now implemented end to end.
+The engine validates request/connection/decision/instance/generation, preserves
+the content verdict and annotates bounded request evidence with a timestamped
+forward result. Duplicate reports are idempotent, contradictory/stale reports
+are rejected, and reporting has a one-second deadline plus an explicit failure
+counter. M2 session storage is unchanged.
+
+Full Go tests/vet and targeted race tests on Windows and Linux pass. The Ubuntu
+LAN/NGFW/DMZ recheck has 14 PASS controls: TLS 1.2/1.3 required client auth gives
+502, no origin HTTP request and the correct request-correlated mTLS reason;
+optional/no auth, hostname mismatch, network closure/refusal and clean/SQLi/XSS
+controls also pass. The matched new engine/API/proxy binaries remain installed.
+Running/Candidate were restored at version 92 and M4 is OFF. One-time lab clock
+alignment was needed for normal client certificate-validity checks.
+
+See [the fix report](../../artifacts/m4-mtls-fix-20261024T113924Z/RESULTS.md).
+This accepts M4-15; it does not accept the remaining unrun M4 matrix rows.
+
+## HTTP/2 continuation: API contract regression — 2026-10-30
+
+The earlier M4-16 network prerequisite now passes: Running v209 matches the
+managed kernel addresses/routes, DMZ is reachable, and VM clocks differ by
+less than 0.21 seconds. The installed engine/API/proxy were identified before
+the run; no binary was replaced.
+
+The real LAN client negotiated verified TLS 1.3 with ALPN `h2`, received HTTP/2
+200, and the DMZ HTTPS origin logged the exact request. The real request worker
+completed inspection and the engine recorded COMPLETE ALLOW. The acceptance
+runner nevertheless failed its required authoritative-forward assertion.
+
+Read-only raw engine IPC proves a correlated `forward` result containing HTTP
+200 and `UPSTREAM_RESPONSE_RECEIVED`. The same record through the API is exactly
+equal after removing `forward`. The API used a clean published M3 build whose
+`domain.RequestGateEvidence` lacks the uncommitted M4 `Forward` extension.
+Consequently its typed IPC decoder discards the field before HTTP serialization.
+This is a deployed API contract mismatch, not an absent engine forward record.
+
+M4-16 remains FAIL. Subsequent traffic cases were not run and no product fix
+was applied in this test continuation. A repair must publish the shared M4 DTO
+and build a compatible API while retaining current authentication/M3 fixes,
+then rerun the affected forward-evidence controls and M4-16.
+
+Running content and the separate Candidate draft/NOT_RUN validation state were
+restored at version 211. M4 is OFF, temporary keys/origin/drop-ins are removed,
+and the selector and policy route are absent. Engine/API remain active;
+proxy/IDS/IPS were returned to their initially inactive state. See the
+[live report and exact IPC/API comparison](../../artifacts/m4-continuation-20261030/RESULTS.md).
+
+## Forward contract repaired; M4-16..20 accepted — 2026-10-30
+
+Commit `04c6cc4` publishes the shared `RequestGateEvidence.Forward` contract,
+its detached clone, result DTO/reason validation, result event and counter names.
+A regression writes raw engine JSON over a real Unix socket before invoking the
+authenticated production HTTP handler. It fails on the previous published DTO
+for response-success, TLS verification, mTLS and truncated-response cases, then
+passes after the shared contract is included; legacy records do not acquire an
+invented forward result. Domain/IPC/management tests pass on Windows and Linux;
+targeted Linux vet/race checks pass.
+
+The installed engine base was reproduced byte-identically before the published
+typed-session-error changes were added. This preserves its deployed M2/M4
+behavior while aligning missing-session error codes with the new API. The API
+was built from clean Git commit `04c6cc4`, preserving authentication and Candidate
+storage. Both source archives and binary hashes are recorded in the repair report.
+The actual API executable also passed 26 isolated read/error/authentication
+controls; installed unauthenticated reads return 401 and missing session
+GET/DELETE return 404. Running/Candidate survived deployment unchanged.
+
+Real LAN→NGFW→DMZ traffic now accepts M4-16 (verified H2 plus successful forward
+evidence), M4-17 (concurrent clean/SQLi on one TLS connection), M4-18 (24 in-flight
+requests, 16 clean and 8 SQLi/XSS with correct isolated verdicts/body hashes),
+M4-19 (chunked clean/SQLi) and M4-20 (gzip/zlib-deflate clean/SQLi). H2 isolation
+used two workers and a configured ten-second request deadline.
+
+Testing stopped at a new **M4-21 FAIL**. The decoder detects the decompression
+limit and the strict profile blocks before origin, but the engine's generic
+unavailable branch returns 503/UNAVAILABLE rather than the documented
+413/PARTIAL coverage-limit outcome. The source also routes this error through
+generic fail-open; its interaction with `oversize_action=BLOCK` requires repair
+and an explicit OPEN/BLOCK regression, not just changing one response status.
+That OPEN/BLOCK combination was not exercised live in this continuation.
+
+The first body-client attempt exited 127 before traffic because a generated
+Python shebang had Windows CRLF. It is retained as HARNESS_BLOCKED. Writing LF
+bytes and explicitly invoking Python corrected the runner before the real body
+cases. Product behavior was not changed for that fixture correction.
+
+Final Running content and the separate Candidate/NOT_RUN state are restored at
+version 219. M4 is OFF, no activation journal/selector/policy route remains,
+temporary secrets are removed, engine/API are active, and proxy/IDS/IPS are back
+to their entry inactive state. M4-22 onward remains unrun. See
+[repair, deployment and live evidence](../../artifacts/m4-forward-fix-20261030/RESULTS.md).
