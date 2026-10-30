@@ -537,16 +537,38 @@ func runtimeBuildVersion() string {
 	return version
 }
 func (s *RuntimeServiceAdapter) ListSecurityEvents(_ context.Context, query domain.SecurityQuery) (domain.SecurityEventPage, error) {
-	if s.Runtime == nil || s.Runtime.InspectionRuntime() == nil {
+	if s.Runtime == nil {
 		return domain.SecurityEventPage{}, errors.New("inspection runtime unavailable")
 	}
-	return s.Runtime.InspectionRuntime().SecurityEvents().Query(query), nil
+	if coordinator := s.Runtime.InspectionRuntime(); coordinator != nil {
+		return coordinator.SecurityEvents().Query(query), nil
+	}
+	if s.Config != nil && domain.UsesM3(s.Config.Running()) {
+		return domain.SecurityEventPage{}, errors.New("inspection runtime unavailable")
+	}
+	if s.Runtime.Events == nil {
+		return domain.SecurityEventPage{}, errors.New("runtime event stream unavailable")
+	}
+	// Disabled inspection is a valid configuration, not an engine outage. The
+	// empty stream has an engine/generation identity without allocating another
+	// event store. Switching from an enabled store explicitly resets its cursor.
+	streamID := fmt.Sprintf("disabled-%s-%d", s.Runtime.Events.StreamID(), s.Runtime.CurrentGeneration())
+	reset := query.StreamID != "" && query.StreamID != streamID || query.AfterSequence != 0
+	return domain.SecurityEventPage{Items: []domain.ThreatEvent{}, StreamID: streamID,
+		NextCursor: streamID + ":0", Gap: reset, ResetRequired: reset}, nil
 }
 func (s *RuntimeServiceAdapter) GetSecurityEvent(_ context.Context, id string) (domain.ThreatEvent, error) {
-	if s.Runtime == nil || s.Runtime.InspectionRuntime() == nil {
+	if s.Runtime == nil {
 		return domain.ThreatEvent{}, errors.New("inspection runtime unavailable")
 	}
-	value, ok := s.Runtime.InspectionRuntime().SecurityEvents().Get(id)
+	coordinator := s.Runtime.InspectionRuntime()
+	if coordinator == nil {
+		if s.Config != nil && domain.UsesM3(s.Config.Running()) {
+			return domain.ThreatEvent{}, errors.New("inspection runtime unavailable")
+		}
+		return domain.ThreatEvent{}, ErrSecurityEventNotFound
+	}
+	value, ok := coordinator.SecurityEvents().Get(id)
 	if !ok {
 		return domain.ThreatEvent{}, ErrSecurityEventNotFound
 	}
