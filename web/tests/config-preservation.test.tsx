@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { normalizeConfigExport } from "../src/runtimeData.ts";
-import { ConfigStatusBar, ConfigurationPage, InspectionProfileEditor, PolicyEditor } from "../src/App.tsx";
+import { ConfigStatusBar, ConfigurationPage, InspectionProfileEditor, PolicyEditor, PolicyPage } from "../src/App.tsx";
 import type { NGFWConfig, SecurityPolicy, SecurityProfile } from "../src/types.ts";
 
 function wireConfig() {
@@ -122,4 +122,32 @@ test("unavailable config cannot advertise a synced Candidate or enable activatio
   assert.ok(view.root.findAllByType("button").every(b => b.props.disabled));
   assert.match(JSON.stringify(view.toJSON()), /Chưa đọc được cấu hình/);
   view.unmount();
+});
+
+test("editing or toggling a policy and editing a profile preserve backend array order", async () => {
+  const { normalized } = exportConfig();
+  const policy = normalized.candidate.policies[0];
+  const profile = normalized.candidate.security_profiles[0];
+  normalized.candidate.policies = [{ ...policy, id: "late", name: "Later rule", priority: 30 }, policy, { ...policy, id: "last", name: "Last rule", priority: 20 }];
+  normalized.candidate.security_profiles = [{ ...profile, id: "other" }, profile];
+  let savedPolicies: SecurityPolicy[] = [];
+  let savedProfiles: SecurityProfile[] = [];
+  let view!: ReactTestRenderer;
+  await act(async () => { view = create(<PolicyPage config={normalized} onSave={async p => { savedPolicies = p; return true; }} onSaveProfiles={async p => { savedProfiles = p; return true; }} onValidate={async () => true} onCommit={async () => true} onRollback={async () => true} onOpenAdvanced={() => undefined}/>); });
+  try {
+    const policyRow = () => view.root.findAllByType("tr").find(row => row.findAllByType("strong").some(n => n.children.includes(policy.name)))!;
+    act(() => policyRow().findAllByType("button").find(b => b.props.title === "Sửa")!.props.onClick());
+    act(() => view.root.findAllByType("input").find(n => n.props.value === policy.name)!.props.onChange({ target: { value: "New name" } }));
+    await act(async () => { view.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(savedPolicies.map(p => p.id), ["late", "policy", "last"]);
+    assert.equal(savedPolicies[1].name, "New name");
+    await act(async () => { await policyRow().findAllByType("button").find(b => b.props["aria-label"] === "Tắt policy")!.props.onClick(); });
+    assert.deepEqual(savedPolicies.map(p => p.id), ["late", "policy", "last"]);
+    assert.equal(savedPolicies[1].enabled, false);
+    act(() => view.root.findAllByType("button").filter(b => b.props.title === "Sửa profile")[1].props.onClick());
+    act(() => view.root.findAllByType("input").find(n => n.props.value === profile.name)!.props.onChange({ target: { value: "Profile new name" } }));
+    await act(async () => { view.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(savedProfiles.map(p => p.id), ["other", "profile"]);
+    assert.deepEqual(savedProfiles[1], { ...profile, name: "Profile new name" });
+  } finally { view.unmount(); }
 });

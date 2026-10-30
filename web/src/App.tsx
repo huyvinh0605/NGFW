@@ -949,8 +949,10 @@ export function PolicyPage({ config, capabilities, onSave, onSaveProfiles, onVal
   async function savePolicy(policy: SecurityPolicy) {
     if (saveInFlight.current) return;
     saveInFlight.current = true;
-    const next = policies.filter((item) => item.id !== policy.id);
-    next.push(policy);
+    const current = config?.candidate.policies ?? [];
+    const next = current.some((item) => item.id === policy.id)
+      ? current.map((item) => item.id === policy.id ? policy : item)
+      : [...current, policy];
     setBusy("save");
     try {
       const ok = await onSave(next);
@@ -965,14 +967,14 @@ export function PolicyPage({ config, capabilities, onSave, onSaveProfiles, onVal
     if (!window.confirm(`Xóa policy “${policy.name}” khỏi candidate?`)) return;
     saveInFlight.current = true;
     setBusy(policy.id);
-    try { await onSave(policies.filter((item) => item.id !== policy.id)); }
+    try { await onSave((config?.candidate.policies ?? []).filter((item) => item.id !== policy.id)); }
     finally { setBusy(""); saveInFlight.current = false; }
   }
   async function togglePolicy(policy: SecurityPolicy) {
     if (saveInFlight.current) return;
     saveInFlight.current = true;
     setBusy(policy.id);
-    try { await onSave(policies.map((item) => item.id === policy.id ? { ...item, enabled: !item.enabled } : item)); }
+    try { await onSave((config?.candidate.policies ?? []).map((item) => item.id === policy.id ? { ...item, enabled: !item.enabled } : item)); }
     finally { setBusy(""); saveInFlight.current = false; }
   }
   async function saveProfile(profile: SecurityProfile) {
@@ -980,8 +982,10 @@ export function PolicyPage({ config, capabilities, onSave, onSaveProfiles, onVal
     saveInFlight.current = true;
     setBusy("profile-save");
     try {
-      const next = (config?.candidate.security_profiles ?? []).filter((item) => item.id !== profile.id);
-      next.push(profile);
+      const current = config?.candidate.security_profiles ?? [];
+      const next = current.some((item) => item.id === profile.id)
+        ? current.map((item) => item.id === profile.id ? profile : item)
+        : [...current, profile];
       if (await onSaveProfiles(next)) setEditingProfile(null);
     } finally { setBusy(""); saveInFlight.current = false; }
   }
