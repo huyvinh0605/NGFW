@@ -78,12 +78,15 @@ func (m *MonitoredSource) Run(ctx context.Context, sink inspection.ObservationSi
 			}
 		}
 		now := time.Now().UTC()
-		stalled := m.Health.HealthSnapshot().State == "HEALTHY" && !m.Health.CaptureLive(now)
+		observed := m.snapshotAt(now)
+		// Fresh control replies must not prevent recovery of a stalled writer
+		// or reader. STARTING has its heartbeat grace period before recovery.
+		stalled := observed.ProcessReachable && !observed.CaptureLive && m.Health.snapshotAt(now).State != "STARTING" && observed.State != "DISABLED"
 		wait := m.RecoveryWait
 		if wait <= 0 {
 			wait = 30 * time.Second
 		}
-		if m.Recover != nil && (failedProbes >= 2 || stalled) && (lastRecovery.IsZero() || now.Sub(lastRecovery) >= wait) {
+		if m.Recover != nil && !m.Health.awaitingInitialStats(now) && (failedProbes >= 2 || stalled) && (lastRecovery.IsZero() || now.Sub(lastRecovery) >= wait) {
 			recoveryCtx, recoveryCancel := context.WithTimeout(ctx, 5*time.Second)
 			recoveryErr := m.Recover(recoveryCtx, m.SensorID)
 			recoveryCancel()

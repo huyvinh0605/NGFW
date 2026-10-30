@@ -99,6 +99,13 @@ func (h *HealthReducer) captureLiveLocked(now time.Time) bool {
 func (h *HealthReducer) HealthSnapshot() inspection.SourceHealth {
 	return h.snapshotAt(time.Now().UTC())
 }
+
+func (h *HealthReducer) awaitingInitialStats(now time.Time) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.statsTimeout > 0 && h.lastStatsRead == nil && now.Sub(h.statsStarted) <= h.statsTimeout
+}
+
 func (h *HealthReducer) snapshotAt(now time.Time) inspection.SourceHealth {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
