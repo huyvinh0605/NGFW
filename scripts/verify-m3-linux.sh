@@ -69,7 +69,8 @@ api_get() {
 }
 
 collect_evidence() {
-  local stage=$1 directory="$evidence_dir/$stage"
+  local stage=$1
+  local directory="$evidence_dir/$stage"
   mkdir -p -- "$directory"
   uname -a >"$directory/uname.txt"
   nft --version >"$directory/nft-version.txt" 2>&1 || true
