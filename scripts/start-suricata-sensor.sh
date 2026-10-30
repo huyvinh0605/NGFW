@@ -53,6 +53,10 @@ common_args=(
 # systemd retry even though the previous process has exited.
 
 if [[ "$mode" == "ids" ]]; then
-  exec "$suricata_binary" "${common_args[@]}" --nflog=100
+  # NFLOG copies can precede checksum completion by NIC offload. Suricata's
+  # NFLOG backend does not carry the skb checksum flags into its packet, so
+  # checksum validation here can discard real payload visible to the kernel.
+  # This override applies only to passive copies; NFQUEUE keeps its checks.
+  exec "$suricata_binary" "${common_args[@]}" --nflog=100 -k none
 fi
 exec "$suricata_binary" "${common_args[@]}" -q 100

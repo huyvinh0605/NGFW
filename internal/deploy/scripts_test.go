@@ -115,6 +115,12 @@ func TestSensorLauncherUsesLiveCaptureModeAndNotPCAPSocketMode(t *testing.T) {
 		if strings.Contains(joined, "--pidfile") || strings.Contains(argsAsLines(payload), "\n-D\n") {
 			t.Fatalf("%s Type=simple launcher must stay foreground without a stale pidfile: %s", test.mode, joined)
 		}
+		if test.mode == "ids" && !strings.Contains(argsAsLines(payload), "\n-k\nnone\n") {
+			t.Fatalf("NFLOG copies lost the checksum-offload override: %s", joined)
+		}
+		if test.mode == "ips" && strings.Contains(argsAsLines(payload), "\n-k\n") {
+			t.Fatalf("passive NFLOG checksum override leaked into inline NFQUEUE: %s", joined)
+		}
 		for _, expected := range test.want {
 			if !strings.Contains(argsAsLines(payload), expected) {
 				t.Fatalf("%s launcher missing %q: %s", test.mode, expected, joined)
