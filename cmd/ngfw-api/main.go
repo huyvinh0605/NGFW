@@ -52,13 +52,16 @@ func main() {
 	if apiStateDir == "" {
 		apiStateDir = filepath.Join(stateRoot, "management")
 	}
-	manager, err := config.NewManager(apiStateDir, initial)
+	manager, err := config.NewEditorManager(apiStateDir, initial)
 	if err != nil {
 		logger.Error("configuration manager failed", "error", err)
 		os.Exit(1)
 	}
 	if haveEngineSnapshot {
-		manager.SyncRunning(engineSnapshot, engineVersion)
+		if err := manager.SyncRunning(engineSnapshot, engineVersion); err != nil {
+			logger.Error("candidate storage failed", "error", err)
+			os.Exit(1)
+		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

@@ -419,15 +419,16 @@ func validateRouteFamily(route domain.Route) error {
 }
 
 type Manager struct {
-	mu           sync.RWMutex
-	activationMu sync.Mutex
-	dir          string
-	running      domain.Config
-	candidate    domain.Config
-	version      domain.ConfigVersion
-	previous     *domain.Config
-	validator    Validator
-	validation   candidateValidation
+	mu            sync.RWMutex
+	activationMu  sync.Mutex
+	dir           string
+	running       domain.Config
+	candidate     domain.Config
+	version       domain.ConfigVersion
+	previous      *domain.Config
+	validator     Validator
+	validation    candidateValidation
+	persistEditor bool
 }
 
 type candidateValidation struct {
@@ -483,6 +484,9 @@ func (m *Manager) SetCandidate(c domain.Config) []string {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.persistEditorLocked(c, m.running, m.version); err != nil {
+		return append(normalizationErrors, "persist candidate: "+err.Error())
+	}
 	m.candidate = cloneConfig(c)
 	m.validation = candidateValidation{}
 	return append(normalizationErrors, m.validator.Validate(c)...)
@@ -503,6 +507,9 @@ func (m *Manager) SetCandidateIfValid(c domain.Config) []string {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.persistEditorLocked(normalized, m.running, m.version); err != nil {
+		return []string{"persist candidate: " + err.Error()}
+	}
 	m.candidate = cloneConfig(normalized)
 	m.validation = candidateValidation{}
 	return nil
@@ -530,7 +537,7 @@ func normalizeCandidateServices(c domain.Config) (domain.Config, []string) {
 // SyncRunning updates the management-plane snapshot after the privileged
 // engine has committed a configuration. The API never writes running.json;
 // this keeps its candidate editor aligned with the engine-owned version.
-func (m *Manager) SyncRunning(c domain.Config, v domain.ConfigVersion) {
+func (m *Manager) SyncRunning(c domain.Config, v domain.ConfigVersion) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	oldRunning := cloneConfig(m.running)
@@ -543,18 +550,20 @@ func (m *Manager) SyncRunning(c domain.Config, v domain.ConfigVersion) {
 	if configDigest(m.candidate) == configDigest(c) {
 		m.validation = candidateValidation{checksum: configDigest(c), valid: true, checked: true}
 	}
+	return m.persistEditorLocked(m.candidate, m.running, m.version)
 }
 
 // SyncRollback intentionally replaces Candidate as well: rollback is an
 // explicit restore operation, so leaving a pre-rollback draft in the editor
 // would make the management view claim a state different from the engine.
-func (m *Manager) SyncRollback(c domain.Config, v domain.ConfigVersion) {
+func (m *Manager) SyncRollback(c domain.Config, v domain.ConfigVersion) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.running = cloneConfig(c)
 	m.candidate = cloneConfig(c)
 	m.version = v
 	m.validation = candidateValidation{checksum: configDigest(c), valid: true, checked: true}
+	return m.persistEditorLocked(m.candidate, m.running, m.version)
 }
 
 // MarkCandidateValidation records the result for the exact Candidate digest

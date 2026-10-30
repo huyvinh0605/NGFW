@@ -864,7 +864,12 @@ func (a *API) commit(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "COMMIT_FAILED", err.Error())
 			return
 		}
-		a.Config.SyncRunning(candidate, v)
+		if err := a.Config.SyncRunning(candidate, v); err != nil {
+			a.Logger.Error("configuration committed but editor state could not be saved", "version", v.Version, "error", err)
+			a.auditAction(r, "COMMIT", "config", strconv.FormatUint(v.Version, 10), "SUCCESS", req.Comment)
+			writeJSON(w, 200, map[string]any{"success": true, "data": v, "warnings": []string{"CANDIDATE_PERSIST_FAILED"}})
+			return
+		}
 		a.auditAction(r, "COMMIT", "config", strconv.FormatUint(v.Version, 10), "SUCCESS", req.Comment)
 		writeJSON(w, 200, map[string]any{"success": true, "data": v})
 		return
@@ -901,7 +906,12 @@ func (a *API) rollback(w http.ResponseWriter, r *http.Request) {
 		if running, _, syncErr := a.Runtime.GetRunningConfig(r.Context()); syncErr == nil {
 			// Rollback response carries the new version; the engine response is
 			// authoritative for the configuration payload.
-			a.Config.SyncRollback(running, v)
+			if err := a.Config.SyncRollback(running, v); err != nil {
+				a.Logger.Error("configuration rolled back but editor state could not be saved", "version", v.Version, "error", err)
+				a.auditAction(r, "ROLLBACK", "config", strconv.FormatUint(v.Version, 10), "SUCCESS", "restored previous configuration")
+				writeJSON(w, 200, map[string]any{"success": true, "data": v, "warnings": []string{"CANDIDATE_PERSIST_FAILED"}})
+				return
+			}
 		}
 		a.auditAction(r, "ROLLBACK", "config", strconv.FormatUint(v.Version, 10), "SUCCESS", "restored previous configuration")
 		writeJSON(w, 200, map[string]any{"success": true, "data": v})
