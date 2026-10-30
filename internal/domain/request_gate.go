@@ -161,6 +161,49 @@ type RequestDecision struct {
 	Reason           string          `json:"reason"`
 }
 
+// ProxyRequestResult reports transport facts after an engine ALLOW. It cannot
+// authorize traffic or replace the content-inspection decision. No raw error,
+// request data, certificate or key crosses this boundary.
+type ProxyRequestResult struct {
+	EngineInstanceID           string `json:"engine_instance_id,omitempty"`
+	ConfigGeneration           uint64 `json:"config_generation"`
+	RequestID                  string `json:"request_id"`
+	ConnectionID               string `json:"connection_id"`
+	DecisionID                 string `json:"decision_id"`
+	HTTPStatus                 int    `json:"http_status"`
+	ReasonCode                 string `json:"reason_code"`
+	ClientCertificateRequested bool   `json:"client_certificate_requested,omitempty"`
+}
+
+// RequestForwardResult is timestamped by the engine, not by the proxy.
+type RequestForwardResult struct {
+	HTTPStatus                 int       `json:"http_status"`
+	ReasonCode                 string    `json:"reason_code"`
+	ClientCertificateRequested bool      `json:"client_certificate_requested,omitempty"`
+	ObservedAt                 time.Time `json:"observed_at"`
+}
+
+type RequestResultReceipt struct {
+	RequestID        string `json:"request_id"`
+	DecisionID       string `json:"decision_id"`
+	ConfigGeneration uint64 `json:"config_generation"`
+}
+
+func ValidRequestResult(code string, status int) bool {
+	switch code {
+	case "UPSTREAM_RESPONSE_RECEIVED":
+		return status >= 200 && status <= 599
+	case "UPSTREAM_RESPONSE_TRUNCATED":
+		return status >= 200 && status <= 599
+	case "TLS_UPSTREAM_MTLS_UNSUPPORTED", "TLS_UPSTREAM_VERIFY_FAILED", "TLS_UPSTREAM_HANDSHAKE_FAILED", "TLS_UPSTREAM_CONNECT_FAILED", "UPSTREAM_CONNECT_FAILED", "UPSTREAM_RESPONSE_INVALID":
+		return status == 502
+	case "UPSTREAM_REQUEST_INVALID":
+		return status == 400
+	default:
+		return false
+	}
+}
+
 // RequestGateEvidence is the engine-owned, bounded management record. The
 // request DTO already excludes raw query, headers and body; the store also
 // truncates path and alert details before retaining a copy.
@@ -174,11 +217,16 @@ type RequestGateEvidence struct {
 	AlertCount      int                     `json:"alert_count"`
 	AlertsTruncated bool                    `json:"alerts_truncated"`
 	Decision        RequestDecision         `json:"decision"`
+	Forward         *RequestForwardResult   `json:"forward,omitempty"`
 }
 
 func (e RequestGateEvidence) Clone() RequestGateEvidence {
 	e.Context = e.Context.Clone()
 	e.Inspection = e.Inspection.Clone()
+	if e.Forward != nil {
+		value := *e.Forward
+		e.Forward = &value
+	}
 	return e
 }
 

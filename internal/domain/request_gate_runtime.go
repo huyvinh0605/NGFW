@@ -67,7 +67,7 @@ func ValidGateFailureCode(code string) bool {
 
 func ValidGateCounter(name string) bool {
 	switch name {
-	case "intercepted", "bypassed", "decrypted", "request_allowed", "request_blocked", "fail_open", "fail_close", "inspection_timeout", "queue_rejected", "tls_handshake_fail", "upstream_verify_fail", "body_limit", "decompression_limit", "client_hello_timeout", "client_hello_invalid", "upstream_connect_fail", "capacity_rejected", "resolve_failed", "handler_failed", "engine_unavailable":
+	case "intercepted", "bypassed", "decrypted", "request_allowed", "request_blocked", "fail_open", "fail_close", "inspection_timeout", "queue_rejected", "tls_handshake_fail", "upstream_verify_fail", "body_limit", "decompression_limit", "client_hello_timeout", "client_hello_invalid", "upstream_connect_fail", "upstream_mtls_unsupported", "upstream_handshake_fail", "result_report_fail", "capacity_rejected", "resolve_failed", "handler_failed", "engine_unavailable":
 		return true
 	default:
 		return false
