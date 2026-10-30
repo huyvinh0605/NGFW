@@ -191,7 +191,7 @@ func writeInspectionReadError(w http.ResponseWriter, err error, allowNotFound bo
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || code == "DEADLINE_EXCEEDED" || errors.As(err, &timeout) && timeout.Timeout():
 		writeError(w, http.StatusGatewayTimeout, "ENGINE_TIMEOUT", err.Error())
-	case allowNotFound && (errors.Is(err, domain.ErrSecurityEventNotFound) || code == "NOT_FOUND"):
+	case allowNotFound && (errors.Is(err, domain.ErrSecurityEventNotFound) || errors.Is(err, domain.ErrRuntimeSessionNotFound) || code == "NOT_FOUND"):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 	default:
 		writeError(w, http.StatusServiceUnavailable, "ENGINE_UNAVAILABLE", err.Error())

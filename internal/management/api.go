@@ -944,7 +944,7 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := a.Runtime.ListSessions(r.Context(), query)
 		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, "ENGINE_UNAVAILABLE", err.Error())
+			writeInspectionReadError(w, err, false)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
@@ -962,7 +962,7 @@ func (a *API) sessionByID(w http.ResponseWriter, r *http.Request) {
 	if a.Runtime != nil {
 		if r.Method == http.MethodDelete {
 			if err := a.Runtime.RevokeSession(r.Context(), id, "manual session revoke"); err != nil {
-				writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+				writeInspectionReadError(w, err, true)
 				return
 			}
 			a.auditAction(r, "REVOKE", "session", id, "SUCCESS", "runtime revoke guard installed")
@@ -975,7 +975,7 @@ func (a *API) sessionByID(w http.ResponseWriter, r *http.Request) {
 		}
 		value, err := a.Runtime.GetSession(r.Context(), id)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+			writeInspectionReadError(w, err, true)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"session": value, "security_context": map[string]any{"inspection": value.Inspection}}})

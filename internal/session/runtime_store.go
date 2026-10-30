@@ -16,7 +16,7 @@ import (
 
 var (
 	ErrRuntimeCapacity = errors.New("runtime session capacity reached")
-	ErrSessionMissing  = errors.New("runtime session not found")
+	ErrSessionMissing  = domain.ErrRuntimeSessionNotFound
 	ErrIdentityMissing = errors.New("conntrack identity is incomplete")
 	ErrAliasAmbiguous  = errors.New("tuple alias resolves to multiple sessions")
 	ErrStaleEvent      = errors.New("stale conntrack event")

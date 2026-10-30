@@ -76,7 +76,7 @@ func (f *runtimeAPIFake) ListSessions(context.Context, domain.SessionQuery) (dom
 	return domain.SessionPage{}, nil
 }
 func (f *runtimeAPIFake) GetSession(context.Context, string) (domain.RuntimeSession, error) {
-	return domain.RuntimeSession{}, errors.New("session not found")
+	return domain.RuntimeSession{}, domain.ErrRuntimeSessionNotFound
 }
 func (f *runtimeAPIFake) SessionStats(context.Context) (domain.RuntimeStats, error) {
 	return f.stats, nil

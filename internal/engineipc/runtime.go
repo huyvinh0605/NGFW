@@ -82,7 +82,7 @@ func (e *RemoteError) Error() string     { return e.Message }
 func (e *RemoteError) ErrorCode() string { return e.Code }
 func (e *RemoteError) Is(target error) bool {
 	return (target == context.DeadlineExceeded && e.Code == "DEADLINE_EXCEEDED") ||
-		(target == domain.ErrSecurityEventNotFound && e.Code == "NOT_FOUND")
+		((target == domain.ErrSecurityEventNotFound || target == domain.ErrRuntimeSessionNotFound) && e.Code == "NOT_FOUND")
 }
 
 func (c *RuntimeClient) call(ctx context.Context, operation string, value any, out any, mutation bool) error {
@@ -395,7 +395,7 @@ func runtimeErrorCode(err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return "DEADLINE_EXCEEDED"
-	case errors.Is(err, domain.ErrSecurityEventNotFound):
+	case errors.Is(err, domain.ErrSecurityEventNotFound) || errors.Is(err, domain.ErrRuntimeSessionNotFound):
 		return "NOT_FOUND"
 	default:
 		return "RUNTIME_ERROR"
