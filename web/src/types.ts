@@ -262,6 +262,8 @@ export type InterfaceConfig = {
   mac_address?: string;
   zone_id: string;
   mode: string;
+  parent_interface_id?: string;
+  vlan_id?: number;
   ipv4_addresses: string[];
   ipv6_addresses?: string[];
   mtu: number;
@@ -338,6 +340,30 @@ export type SecurityProfile = {
   inspection_required: boolean;
   inspection_failure_action: string;
   inspection?: InspectionProfile;
+  request_gate?: RequestGateProfile;
+};
+
+export type RequestGateProfile = {
+  enabled: boolean;
+  fail_mode: "OPEN" | "CLOSE" | string;
+  oversize_action: string;
+  unsupported_encoding_action: string;
+  block_quic: boolean;
+};
+
+export type RequestGateConfig = {
+  enabled: boolean;
+  [field: string]: unknown;
+};
+
+export type TLSExclusion = {
+  id: string;
+  name: string;
+  domains?: string[];
+  destination_cidrs?: string[];
+  ports?: number[];
+  enabled: boolean;
+  reason: string;
 };
 
 export type InspectionProfile = {
@@ -374,6 +400,8 @@ export type NGFWConfig = {
   policies: SecurityPolicy[];
   security_profiles: SecurityProfile[];
   inspection?: InspectionConfig;
+  request_gate?: RequestGateConfig;
+  tls_exclusions?: TLSExclusion[];
   max_sessions: number;
   max_events_queue: number;
   max_http_body_inspection: number;

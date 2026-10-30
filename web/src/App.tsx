@@ -449,8 +449,16 @@ export default function App() {
     return false;
   }, [notify, token]);
 
+  const requireConfigAccess = useCallback(() => {
+    if (!config || configError.current) {
+      notify("error", "Chưa có cấu hình mới nhất từ API. Hãy tải lại cấu hình trước khi thay đổi.");
+      return false;
+    }
+    return requireAccess();
+  }, [config, notify, requireAccess]);
+
   const savePolicies = useCallback(async (policies: SecurityPolicy[]) => {
-    if (!requireAccess()) return false;
+    if (!requireConfigAccess()) return false;
     try {
       await api<SecurityPolicy[]>("/api/v1/policies", { method: "PUT", body: JSON.stringify(policies) }, token);
       await loadConfig();
@@ -463,10 +471,10 @@ export default function App() {
       notify("error", errorMessage(error));
       return false;
     }
-  }, [loadConfig, notify, requireAccess, token]);
+  }, [loadConfig, notify, requireConfigAccess, token]);
 
   const saveCandidate = useCallback(async (candidate: NGFWConfig) => {
-    if (!requireAccess()) return false;
+    if (!requireConfigAccess()) return false;
     try {
       await api<NGFWConfig>("/api/v1/config/candidate", { method: "PUT", body: JSON.stringify(candidate) }, token);
       await loadConfig();
@@ -476,10 +484,10 @@ export default function App() {
       notify("error", errorMessage(error));
       return false;
     }
-  }, [loadConfig, notify, requireAccess, token]);
+  }, [loadConfig, notify, requireConfigAccess, token]);
 
   const validateCandidate = useCallback(async () => {
-    if (!requireAccess()) return false;
+    if (!requireConfigAccess()) return false;
     try {
       await api<{ valid: boolean }>("/api/v1/policies/validate", { method: "POST" }, token);
       notify("success", "Candidate hợp lệ. Nếu Candidate khác Running, nút Commit sẽ được bật.");
@@ -489,10 +497,10 @@ export default function App() {
       notify("error", errorMessage(error));
       return false;
     }
-  }, [loadConfig, notify, requireAccess, token]);
+  }, [loadConfig, notify, requireConfigAccess, token]);
 
   const commitCandidate = useCallback(async (comment: string) => {
-    if (commitInFlight.current || !requireAccess() || !config) return false;
+    if (commitInFlight.current || !requireConfigAccess() || !config) return false;
     commitInFlight.current = true;
     try {
       await api("/api/v1/policies/commit", {
@@ -509,10 +517,10 @@ export default function App() {
     } finally {
       commitInFlight.current = false;
     }
-  }, [config, loadConfig, notify, requireAccess, token, user]);
+  }, [config, loadConfig, notify, requireConfigAccess, token, user]);
 
   const rollback = useCallback(async () => {
-    if (!requireAccess() || !window.confirm("Khôi phục cấu hình phiên bản trước?")) return false;
+    if (!requireConfigAccess() || !window.confirm("Khôi phục cấu hình phiên bản trước?")) return false;
     try {
       await api("/api/v1/policies/rollback", { method: "POST" }, token);
       await loadConfig();
@@ -522,7 +530,7 @@ export default function App() {
       notify("error", errorMessage(error));
       return false;
     }
-  }, [loadConfig, notify, requireAccess, token]);
+  }, [loadConfig, notify, requireConfigAccess, token]);
 
   const terminateSession = useCallback(async (id: string) => {
     if (!requireAccess() || !window.confirm("Kết thúc session này?")) return false;
@@ -991,6 +999,7 @@ export function PolicyPage({ config, capabilities, onSave, onSaveProfiles, onVal
 }
 
 export function ConfigStatusBar({ config, dirty, comment, onComment, busy, onValidate, onCommit, onRollback }: { config: ConfigExport | null; dirty: boolean; comment: string; onComment: (value: string) => void; busy: string; onValidate: () => Promise<void>; onCommit: () => Promise<void>; onRollback: () => Promise<void> }) {
+  if (!config) return <section className="config-bar"><div className="config-state"><div><strong>Chưa đọc được cấu hình</strong><small>Các thao tác cấu hình chỉ khả dụng sau khi tải được Running và Candidate từ API.</small></div></div><div className="commit-controls"><Button disabled>Validate</Button><Button disabled>Rollback</Button><Button disabled>Commit</Button></div></section>;
   // Fail closed when talking to an older API that does not expose the
   // candidate validation state. A structural `candidate_valid` flag alone
   // cannot prove that the current effective policy set passed duplicate,
@@ -1077,7 +1086,9 @@ export function InspectionProfileEditor({ value, capabilities, busy, onClose, on
   function submit(event: FormEvent) {
     event.preventDefault();
     if (busy || !draft.inspection) return;
-    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), ids_ips_enabled: true, dpi_enabled: false, dns_security_enabled: false, url_filtering_enabled: false, threat_intel_enabled: false, behavior_enabled: false, ml_detection_enabled: false, inspection_required: false, inspection_failure_action: "ALLOW", inspection: { ...draft.inspection, fail_mode: "OPEN" } });
+    // This form edits the visible M3 settings. Hidden M4/legacy/future fields
+    // must survive a name or ruleset edit without being reset to form defaults.
+    void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), inspection: { ...draft.inspection } });
   }
   return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">M3 INSPECTION PROFILE</span><h2>{isNew ? "Thêm profile" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body"><div className="form-row"><label>ID<input required disabled={!isNew} value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })}/></label><label>Tên<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>Mode<select value={draft.inspection?.mode ?? "IDS"} onChange={(event) => setDraft({ ...draft, inspection: { ...draft.inspection!, mode: event.target.value } })}>{(capabilities?.modes ?? ["IDS", "IPS"]).map((mode) => <option key={mode}>{mode}</option>)}</select></label></div><div className="form-row two"><label>Fail mode<input readOnly value="OPEN"/><small>M3 chỉ hỗ trợ fail-open; sensor lỗi không được biến thành CLEAN.</small></label><label>Ruleset<select value={draft.inspection?.ruleset_id ?? ""} onChange={(event) => setDraft({ ...draft, inspection: { ...draft.inspection!, ruleset_id: event.target.value } })}>{(capabilities?.rulesets ?? ["m3-builtin-v1"]).map((ruleset) => <option key={ruleset}>{ruleset}</option>)}</select></label></div><p className="muted">IDS dùng NFLOG và chỉ báo alert. IPS dùng NFQUEUE packet verdict. TLS decryption, WAF, ML và risk engine chưa được bật bởi profile này.</p></div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
 }

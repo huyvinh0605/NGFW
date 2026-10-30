@@ -345,6 +345,7 @@ function normalizeInterface(value: unknown, index: number): InterfaceConfig | nu
   const record = objectValue(value);
   if (!record) return null;
   return {
+    ...record,
     id: stringValue(valueAt(record, "id"), `interface-${index}`),
     name: stringValue(valueAt(record, "name"), stringValue(valueAt(record, "id"), `Interface ${index + 1}`)),
     system_name: stringValue(valueAt(record, "system_name"), "unknown"),
@@ -367,13 +368,14 @@ function normalizeZone(value: unknown, index: number): Zone | null {
   const record = objectValue(value);
   if (!record) return null;
   const id = stringValue(valueAt(record, "id"), `zone-${index}`);
-  return { id, name: stringValue(valueAt(record, "name"), id), description: stringValue(valueAt(record, "description")) };
+  return { ...record, id, name: stringValue(valueAt(record, "name"), id), description: stringValue(valueAt(record, "description")) };
 }
 
 function normalizeRoute(value: unknown, index: number): Route | null {
   const record = objectValue(value);
   if (!record) return null;
   return {
+    ...record,
     id: stringValue(valueAt(record, "id"), `route-${index}`),
     destination_cidr: stringValue(valueAt(record, "destination_cidr"), "unknown"),
     gateway: stringValue(valueAt(record, "gateway")),
@@ -388,9 +390,10 @@ function normalizeNAT(value: unknown, index: number): NATRule | null {
   const record = objectValue(value);
   if (!record) return null;
   return {
+    ...record,
     id: stringValue(valueAt(record, "id"), `nat-${index}`),
     name: stringValue(valueAt(record, "name"), stringValue(valueAt(record, "id"), `NAT ${index + 1}`)),
-    type: stringValue(valueAt(record, "type"), "SNAT").toUpperCase(),
+    type: stringValue(valueAt(record, "type")).toUpperCase(),
     source_zone: stringValue(valueAt(record, "source_zone")),
     destination_zone: stringValue(valueAt(record, "destination_zone")),
     source_network: stringValue(valueAt(record, "source_network")) || undefined,
@@ -408,6 +411,7 @@ function normalizePolicy(value: unknown, index: number): SecurityPolicy | null {
   const record = objectValue(value);
   if (!record) return null;
   return {
+    ...record,
     id: stringValue(valueAt(record, "id"), `policy-${index}`),
     name: stringValue(valueAt(record, "name"), stringValue(valueAt(record, "id"), `Policy ${index + 1}`)),
     priority: Math.max(0, numberValue(valueAt(record, "priority"))),
@@ -421,7 +425,9 @@ function normalizePolicy(value: unknown, index: number): SecurityPolicy | null {
     security_profile_id: stringValue(valueAt(record, "security_profile_id")) || undefined,
     minimum_risk: valueAt(record, "minimum_risk") == null ? undefined : boundedNumber(valueAt(record, "minimum_risk"), 0, 0, 100),
     maximum_risk: valueAt(record, "maximum_risk") == null ? undefined : boundedNumber(valueAt(record, "maximum_risk"), 100, 0, 100),
-    action: decisionValue(valueAt(record, "action")) || "ALLOW",
+    // Unknown configuration actions must not become a permissive rule when
+    // this frontend edits a different field or talks to a newer backend.
+    action: stringValue(valueAt(record, "action")),
     scope: stringValue(valueAt(record, "scope"), "SESSION"),
     log_start: booleanValue(valueAt(record, "log_start"), true),
     log_end: booleanValue(valueAt(record, "log_end"), true),
@@ -434,6 +440,7 @@ function normalizeProfile(value: unknown, index: number): SecurityProfile | null
   if (!record) return null;
 	const inspection = objectValue(valueAt(record, "inspection"));
 	return {
+    ...record,
     id: stringValue(valueAt(record, "id"), `profile-${index}`),
     name: stringValue(valueAt(record, "name"), stringValue(valueAt(record, "id"), `Profile ${index + 1}`)),
     ids_ips_enabled: booleanValue(valueAt(record, "ids_ips_enabled")),
@@ -449,6 +456,7 @@ function normalizeProfile(value: unknown, index: number): SecurityProfile | null
     inspection_required: booleanValue(valueAt(record, "inspection_required")),
 		inspection_failure_action: stringValue(valueAt(record, "inspection_failure_action"), "ALLOW"),
 		inspection: inspection ? {
+      ...inspection,
 			mode: stringValue(valueAt(inspection, "mode"), "OFF").toUpperCase(),
 			fail_mode: stringValue(valueAt(inspection, "fail_mode"), "OPEN").toUpperCase(),
 			ruleset_id: stringValue(valueAt(inspection, "ruleset_id")),
@@ -477,8 +485,26 @@ function emptyConfig(): NGFWConfig {
 }
 
 function normalizeConfig(value: unknown): NGFWConfig | null {
-  const record = objectValue(value);
-  if (!record) return null;
+  const source = objectValue(value);
+  if (!source) return null;
+  // Configuration is editable state, unlike best-effort telemetry. Never
+  // turn an incomplete response or a malformed entry into a smaller config
+  // that could be saved over the authoritative Candidate. Go nil slices
+  // arrive as null and have the same configuration meaning as an empty list.
+  const collections = ["interfaces", "zones", "routes", "nat_rules", "policies", "security_profiles"];
+  for (const key of collections) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) return null;
+    const items = source[key];
+    if (items !== null && !Array.isArray(items)) return null;
+    if (Array.isArray(items) && items.some((item) => {
+      const entry = objectValue(item);
+      return !entry || typeof entry.id !== "string" || !entry.id.trim();
+    })) return null;
+  }
+  // Clone once at the boundary: nested fields unknown to this frontend must
+  // survive all editor paths, without sharing mutable objects with the wire
+  // response or with Running. Each per-object adapter retains those fields.
+  const record = structuredClone(source);
   const config = { ...emptyConfig(), ...record } as NGFWConfig;
   const interfaces = Array.isArray(valueAt(record, "interfaces")) ? valueAt(record, "interfaces") as unknown[] : [];
   const zones = Array.isArray(valueAt(record, "zones")) ? valueAt(record, "zones") as unknown[] : [];
@@ -496,9 +522,11 @@ function normalizeConfig(value: unknown): NGFWConfig | null {
 	if (inspection) {
 		const limits = objectValue(valueAt(inspection, "limits"));
 		config.inspection = {
+			...inspection,
 			enabled: booleanValue(valueAt(inspection, "enabled")),
 			include_management: booleanValue(valueAt(inspection, "include_management")),
 			limits: {
+				...limits,
 				eve_line_bytes: Math.max(0, numberValue(valueAt(limits, "eve_line_bytes"))),
 				normalized_event_bytes: Math.max(0, numberValue(valueAt(limits, "normalized_event_bytes"))),
 				observation_queue_items: Math.max(0, numberValue(valueAt(limits, "observation_queue_items"))),
@@ -532,7 +560,8 @@ export function normalizeConfigExport(value: unknown): ConfigExport | null {
   if (!record) return null;
   const running = normalizeConfig(valueAt(record, "running"));
   if (!running) return null;
-  const candidate = normalizeConfig(valueAt(record, "candidate")) ?? normalizeConfig(running) ?? running;
+  const candidate = normalizeConfig(valueAt(record, "candidate"));
+  if (!candidate) return null;
   const versionRecord = objectValue(valueAt(record, "version"));
   const validationRecord = objectValue(valueAt(record, "candidate_validation"));
   return {

@@ -124,14 +124,15 @@ test("keeps requested, configured, capture and lease state separate", () => {
 });
 
 test("M3 config and session inspection survive API normalization", () => {
-  const config = normalizeConfigExport({
-    running: {
+  const running = {
       interfaces: [], zones: [], routes: [], nat_rules: [], default_deny: true,
       policies: [{ id: "p1", name: "TLS only", priority: 10, applications: ["TLS"], application_match_mode: "RESTRICT_L3_ALLOW", security_profile_id: "ips", action: "ALLOW", scope: "SESSION", enabled: true }],
       security_profiles: [{ id: "ips", name: "IPS", inspection: { mode: "IPS", fail_mode: "OPEN", ruleset_id: "m3-builtin-v1" } }],
       inspection: { enabled: true, include_management: false, limits: { app_detection_timeout_ms: 5000 } },
-    },
-    candidate: null,
+    };
+  const config = normalizeConfigExport({
+    running,
+    candidate: structuredClone(running),
     version: { version: 4 },
     candidate_valid: true,
   });
