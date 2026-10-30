@@ -8,12 +8,15 @@ import (
 )
 
 type HealthReducer struct {
-	mu           sync.RWMutex
-	snapshot     inspection.SourceHealth
-	enabled      bool
-	successes    int
-	backlog      bool
-	lastProgress *time.Time
+	mu            sync.RWMutex
+	snapshot      inspection.SourceHealth
+	enabled       bool
+	successes     int
+	backlog       bool
+	lastProgress  *time.Time
+	statsTimeout  time.Duration
+	statsStarted  time.Time
+	lastStatsRead *time.Time
 }
 
 func NewHealthReducer(sensorID string, enabled bool) *HealthReducer {
@@ -59,6 +62,7 @@ func (h *HealthReducer) RecordStats(now time.Time, counters inspection.SensorCou
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.snapshot.Counters = cloneCounters(counters)
+	h.lastStatsRead = timePointer(now)
 	heartbeat := now.UTC()
 	if counters.SourceTimestamp != nil {
 		heartbeat = counters.SourceTimestamp.UTC()
@@ -81,6 +85,9 @@ func (h *HealthReducer) captureLiveLocked(now time.Time) bool {
 	if !h.enabled || !h.snapshot.ProcessReachable {
 		return false
 	}
+	if h.statsTimeout > 0 && (h.lastStatsRead == nil || now.Sub(*h.lastStatsRead) > h.statsTimeout) {
+		return false
+	}
 	if h.backlog && h.lastProgress != nil && now.Sub(*h.lastProgress) > 6*time.Second {
 		return false
 	}
@@ -90,10 +97,24 @@ func (h *HealthReducer) captureLiveLocked(now time.Time) bool {
 	return h.snapshot.State == "HEALTHY"
 }
 func (h *HealthReducer) HealthSnapshot() inspection.SourceHealth {
+	return h.snapshotAt(time.Now().UTC())
+}
+func (h *HealthReducer) snapshotAt(now time.Time) inspection.SourceHealth {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	result := h.snapshot
-	result.CaptureLive = h.captureLiveLocked(time.Now().UTC())
+	result.CaptureLive = h.captureLiveLocked(now)
+	if h.enabled && result.State == "HEALTHY" && h.statsTimeout > 0 {
+		switch {
+		case h.lastStatsRead == nil:
+			result.State, result.Reason = "STARTING", "waiting for periodic EVE stats heartbeat"
+			if now.Sub(h.statsStarted) > h.statsTimeout {
+				result.State, result.Reason = "DEGRADED", "periodic EVE stats heartbeat unavailable"
+			}
+		case now.Sub(*h.lastStatsRead) > h.statsTimeout:
+			result.State, result.Reason = "DEGRADED", "periodic EVE stats heartbeat stalled; logging or reader progress unavailable"
+		}
+	}
 	result.Counters = cloneCounters(h.snapshot.Counters)
 	return result
 }

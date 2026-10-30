@@ -183,12 +183,13 @@ type codedRuntimeError interface{ ErrorCode() string }
 
 func writeInspectionReadError(w http.ResponseWriter, err error, allowNotFound bool) {
 	var coded codedRuntimeError
+	var timeout interface{ Timeout() bool }
 	code := ""
 	if errors.As(err, &coded) {
 		code = coded.ErrorCode()
 	}
 	switch {
-	case errors.Is(err, context.DeadlineExceeded) || code == "DEADLINE_EXCEEDED":
+	case errors.Is(err, context.DeadlineExceeded) || code == "DEADLINE_EXCEEDED" || errors.As(err, &timeout) && timeout.Timeout():
 		writeError(w, http.StatusGatewayTimeout, "ENGINE_TIMEOUT", err.Error())
 	case allowNotFound && (errors.Is(err, domain.ErrSecurityEventNotFound) || code == "NOT_FOUND"):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())

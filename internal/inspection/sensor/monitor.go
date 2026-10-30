@@ -9,9 +9,9 @@ import (
 )
 
 // MonitoredSource combines an EVE source with Suricata's fixed Unix control
-// socket. Quiet traffic is therefore still considered live when the capture
-// process answers probes; merely having an old eve.json file never renews the
-// IPS lease.
+// socket. Both responsive capture control and fresh periodic EVE stats are
+// required. Quiet traffic emits stats; a live process alone cannot hide a
+// failed EVE writer or reader and renew the IPS lease.
 type MonitoredSource struct {
 	SensorID     string
 	Source       inspection.EventSource
@@ -25,7 +25,11 @@ type MonitoredSource struct {
 
 func NewMonitoredSource(sensorID string, source inspection.EventSource, controlSocket string) *MonitoredSource {
 	client := ControlClient{SocketPath: controlSocket, Timeout: 500 * time.Millisecond, MaxReplyBytes: 64 << 10}
-	return &MonitoredSource{SensorID: sensorID, Source: source, Control: client, ProbeEvery: time.Second, Health: NewHealthReducer(sensorID, true), Recover: RecoverSensor, RecoveryWait: 30 * time.Second, probeTimeout: client.Timeout}
+	health := NewHealthReducer(sensorID, true)
+	// Managed IDS/IPS configurations emit periodic stats every two seconds.
+	// Use local receipt time so source clock adjustments do not hide a stall.
+	health.statsTimeout, health.statsStarted = 6*time.Second, time.Now().UTC()
+	return &MonitoredSource{SensorID: sensorID, Source: source, Control: client, ProbeEvery: time.Second, Health: health, Recover: RecoverSensor, RecoveryWait: 30 * time.Second, probeTimeout: client.Timeout}
 }
 
 type monitoredSink struct {
@@ -110,10 +114,14 @@ func (m *MonitoredSource) Run(ctx context.Context, sink inspection.ObservationSi
 }
 
 func (m *MonitoredSource) Snapshot() inspection.SourceHealth {
+	return m.snapshotAt(time.Now().UTC())
+}
+
+func (m *MonitoredSource) snapshotAt(now time.Time) inspection.SourceHealth {
 	if m == nil || m.Health == nil {
 		return inspection.SourceHealth{State: "UNAVAILABLE", Reason: "sensor monitor is not configured"}
 	}
-	result := m.Health.HealthSnapshot()
+	result := m.Health.snapshotAt(now)
 	if m.Source != nil {
 		reader := m.Source.Snapshot()
 		result.SensorEnabled = reader.SensorEnabled
@@ -127,12 +135,16 @@ func (m *MonitoredSource) Snapshot() inspection.SourceHealth {
 		if result.LastRead == nil {
 			result.LastRead = reader.LastRead
 		}
-		if reader.State == "DEGRADED" && result.State == "HEALTHY" {
-			result.State = "DEGRADED"
-			result.Reason = reader.Reason
+		if reader.State == "UNAVAILABLE" || reader.State == "ERROR" || reader.State == "DEGRADED" {
+			result.State, result.Reason = reader.State, reader.Reason
 		}
+		result.CaptureLive = result.CaptureLive && reader.ReaderActive && reader.State == "HEALTHY"
+		if !reader.ReaderActive && result.State == "HEALTHY" {
+			result.State, result.Reason = "DEGRADED", "EVE reader is not active"
+		}
+	} else {
+		result.State, result.Reason, result.CaptureLive = "UNAVAILABLE", "EVE reader is not configured", false
 	}
-	result.CaptureLive = m.Health.CaptureLive(time.Now().UTC())
 	return result
 }
 
@@ -148,5 +160,5 @@ func cloneStats(value map[string]uint64) map[string]uint64 {
 }
 
 func (m *MonitoredSource) CaptureLive(now time.Time) bool {
-	return m != nil && m.Health != nil && m.Health.CaptureLive(now)
+	return m != nil && m.snapshotAt(now).CaptureLive
 }
