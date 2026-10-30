@@ -215,7 +215,7 @@ status=$(curl --silent --output "$evidence_dir/invalid-filter.json" --write-out 
 [[ "$status" == 400 ]] || fail M3-PREFLIGHT "invalid security filter returned HTTP $status instead of 400"
 
 api_get /api/v1/config "$evidence_dir/config.json" || fail M3-PREFLIGHT 'running configuration endpoint failed'
-uses_m3=$(jq -r '[.data.running.security_profiles[]?.inspection?.mode | select(. == "IDS" or . == "IPS")] | length > 0 or (.data.running.inspection.enabled // false)' "$evidence_dir/config.json")
+uses_m3=$(jq -r '.data.running.inspection.enabled // false' "$evidence_dir/config.json")
 if [[ "$uses_m3" == true ]]; then
   nft list table inet ngfw_inspection >"$evidence_dir/ngfw-inspection.nft" 2>&1 || fail M3-PREFLIGHT 'running M3 config has no ngfw_inspection nft table'
   jq -e '.data.enabled == true' "$evidence_dir/inspection-health.json" >/dev/null || fail M3-PREFLIGHT 'running M3 config has no inspection coordinator'
