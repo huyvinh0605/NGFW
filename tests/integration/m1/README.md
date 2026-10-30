@@ -1,7 +1,9 @@
 # M1 Ubuntu VM integration checklist
 
-These checks are intentionally pending until they run on the four-NIC Ubuntu
-24.04 VM. Unit tests and cross-compilation do not satisfy this checklist.
+These checks require the Ubuntu 24.04 lab VM. Unit tests and cross-compilation
+do not satisfy this checklist. The recorded acceptance status and evidence are
+in [the M1 matrix](../../../docs/m1-acceptance-matrix.md). The last open failure,
+row 20, was replayed successfully on the real appliance on 2026-10-30.
 
 ## Prepare the appliance
 
@@ -77,3 +79,26 @@ log that the request arrived over `/run/ngfw/engine.sock`.
 Do not mark M1 complete until all rows have artifacts from the Ubuntu VM. M2
 session caching, DPI, IDS, TLS interception, ML, and their tests are outside
 this checklist.
+
+## Replay the failed-activation address regression
+
+`lab_failed_activation.py` runs against NGFW `192.168.100.1` over SSH and the
+authenticated management API. Run it from a machine with Python, `paramiko`,
+`requests`, and access to the lab MGMT network. Set `NGFW_LAB_PASSWORD` in the
+environment, then choose a new, empty evidence directory:
+
+```bash
+python3 tests/integration/m1/lab_failed_activation.py artifacts/m1-row20-<UTC>
+```
+
+The runner requires the lab `ens33`/`ens37`/`ens39` layout and a clean Running
+network. It saves the existing Candidate, decreases WAN MTU by one, adds
+`192.168.10.99/24` to LAN and commits a route with a real invalid next hop.
+HTTP 409 `COMMIT_FAILED` is expected. A kernel monitor must observe the temporary
+address being added and deleted. The runner then checks unchanged Running and
+binaries, restored MTU/routes/nft, a cleared activation journal and the M1
+verifier. It restores the original Candidate and its validation state.
+
+The API credential remains in memory. Raw responses and kernel transition
+evidence are written under the chosen directory. A PASS requires automatic
+rollback; manually deleting the temporary address does not satisfy this case.
