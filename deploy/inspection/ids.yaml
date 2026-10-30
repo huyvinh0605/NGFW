@@ -12,8 +12,10 @@ rule-files:
   - ids-demo.rules
 nflog:
   - group: 100
-    buffer-size: 18432
-    max-size: 20000
+    # Bounded netlink receive headroom for concurrent full-size/GRO copies.
+    # Tiny buffers can lose a TCP handshake before App-ID sees the request.
+    buffer-size: 4194304
+    max-size: 16777216
     qthreshold: 1
     qtimeout: 100
 stream:
