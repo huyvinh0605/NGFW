@@ -1,0 +1,9 @@
+# Keep Linux entry points and build inputs portable when exported on Windows.
+*.sh text eol=lf
+*.py text eol=lf
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.rules text eol=lf
