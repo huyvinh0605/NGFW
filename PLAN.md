@@ -19,7 +19,15 @@
 
 ## 1. Mục tiêu và phân tích đặc tả
 
-**Mục tiêu chính: nghiên cứu ablation giữa Suricata và mô hình ML** trong việc phát hiện request HTTP độc hại tại cổng kiểm tra trước server (M4). Câu hỏi nghiên cứu: mỗi phương pháp — luật chữ ký (Suricata) và mô hình học máy (TF-IDF ký tự + Logistic Regression) — đóng góp gì khi dùng riêng và khi kết hợp, và việc kết hợp có cải thiện phát hiện mà không tăng cảnh báo sai trên lưu lượng sạch hay không.
+**Mục tiêu chính: nghiên cứu ablation giữa IDS Suricata và mô hình ML để chọn phương pháp phát hiện request HTTP độc hại tốt nhất** tại cổng kiểm tra trước server (M4).
+
+**Câu hỏi nghiên cứu:** để phát hiện và chặn request HTTP độc hại, phương án nào tốt hơn:
+
+1. chỉ dùng Suricata (luật chữ ký);
+2. chỉ dùng mô hình ML (TF-IDF ký tự + Logistic Regression);
+3. kết hợp cả hai.
+
+Kết quả bàn giao là **một khuyến nghị duy nhất** (S, M hoặc một cách kết hợp cụ thể), được chọn theo quy tắc quyết định chốt trước khi chạy tập test ([mục 1.1](#11-thiết-kế-ablation-suricata-và-ml)), kèm bằng chứng đo và kiểm định thống kê.
 
 Appliance NGFW Linux nhiều NIC (M1–M4) là **nền tảng thử nghiệm**: cung cấp đường giữ request, chuẩn hóa HTTP/1.1 và HTTP/2, adapter Suricata và Risk Engine để chạy các cấu hình ablation trên cùng một luồng xử lý. Thiết kế thí nghiệm ở mục [1.1](#11-thiết-kế-ablation-suricata-và-ml).
 
@@ -45,31 +53,46 @@ Trong chuỗi này, bước **Detector Signals → Risk** là nơi thực hiện
 
 ### 1.1. Thiết kế ablation Suricata và ML
 
-**Cấu hình so sánh** — chạy cùng tập test, cùng topology, cùng ruleset/model version:
+**Cấu hình so sánh** — chạy cùng tập test, cùng topology, cùng ruleset/model version. Ba nhóm ứng với ba câu trả lời có thể có:
 
-| Mã | Cấu hình | Request bị coi là độc hại khi |
-|---|---|---|
-| S | Chỉ Suricata | Suricata có alert/drop cho request. |
-| M | Chỉ ML | Lớp dự đoán khác `BENIGN` và confidence ≥ τ; báo cáo nhiều ngưỡng τ (mặc định 0,9). |
-| S∨M | Kết hợp OR | S hoặc M phát hiện. |
-| R | Risk Engine, không bonus | Điểm risk ≥ 80 với trọng số mặc định, `CorrelationBonus = 0`. |
-| R+ | Risk Engine đầy đủ | Điểm risk ≥ 80 với trọng số mặc định (IPS 40, ML 20, bonus tương quan 25). |
+| Nhóm | Mã | Cấu hình | Request bị coi là độc hại khi |
+|---|---|---|---|
+| Chỉ Suricata | S | Suricata | Suricata có alert/drop cho request. |
+| Chỉ ML | M | Mô hình ML | Lớp dự đoán khác `BENIGN` và confidence ≥ τ. |
+| Chỉ ML | M′ | ML, đầu vào giống Suricata | Như M, nhưng ML nhận cùng nội dung đã chuẩn hóa như Suricata (xem *Công bằng về đầu vào*). |
+| Kết hợp | S∨M | OR | S hoặc M phát hiện. |
+| Kết hợp | S∧M | AND | Cả S và M cùng phát hiện (giảm cảnh báo sai, có thể giảm recall). |
+| Kết hợp | R | Risk Engine, không bonus | Điểm risk ≥ ngưỡng, `CorrelationBonus = 0`. |
+| Kết hợp | R+ | Risk Engine đầy đủ | Điểm risk ≥ ngưỡng, có bonus tương quan IPS+ML. |
 
 Lưu ý: với trọng số mặc định, ML đơn lẻ tối đa 20 điểm nên không thể đạt ngưỡng 80; vì vậy cấu hình M phải đánh giá trên đầu ra trực tiếp của mô hình, không qua Risk Engine.
+
+**Chống thiên lệch khi chọn:** ngưỡng τ của ML, trọng số và ngưỡng của R/R+ chỉ được chỉnh trên tập validation. Mỗi cấu hình dùng **một** bộ tham số đã chốt khi chạy tập test; không chỉnh lại sau khi xem kết quả test.
+
+**Tiêu chí lựa chọn** — chốt trước khi chạy tập test:
+
+- **Chỉ số chính:** F1 nhị phân (độc hại / sạch) trên tập test. Đánh giá nhị phân vì quyết định cần chọn là chặn hay cho qua; Suricata không gán sẵn năm lớp như ML.
+- **Ràng buộc bắt buộc:** tỷ lệ false positive trên `BENIGN` ≤ ngân sách FPR (đề xuất 1%, chốt cùng nhóm trước khi chạy test); độ trễ p95 của request gate nằm trong deadline kiểm tra đã cấu hình. Cấu hình vi phạm ràng buộc bị loại.
+- **Kiểm định thống kê:** mọi cấu hình chạy trên cùng các request, nên so sánh từng cặp bằng kiểm định McNemar (α = 0,05) trên quyết định của từng request, kèm khoảng tin cậy 95% bootstrap cho chênh lệch F1.
+- **Quy tắc quyết định:**
+  1. Nếu cấu hình kết hợp tốt nhất **tốt hơn có ý nghĩa thống kê** so với cả S và M → khuyến nghị **kết hợp**, chỉ rõ cách kết hợp (S∨M, S∧M, R hoặc R+).
+  2. Nếu không, và một phương pháp đơn lẻ tốt hơn có ý nghĩa so với phương pháp còn lại → khuyến nghị phương pháp đó.
+  3. Nếu không có chênh lệch có ý nghĩa → chọn phương án **đơn giản hơn**: Suricata (giải thích được, không phải duy trì model) trừ khi chỉ số phụ cho thấy ML vượt trội rõ ràng.
+- **Chỉ số phụ** (dùng để giải thích và phân xử khi hòa): tỷ lệ phát hiện trên nhóm biến thể đã làm rối, số tấn công chỉ một phương pháp phát hiện được, precision/recall/F1 từng lớp (cần bảng ánh xạ SID → lớp cho Suricata), độ trễ p50/p95/p99, chi phí vận hành (cập nhật ruleset so với huấn luyện lại model).
 
 **Dữ liệu:** tập request HTTP có nhãn năm lớp (`BENIGN`, `SQL_INJECTION`, `XSS`, `COMMAND_INJECTION`, `ANOMALOUS`), chia train/validation/test theo nguồn/template để tránh leakage. Tập test gồm thêm nhóm biến thể đã làm rối (encoding, đổi hoa/thường, chèn comment) để đo khả năng tổng quát hóa so với luật chữ ký. Tập test chỉ dùng một lần cho báo cáo cuối.
 
 **Ruleset:** ruleset lab hiện tại chỉ là fixture nghiệm thu, không phù hợp để so sánh. Phải cố định một ruleset thực tế (ví dụ ET Open) theo phiên bản và ghi vào báo cáo.
 
-**Công bằng về đầu vào:** hiện Suricata nhận request đã chuẩn hóa, body đã giải nén và phần lớn header; ML chỉ nhận `METHOD Host URL\nbody` thô, không header. Chạy thêm biến thể M′ với ML nhận cùng nội dung đã chuẩn hóa như Suricata để tách ảnh hưởng của phương pháp khỏi ảnh hưởng của đầu vào.
+**Công bằng về đầu vào:** hiện Suricata nhận request đã chuẩn hóa, body đã giải nén và phần lớn header; ML chỉ nhận `METHOD Host URL\nbody` thô, không header. Biến thể M′ cho ML nhận cùng nội dung đã chuẩn hóa như Suricata để tách ảnh hưởng của phương pháp khỏi ảnh hưởng của đầu vào. Khi so sánh S với ML, dùng biến thể ML tốt hơn trên validation (M hoặc M′).
 
-**Chỉ số:** precision/recall/F1 từng lớp, macro F1, tỷ lệ false positive trên `BENIGN`, tỷ lệ phát hiện trên nhóm biến thể, số request chỉ một phương pháp phát hiện được, và độ trễ p50/p95/p99 của request gate cho từng cấu hình. Chưa cam kết chỉ tiêu độ chính xác trước khi có dữ liệu.
+**Độ ổn định:** huấn luyện ML với ít nhất ba seed; báo cáo trung bình và độ lệch. Chưa cam kết chỉ tiêu độ chính xác trước khi có dữ liệu.
 
 **Điều kiện tiên quyết trong mã hiện tại:**
 
 - Kết nối `MLClient` vào `cmd/ngfw-proxy` (hiện chưa được nối).
 - Đưa Risk Engine vào đường quyết định M4 (hiện M4 chặn theo action của Suricata, chưa dùng risk score).
-- Thêm cấu hình bật/tắt từng detector và trọng số để chạy các cấu hình S/M/R mà không sửa code.
+- Thêm cấu hình bật/tắt từng detector, cách kết hợp (OR/AND/risk) và trọng số để chạy mọi cấu hình mà không sửa code.
 - Ghi log quyết định của từng detector theo `RequestID` để tính chỉ số cho mọi cấu hình từ cùng một lần chạy.
 - Xây dataset, manifest và quy trình chuẩn hóa đầu vào ML.
 
@@ -265,11 +288,11 @@ Hàng đợi bảo mật tách khỏi telemetry; đầy hàng đợi bảo mật
 | **M2 — Session và decision core** | Conntrack adapter, NAT aliases, session/context store, risk, policy, action scopes, fast path và invalidation. | Hai chiều cùng session; block vượt cache allow; TTL hết hạn; state không tăng vô hạn. | 3–4 |
 | **M3 — Security không giải mã** | nDPI, Suricata EVE, HTTP/DNS/TLS metadata, URL rules, local TI, scan/rate detectors. | Mọi detector tạo event chuẩn; scan/exploit gây action thật; detector lỗi báo degraded. | 3–4 |
 | **M4 — HTTP/TLS gate** | Transparent proxy, CA, TLS policy/exclusions, HTTP/1.1 và HTTP/2, IDS request adapter, stream-level context, limits/timeouts. | SQLi/XSS bị chặn trước server; request sạch đi qua; không nhầm stream, không bypass âm thầm. | 4–6 |
-| **M5 — ML và correlation** | Dataset pipeline, normalization, training/evaluation, inference service, model registry/activation, correlation với IPS. | Đủ năm lớp bắt buộc; báo cáo test độc lập; weak ML không tự chặn; ML outage xử lý đúng. | 2–3 |
+| **M5 — Ablation Suricata và ML** (mốc trọng tâm của đề tài) | Dataset có nhãn và manifest; cố định ruleset Suricata; chuẩn hóa đầu vào ML; training/evaluation; nối ML vào proxy; Risk Engine trên đường M4; cấu hình bật/tắt detector và cách kết hợp; log quyết định theo request; chạy mọi cấu hình mục 1.1; kiểm định thống kê; khuyến nghị phương pháp. | Mọi cấu hình mục 1.1 chạy trên cùng tập test; tiêu chí lựa chọn chốt trước khi chạy test; báo cáo có McNemar + bootstrap CI; một khuyến nghị theo quy tắc quyết định; ML outage xử lý đúng. | 3–5 |
 | **M6 — Quản trị đầy đủ** | REST/RBAC, dashboard, network/policy/profile editor, sessions/context, threats, TI, blocks, audit, realtime. | Mọi thao tác UI có backend thật; commit/rollback hoạt động; tắt API/UI không dừng forwarding. | 3–4 |
 | **M7 — Nghiệm thu và benchmark** | Fault injection, parser fuzzing, soak test, benchmark A–F, demo A–E, đóng gói và tài liệu. | Đủ 22 acceptance criteria, tái dựng được từ môi trường sạch và có bằng chứng đo. | 3–4 |
 
-**Tổng ước lượng: 23–32 tuần công**, chưa gồm thời gian học nền tảng hoặc thu thập dữ liệu lớn. Sau M0 phải cập nhật lại ước lượng theo kết quả đo thực tế.
+**Tổng ước lượng: 24–34 tuần công**, chưa gồm thời gian học nền tảng hoặc thu thập dữ liệu lớn. Vì mục tiêu chính là ablation, M5 được ưu tiên ngay sau M4; M6–M7 chỉ làm phần cần cho thí nghiệm và demo. Phần networking nâng cao đang đặc tả trong `docs/m5/` (FRR, load balancing, VRRP) nằm ngoài mục tiêu này và được hoãn. Sau M0 phải cập nhật lại ước lượng theo kết quả đo thực tế.
 
 API contract và telemetry tối thiểu được xây từ M0–M2; M6 hoàn thiện trải nghiệm quản trị.
 
@@ -312,6 +335,16 @@ Mỗi request mang ID kiểm thử; đối chiếu log proxy, context và access
 - Chèn lỗi giữa các bước commit và reboot khi activation chưa hoàn tất.
 - Sau restart, session state được đồng bộ lại và health phản ánh đúng mức bảo vệ.
 
+### Thí nghiệm ablation Suricata và ML
+
+Thiết kế, cấu hình và tiêu chí lựa chọn ở [mục 1.1](#11-thiết-kế-ablation-suricata-và-ml). Cách chạy:
+
+- Phát lại tập test qua request gate thật (HTTP/1.1 và HTTP/2) trên topology lab; mỗi request mang ID kiểm thử.
+- Mỗi request đi qua **cả** Suricata và ML một lần; ghi quyết định thô của từng detector (SID, lớp ML, confidence, điểm risk) theo `RequestID`.
+- Tính quyết định của mọi cấu hình S/M/M′/S∨M/S∧M/R/R+ từ cùng log đó, để các so sánh là so sánh cặp trên cùng request.
+- Đo độ trễ riêng cho từng cấu hình bằng cách chạy lại với chỉ detector cần thiết được bật.
+- Kiểm thử ML outage: khi ML không phản hồi, cấu hình kết hợp phải quay về hành vi đã đặc tả, không coi là "sạch".
+
 ### Benchmark và ML
 
 Chạy cùng topology, tài nguyên VM và workload cho sáu mode A–F trong đặc tả. Mỗi mode có warm-up, ít nhất ba lần đo; lưu raw results, config, model/ruleset version và thông tin máy.
@@ -329,6 +362,7 @@ Bàn giao gồm:
 - OpenAPI, mô tả IPC, schema/version và các ADR quan trọng.
 - Test tự động, kịch bản demo A–E và benchmark A–F.
 - Model artifact, dataset manifest, quy trình training và báo cáo ML.
+- **Báo cáo ablation Suricata và ML:** kết quả mọi cấu hình, kiểm định thống kê, phân tích các tấn công chỉ một phương pháp phát hiện được, và **khuyến nghị phương pháp** (Suricata, ML hoặc kết hợp) theo quy tắc quyết định ở mục 1.1.
 - Hướng dẫn build/run, backup/restore, commit recovery và giới hạn sản phẩm.
 - Ma trận ánh xạ **22 acceptance criteria → module → test → bằng chứng**.
 

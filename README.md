@@ -1,11 +1,14 @@
 # SENTINEL NGFW
 
-**Objective:** an ablation study of Suricata (signature rules) and an ML
-classifier (character TF-IDF + Logistic Regression) for detecting malicious
-HTTP requests before they reach the server. The study compares each detector
-alone, both combined, and both combined through the Risk Engine with and
-without the IPS+ML correlation bonus. Experiment design, metrics and the code
-prerequisites are in [PLAN.md section 1.1](PLAN.md#11-thiết-kế-ablation-suricata-và-ml).
+**Objective:** an ablation study of the Suricata IDS (signature rules) and an
+ML classifier (character TF-IDF + Logistic Regression) to decide which
+approach is better for detecting malicious HTTP requests before they reach the
+server: Suricata alone, ML alone, or a combination of both. Each option runs
+on the same labelled test set. The winner is chosen by a decision rule fixed
+before testing: binary F1 as the main metric, a false-positive budget and a
+latency limit, and McNemar tests for significance. If the options tie, the
+simpler one (Suricata) is preferred. Experiment design, selection criteria and
+code prerequisites are in [PLAN.md section 1.1](PLAN.md#11-thiết-kế-ablation-suricata-và-ml).
 
 The Linux NGFW appliance for a virtual multi-NIC lab is the test platform for
 that study. The implemented appliance path currently covers:
