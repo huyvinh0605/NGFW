@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kltngfw/ngfw/internal/connectivity"
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
-const ActivationSnapshotSchema = 2
+const ActivationSnapshotSchema = 3
 
 // ActivationSnapshot is the immutable compiler input and output identity for
 // one Linux dataplane generation.  Keeping the previous snapshot in the
@@ -93,7 +94,7 @@ func PrepareM3Activation(value domain.Config, generation uint64, options M2Compi
 // exact static bundle represented by the snapshot.  A corrupt/stale journal is
 // rejected before network or nftables state is touched.
 func CompileActivationSnapshot(snapshot ActivationSnapshot) (RulesetBundle, error) {
-	if snapshot.Schema != ActivationSnapshotSchema && snapshot.Schema != 1 {
+	if snapshot.Schema != ActivationSnapshotSchema && snapshot.Schema != 1 && snapshot.Schema != 2 {
 		return RulesetBundle{}, fmt.Errorf("unsupported activation snapshot schema %d", snapshot.Schema)
 	}
 	expectedArtifact, err := activationArtifactHash(snapshot)
@@ -130,6 +131,12 @@ func CompileActivationSnapshot(snapshot ActivationSnapshot) (RulesetBundle, erro
 	} else if domain.UsesM4(snapshot.Config) {
 		return RulesetBundle{}, errors.New("legacy activation snapshot cannot enable M4")
 	}
+	if snapshot.Schema < 3 {
+		bundle.InspectionSchema = legacyInspectionSchemaScript()
+		bundle.PolicyTransaction = strings.ReplaceAll(bundle.PolicyTransaction,
+			"meta l4proto { tcp, udp } ct id vmap @app_denied_v4\n",
+			"meta l4proto { tcp, udp } ct zone . ct id . ct original ip saddr . ct original proto-src . ct original ip daddr . ct original proto-dst . meta l4proto @app_denied_v4 drop\n")
+	}
 	expectedRules, err := rulesetBundleHash(bundle)
 	if err != nil {
 		return RulesetBundle{}, err
@@ -138,6 +145,28 @@ func CompileActivationSnapshot(snapshot ActivationSnapshot) (RulesetBundle, erro
 		return RulesetBundle{}, errors.New("activation snapshot static ruleset hash mismatch")
 	}
 	return bundle, nil
+}
+
+// Authenticate historical bytes before recompiling their exact configuration
+// and generation for the fixed kernel schema. Legacy hashes remain readable;
+// compensation and startup never reinstall the broken seven-field guard.
+func upgradeActivationSnapshot(snapshot ActivationSnapshot) (ActivationSnapshot, error) {
+	if _, err := CompileActivationSnapshot(snapshot); err != nil {
+		return ActivationSnapshot{}, err
+	}
+	if snapshot.Schema == ActivationSnapshotSchema {
+		return cloneActivationSnapshot(snapshot), nil
+	}
+	next, _, _, err := PrepareM3Activation(snapshot.Config, snapshot.Generation, snapshot.M2Options)
+	if err != nil {
+		return ActivationSnapshot{}, err
+	}
+	if snapshot.ProxyArtifacts != nil {
+		copy := *snapshot.ProxyArtifacts
+		next.ProxyArtifacts = &copy
+	}
+	next.ArtifactHash, err = activationArtifactHash(next)
+	return next, err
 }
 
 func cloneActivationSnapshot(value ActivationSnapshot) ActivationSnapshot {

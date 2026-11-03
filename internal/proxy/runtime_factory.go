@@ -132,8 +132,9 @@ func (builder RuntimeBuilder) Start(ctx context.Context, descriptor domain.Reque
 	}
 	gate := &HTTP1RequestGate{
 		Limits: limits, Roots: roots,
-		Inspector:  SuricataRequestInspector{Pool: pool, RulesetID: limits.RulesetID, RulesetHash: hex.EncodeToString(hash[:])},
-		Authorizer: IPCRequestAuthorizer{Client: builder.Client, EngineInstanceID: descriptor.EngineInstanceID, Generation: descriptor.ConfigGeneration},
+		Inspector:      SuricataRequestInspector{Pool: pool, RulesetID: limits.RulesetID, RulesetHash: hex.EncodeToString(hash[:])},
+		Authorizer:     IPCRequestAuthorizer{Client: builder.Client, EngineInstanceID: descriptor.EngineInstanceID, Generation: descriptor.ConfigGeneration},
+		ResultReporter: IPCRequestAuthorizer{Client: builder.Client, EngineInstanceID: descriptor.EngineInstanceID, Generation: descriptor.ConfigGeneration},
 	}
 	handler := &GateConnectionHandler{
 		Authorizer: IPCConnectionAuthorizer{Client: builder.Client, EngineInstanceID: descriptor.EngineInstanceID, Generation: descriptor.ConfigGeneration},

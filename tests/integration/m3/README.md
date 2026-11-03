@@ -1,7 +1,7 @@
 # M3 Linux integration runbook
 
 Các runner và fixture M3 đã có trong source tree. Tài liệu này mô tả cách chạy
-chúng trên Ubuntu 24.04; chưa có kết quả traffic test từ VM trong repository.
+chúng trên Ubuntu 24.04; kết quả VM từng phần được ghi trong acceptance matrix.
 Preflight, unit test hay offline PCAP replay không thay thế packet-path acceptance.
 
 Đọc [master](../../../docs/M3_IMPLEMENTATION_PLAN.md),
@@ -92,6 +92,35 @@ nonce để chứng minh chính xác marker có hoặc không đến server.
 Runner doesn't log auth header; jq extracts success/error envelope explicitly.
 `curl --fail-with-body` hoặc equivalent, request timeout; don't count HTTP200
 health as proof policy activation. Response body phải được assert.
+
+### M3-02 trên lab WAN/LAN/DMZ/MGMT
+
+`lab_off_acceptance.py` dùng SSH/Paramiko và Requests từ máy quản trị để chạy
+trên các VM của lab. Truyền mật khẩu qua `NGFW_LAB_PASSWORD`, rồi chạy:
+
+```bash
+python tests/integration/m3/lab_off_acceptance.py --evidence-dir artifacts/m3-off-<UTC-run-id>
+```
+
+Runner giữ nguyên Running và Candidate. Điều kiện trước traffic: M3/M4 OFF,
+Suricata không chạy, đồng hồ các máy lệch tối đa 5 giây, LAN→WAN TCP/18083 và
+WAN→DMZ TCP/443 được ALLOW, WAN→LAN TCP/18084 không khớp rule nào và rơi vào
+default DROP. Nếu cấu hình có ALLOW khớp flow dùng để thử default-deny, runner
+báo `NOT_RUN` với nguyên nhân setup; đó chưa phải bằng chứng firewall bị lỗi.
+
+Bài chạy dùng HTTP keepalive qua MASQUERADE, HTTPS có xác thực certificate qua
+DNAT public8443→DMZ443, hai request trên cùng socket/CT ID/SessionID và query
+original/translated. `nft monitor trace` xác nhận cache M2 thực sự ACCEPT và
+default policy thực sự DROP; positive control xác nhận server LAN vẫn hoạt
+động. Raw API, conntrack, server nonce log, trace và pcap được lưu. Các service
+tạm có giới hạn runtime; cleanup xóa bảng trace, route /32 tạm trên WAN và
+fixture, rồi xác nhận Running/Candidate không đổi.
+
+Regression `TestLinuxSourceRecoversAfterReceiveOverflow` chỉ chạy khi đặt
+`NGFW_CONNTRACK_OVERFLOW_TEST=1` trong network namespace riêng. Nó cố ý giữ
+receiver, đo drop thật tại `/proc/net/netlink`, rồi kiểm tra cùng subscriber
+vẫn nhận flow mới và dump hoàn chỉnh. Không chạy bài này trong namespace của
+appliance; xem lệnh namespace đầy đủ trong evidence của đợt sửa M3-02.
 
 ## 3. Before/after collection helpers
 

@@ -239,6 +239,7 @@ func TestLegacySnapshotStillVerifiesAfterM4Upgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacy.InspectionSchema = legacyInspectionSchemaScript()
 	snapshot.ArtifactHash, _ = activationArtifactHash(snapshot)
 	snapshot.StaticRulesetHash, _ = rulesetBundleHash(legacy)
 	if _, err := CompileActivationSnapshot(snapshot); err != nil {

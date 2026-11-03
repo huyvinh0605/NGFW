@@ -11,6 +11,7 @@ import (
 
 	"github.com/kltngfw/ngfw/internal/config"
 	"github.com/kltngfw/ngfw/internal/connectivity"
+	"github.com/kltngfw/ngfw/internal/dataplane"
 	"github.com/kltngfw/ngfw/internal/domain"
 	"github.com/kltngfw/ngfw/internal/inspection"
 	"github.com/kltngfw/ngfw/internal/session"
@@ -24,7 +25,9 @@ type RuntimeServiceAdapter struct {
 	Runtime *Runtime
 	Gate    *GateService
 	Config  *config.Manager
-	Apply   func(context.Context, domain.Config) error
+	// CacheOptions reads the generation and mark layout of the applied ruleset.
+	CacheOptions func() (dataplane.M2CompileOptions, uint64)
+	Apply        func(context.Context, domain.Config) error
 	// ApplyGeneration is the M3-aware privileged path.  The exact generation
 	// is required so compensation cannot compile an old Config using a target
 	// generation.  Apply remains for M1/M2 compatibility tests.
@@ -370,14 +373,26 @@ func compileRuntimeProgram(value domain.Config, generation uint64) (connectivity
 	return connectivity.CompileForCapabilities(value, generation, connectivity.Capabilities{Inspection: true, RequestGate: true})
 }
 
-func (s *RuntimeServiceAdapter) ListSessions(_ context.Context, query domain.SessionQuery) (domain.SessionPage, error) {
+func (s *RuntimeServiceAdapter) ListSessions(ctx context.Context, query domain.SessionQuery) (domain.SessionPage, error) {
 	if s.Runtime == nil {
 		return domain.SessionPage{}, errors.New("runtime unavailable")
 	}
-	result := s.Runtime.Store.Query(session.SessionFilter{SourceIP: query.SourceIP, DestinationIP: query.DestinationIP, Protocol: query.Protocol, SourceZone: query.SourceZone, DestinationZone: query.DestinationZone, State: query.State, Decision: query.Decision, TupleView: query.TupleView}, session.Page{Number: query.Page, Size: query.PageSize})
+	filter := session.SessionFilter{SourceIP: query.SourceIP, DestinationIP: query.DestinationIP, Protocol: query.Protocol, SourceZone: query.SourceZone, DestinationZone: query.DestinationZone, State: query.State, Decision: query.Decision, TupleView: query.TupleView}
+	page := session.Page{Number: query.Page, Size: query.PageSize}
+	result := s.Runtime.Store.Query(filter, page)
+	// Refresh only a bounded prefix of the returned page. Broad dashboard
+	// reads may include many loopback flows; their total must not suppress
+	// counter refresh for visible forwarded sessions.
+	if s.Runtime.Source != nil && len(result.Items) > 0 {
+		s.Runtime.RefreshPageCounters(ctx, result.Items)
+		result = s.Runtime.Store.Query(filter, page)
+	}
+	for i := range result.Items {
+		result.Items[i] = s.withKernelCacheVerification(result.Items[i])
+	}
 	return domain.SessionPage{Items: result.Items, Page: result.Page, PageSize: result.PageSize, Total: result.Total, HasMore: result.HasMore, StoreRevision: result.StoreRevision, SnapshotTime: result.SnapshotTime}, nil
 }
-func (s *RuntimeServiceAdapter) GetSession(_ context.Context, id string) (domain.RuntimeSession, error) {
+func (s *RuntimeServiceAdapter) GetSession(ctx context.Context, id string) (domain.RuntimeSession, error) {
 	if s.Runtime == nil {
 		return domain.RuntimeSession{}, errors.New("runtime unavailable")
 	}
@@ -385,10 +400,58 @@ func (s *RuntimeServiceAdapter) GetSession(_ context.Context, id string) (domain
 	if !ok {
 		return domain.RuntimeSession{}, session.ErrSessionMissing
 	}
+	refreshCtx, cancel := context.WithTimeout(ctx, queryCounterRefreshTimeout)
+	s.Runtime.RefreshSessionCounters(refreshCtx, value)
+	cancel()
+	value, ok = s.Runtime.Store.Get(id)
+	if !ok {
+		return domain.RuntimeSession{}, session.ErrSessionMissing
+	}
+	value = s.withKernelCacheVerification(value)
 	if s.Gate != nil {
 		value.RequestGate = s.Gate.RequestEvidenceForSession(id, 32)
 	}
 	return value, nil
+}
+
+// A mark is verified only when the current kernel ruleset has the same epoch
+// and zone pair as the observed flow, and the active policy is an explicit
+// scoped ALLOW that can actually install that mark. This is metadata about
+// mark provenance, not proof that any particular packet used the cache rule.
+func (s *RuntimeServiceAdapter) withKernelCacheVerification(value domain.RuntimeSession) domain.RuntimeSession {
+	value.KernelCacheVerified = false
+	if s.CacheOptions == nil || s.Runtime == nil || value.KernelMark == 0 ||
+		value.CacheState != domain.CacheCached || value.Decision != domain.DecisionAllow ||
+		value.EffectiveDecision != domain.DecisionAllow || value.Revoked {
+		return value
+	}
+	options, appliedGeneration := s.CacheOptions()
+	program := s.Runtime.CurrentProgram()
+	if !options.CacheEnabled || options.Epoch == 0 || appliedGeneration == 0 ||
+		appliedGeneration != program.Generation || value.PolicyGeneration != appliedGeneration {
+		return value
+	}
+	src, srcOK := options.ZoneSlots[value.SourceZone]
+	dst, dstOK := options.ZoneSlots[value.DestinationZone]
+	if !srcOK || !dstOK {
+		return value
+	}
+	for _, rule := range program.Rules {
+		if rule.ID != value.MatchedPolicyID || !rule.Enabled || rule.Action != domain.DecisionAllow ||
+			len(rule.SourceZones) != 1 || len(rule.DestinationZones) != 1 {
+			continue
+		}
+		if _, ok := rule.SourceZones[strings.ToLower(value.SourceZone)]; !ok {
+			continue
+		}
+		if _, ok := rule.DestinationZones[strings.ToLower(value.DestinationZone)]; !ok {
+			continue
+		}
+		value.KernelCacheVerified = dataplane.CacheHit(value.KernelMark,
+			dataplane.CacheMark{Epoch: options.Epoch, SourceZoneSlot: src, DestinationZoneSlot: dst}, true)
+		break
+	}
+	return value
 }
 func (s *RuntimeServiceAdapter) SessionStats(context.Context) (domain.RuntimeStats, error) {
 	if s.Runtime == nil {

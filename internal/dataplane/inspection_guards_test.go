@@ -51,7 +51,7 @@ func TestInspectionGuardUsesQualifiedFullIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := fake.scripts[0]
-	for _, want := range []string{"2 . 99", "192.168.10.10 . 50000", "203.0.113.10 . 443", "tcp", "timeout 60s"} {
+	for _, want := range []string{"ct zone 2", "99 : jump app_guard_i99", "@app_denied_z2_i99", "192.168.10.10 . 50000", "203.0.113.10 . 443", "tcp", "timeout 60s"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("missing %q in %s", want, script)
 		}
@@ -71,6 +71,10 @@ func TestGuardRenewalRefreshesTimeoutInOneNftTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := manager.InstallAppGuard(context.Background(), key, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	fake.scripts = nil
 	if err := manager.RenewAppGuard(context.Background(), key, time.Minute); err != nil {
 		t.Fatal(err)
 	}

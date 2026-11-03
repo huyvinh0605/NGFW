@@ -59,7 +59,7 @@ func renderM4RuntimeGuards(value domain.Config, enabled bool) string {
 				out.WriteString(prefix + rule + "\n")
 			}
 		} else {
-			out.WriteString(prefix + "meta l4proto { tcp, udp } ct zone . ct id . ct original ip saddr . ct original proto-src . ct original ip daddr . ct original proto-dst . meta l4proto @app_denied_v4 drop\n")
+			out.WriteString(prefix + "meta l4proto { tcp, udp } ct id vmap @app_denied_v4\n")
 		}
 	}
 	return out.String()

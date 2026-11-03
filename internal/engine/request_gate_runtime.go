@@ -26,7 +26,8 @@ func (s *RuntimeServiceAdapter) RequestGateHealth(ctx context.Context) (domain.R
 			"fail_open": 0, "fail_close": 0, "inspection_timeout": 0,
 			"queue_rejected": 0, "tls_handshake_fail": 0,
 			"upstream_verify_fail": 0, "body_limit": 0,
-			"decompression_limit": 0,
+			"decompression_limit":       0,
+			"upstream_mtls_unsupported": 0, "upstream_handshake_fail": 0, "result_report_fail": 0,
 		}, UpdatedAt: time.Now().UTC(),
 	}
 	running := s.Config.Running()
@@ -77,6 +78,7 @@ func (s *RuntimeServiceAdapter) RequestGateCapabilities(ctx context.Context) (do
 			"Transparent interception supports IPv4 TCP; TCP/80 is plaintext HTTP and other explicit TCP gate ports are TLS",
 			"Readiness requires verified kernel activation and fresh generation-bound proxy observations",
 			"HTTP/3 and ECH decryption are unsupported",
+			"CONNECT and WebSocket Upgrade are rejected before forwarding; WebSocket frames are not inspected",
 			"Upstream mTLS impersonation and response-body scanning are unsupported",
 		},
 	}, nil

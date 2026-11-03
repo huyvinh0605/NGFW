@@ -64,6 +64,15 @@ type Controller struct {
 	prepared              bool
 }
 
+// CurrentM2CacheOptions exposes the metadata of the ruleset actually applied
+// to the kernel. Callers must also compare the generation with their runtime
+// generation before treating an observed conntrack mark as current.
+func (c *Controller) CurrentM2CacheOptions() (M2CompileOptions, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentM2Options.Clone(), c.currentGeneration
+}
+
 func NewController(network NetworkStateReconciler, rules RulesetApplier, forwarding ForwardingEnsurer, statePath string) (*Controller, error) {
 	if network == nil || rules == nil || forwarding == nil {
 		return nil, errors.New("dataplane controller requires network, nftables and forwarding adapters")
@@ -84,7 +93,10 @@ func NewController(network NetworkStateReconciler, rules RulesetApplier, forward
 		controller.currentUsesM3 = applied.UsesM3
 	}
 	if applied.Snapshot != nil {
-		snapshot := cloneActivationSnapshot(*applied.Snapshot)
+		snapshot, err := upgradeActivationSnapshot(*applied.Snapshot)
+		if err != nil {
+			return nil, err
+		}
 		controller.currentSnapshot = &snapshot
 		controller.currentM2Options = snapshot.M2Options.Clone()
 		controller.currentGeneration = snapshot.Generation
@@ -109,7 +121,10 @@ func NewController(network NetworkStateReconciler, rules RulesetApplier, forward
 		controller.recoveryGeneration = activation.PreviousGeneration
 		controller.recoveryUsesM3 = activation.PreviousUsesM3
 		if activation.PreviousSnapshot != nil {
-			snapshot := cloneActivationSnapshot(*activation.PreviousSnapshot)
+			snapshot, err := upgradeActivationSnapshot(*activation.PreviousSnapshot)
+			if err != nil {
+				return nil, err
+			}
 			controller.recoverySnapshot = &snapshot
 			controller.recoveryOptions = snapshot.M2Options.Clone()
 			controller.recoveryGeneration = snapshot.Generation
@@ -121,7 +136,10 @@ func NewController(network NetworkStateReconciler, rules RulesetApplier, forward
 		controller.currentGeneration = activation.DesiredGeneration
 		controller.currentUsesM3 = activation.DesiredUsesM3
 		if activation.DesiredSnapshot != nil {
-			snapshot := cloneActivationSnapshot(*activation.DesiredSnapshot)
+			snapshot, err := upgradeActivationSnapshot(*activation.DesiredSnapshot)
+			if err != nil {
+				return nil, err
+			}
 			controller.currentSnapshot = &snapshot
 			controller.currentM2Options = snapshot.M2Options.Clone()
 			controller.currentGeneration = snapshot.Generation
@@ -222,6 +240,11 @@ func (c *Controller) applySnapshot(ctx context.Context, target ActivationSnapsho
 	if err := c.validateRecoveryTarget(target.Config); err != nil {
 		return err
 	}
+	upgraded, upgradeErr := upgradeActivationSnapshot(target)
+	if upgradeErr != nil {
+		return upgradeErr
+	}
+	target = upgraded
 	c.m4Runtime.Store(nil)
 	target = cloneActivationSnapshot(target)
 	desired := target.Config

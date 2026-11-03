@@ -7,10 +7,35 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/kltngfw/ngfw/internal/config"
 	"github.com/kltngfw/ngfw/internal/domain"
 )
 
 type gateAPIFake struct{ *runtimeAPIFake }
+
+func TestRequestGateCandidateValidationMatchesEngineCompiler(t *testing.T) {
+	candidate := config.Defaults()
+	candidate.Zones = []domain.Zone{{ID: "lan"}, {ID: "dmz"}}
+	candidate.Interfaces = []domain.Interface{
+		{ID: "lan0", SystemName: "eth0", ZoneID: "lan", Mode: domain.InterfaceL3},
+		{ID: "dmz0", SystemName: "eth1", ZoneID: "dmz", Mode: domain.InterfaceL3},
+	}
+	candidate.RequestGate = &domain.RequestGateConfig{Enabled: true}
+	candidate.Profiles = []domain.SecurityProfile{{ID: "gate", TLSMode: domain.TLSMetadata,
+		RequestGate: &domain.RequestGateProfile{Enabled: true, FailMode: domain.GateFailClose,
+			OversizeAction: "BLOCK", UnsupportedEncodingAction: "BLOCK"}}}
+	candidate.Policies = []domain.SecurityPolicy{{ID: "web", Priority: 1,
+		SourceZones: []string{"lan"}, DestinationZones: []string{"dmz"}, Services: []string{"tcp:80"},
+		SecurityProfileID: "gate", Action: domain.DecisionAllow, Scope: "SESSION", Enabled: true}}
+	if errs := validateCandidateConfig(candidate); len(errs) != 0 {
+		t.Fatalf("engine-compatible M4 Candidate rejected by API: %v", errs)
+	}
+	candidate.RequestGate = nil
+	candidate.Profiles[0].RequestGate = nil
+	if errs := validateCandidateConfig(candidate); len(errs) == 0 {
+		t.Fatal("M2 Candidate unexpectedly accepted a security profile")
+	}
+}
 
 func (gateAPIFake) RequestGateHealth(context.Context) (domain.RequestGateHealth, error) {
 	return domain.RequestGateHealth{Enabled: true, Status: "down", ProxyReachable: false, Generation: 4}, nil

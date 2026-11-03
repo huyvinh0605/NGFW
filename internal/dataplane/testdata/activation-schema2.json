@@ -1,0 +1,215 @@
+{
+  "schema": 2,
+  "config": {
+    "interfaces": [
+      {
+        "id": "wan0",
+        "name": "WAN",
+        "system_name": "ens33",
+        "mac_address": "",
+        "zone_id": "wan",
+        "mode": "L3",
+        "ipv4_addresses": [
+          "192.0.2.2/24"
+        ],
+        "ipv6_addresses": null,
+        "mtu": 1400,
+        "admin_state": true,
+        "link_state": "",
+        "rx_packets": 0,
+        "tx_packets": 0,
+        "rx_bytes": 0,
+        "tx_bytes": 0
+      },
+      {
+        "id": "lan0",
+        "name": "LAN",
+        "system_name": "ens37",
+        "mac_address": "",
+        "zone_id": "lan",
+        "mode": "L3",
+        "ipv4_addresses": [
+          "192.168.10.1/24"
+        ],
+        "ipv6_addresses": null,
+        "mtu": 1500,
+        "admin_state": true,
+        "link_state": "",
+        "rx_packets": 0,
+        "tx_packets": 0,
+        "rx_bytes": 0,
+        "tx_bytes": 0
+      },
+      {
+        "id": "dmz-parent",
+        "name": "DMZ",
+        "system_name": "ens38",
+        "mac_address": "",
+        "zone_id": "dmz",
+        "mode": "L3",
+        "ipv4_addresses": [
+          "10.20.0.1/24"
+        ],
+        "ipv6_addresses": null,
+        "mtu": 1500,
+        "admin_state": true,
+        "link_state": "",
+        "rx_packets": 0,
+        "tx_packets": 0,
+        "rx_bytes": 0,
+        "tx_bytes": 0
+      },
+      {
+        "id": "mgmt0",
+        "name": "MGMT",
+        "system_name": "ens39",
+        "mac_address": "",
+        "zone_id": "mgmt",
+        "mode": "MANAGEMENT",
+        "ipv4_addresses": [
+          "192.168.100.1/24"
+        ],
+        "ipv6_addresses": null,
+        "mtu": 1500,
+        "admin_state": true,
+        "link_state": "",
+        "rx_packets": 0,
+        "tx_packets": 0,
+        "rx_bytes": 0,
+        "tx_bytes": 0
+      }
+    ],
+    "zones": [
+      {
+        "id": "wan",
+        "name": "WAN",
+        "description": "Untrusted uplink"
+      },
+      {
+        "id": "lan",
+        "name": "LAN",
+        "description": "Trusted client network"
+      },
+      {
+        "id": "dmz",
+        "name": "DMZ",
+        "description": "Published services"
+      },
+      {
+        "id": "mgmt",
+        "name": "MGMT",
+        "description": "Administration"
+      }
+    ],
+    "routes": [
+      {
+        "id": "default-wan",
+        "destination_cidr": "0.0.0.0/0",
+        "gateway": "192.0.2.1",
+        "interface_id": "wan0",
+        "metric": 100,
+        "enabled": true,
+        "description": ""
+      }
+    ],
+    "nat_rules": [
+      {
+        "id": "lan-masquerade",
+        "name": "LAN outbound",
+        "type": "MASQUERADE",
+        "source_zone": "lan",
+        "destination_zone": "wan",
+        "source_network": "192.168.10.0/24",
+        "destination_network": "",
+        "protocol": "",
+        "original_port": 0,
+        "translated_address": "",
+        "translated_port": 0,
+        "enabled": true,
+        "priority": 100
+      },
+      {
+        "id": "dmz-https",
+        "name": "DMZ HTTPS",
+        "type": "DNAT",
+        "source_zone": "wan",
+        "destination_zone": "dmz",
+        "source_network": "",
+        "destination_network": "192.0.2.2/32",
+        "protocol": "tcp",
+        "original_port": 8443,
+        "translated_address": "10.20.0.10",
+        "translated_port": 443,
+        "enabled": true,
+        "priority": 10
+      }
+    ],
+    "policies": [
+      {
+        "id": "block-wan-lan-ping",
+        "name": "Block WAN to LAN Ping",
+        "priority": 100,
+        "source_zones": [
+          "wan"
+        ],
+        "destination_zones": [
+          "lan"
+        ],
+        "services": [
+          "icmp"
+        ],
+        "action": "DROP",
+        "scope": "SESSION",
+        "log_start": true,
+        "log_end": true,
+        "enabled": true
+      },
+      {
+        "id": "duplicate-test-a",
+        "name": "Duplicate test A",
+        "priority": 900,
+        "action": "ALLOW",
+        "scope": "SESSION",
+        "log_start": false,
+        "log_end": false,
+        "enabled": true
+      }
+    ],
+    "security_profiles": null,
+    "max_sessions": 50000,
+    "max_events_queue": 10000,
+    "max_http_body_inspection": 65536,
+    "max_http_header_size": 32768,
+    "max_url_length": 8192,
+    "max_ml_input_length": 65536,
+    "ml_timeout_millis": 200,
+    "request_inspection_timeout_millis": 2000,
+    "default_deny": true
+  },
+  "generation": 56,
+  "m2_options": {
+    "epoch": 21,
+    "zone_slots": {
+      "dmz": 1,
+      "lan": 2,
+      "mgmt": 3,
+      "wan": 4
+    },
+    "cache_enabled": true
+  },
+  "inspection_plan": {
+    "Generation": 56,
+    "Enabled": false,
+    "IncludeManagement": false,
+    "Rules": null,
+    "RenderedRules": 0
+  },
+  "uses_m3": false,
+  "artifact_hash": "23aed619181ae6d4a9a7d215c9e492f2fe2635d6098039fae61b44de28c13159",
+  "static_ruleset_hash": "e59ca118538bb97cf4f37935b1d72b55dc1c728f6fd013aa472ac300307e2436",
+  "proxy_plan": {
+    "schema_version": 1,
+    "generation": 56,
+    "enabled": false
+  }
+}

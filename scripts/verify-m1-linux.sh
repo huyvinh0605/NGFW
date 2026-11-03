@@ -5,6 +5,7 @@ engine_service="${NGFW_ENGINE_SERVICE:-ngfw-engine.service}"
 api_service="${NGFW_API_SERVICE:-ngfw-api.service}"
 socket_path="${NGFW_ENGINE_SOCKET:-/run/ngfw/engine.sock}"
 state_dir="${NGFW_STATE_DIR:-/var/lib/ngfw}"
+engine_binary="${NGFW_ENGINE_BINARY:-/usr/local/lib/ngfw/ngfw-engine}"
 
 failures=0
 check() {
@@ -28,6 +29,7 @@ check "engine IPC socket group is ngfw" test "$(stat -c '%G' "$socket_path" 2>/d
 check "managed nftables table is loaded" nft list table inet ngfw
 check "dataplane applied snapshot exists" test -f "$state_dir/dataplane-applied.json"
 check "no activation is left in progress" test ! -e "$state_dir/dataplane-applied.json.activation"
+check "Running interfaces, addresses and routes match kernel" "$engine_binary" --verify-network --state-dir "$state_dir"
 
 api_pid="$(systemctl show --property MainPID --value "$api_service")"
 engine_pid="$(systemctl show --property MainPID --value "$engine_service")"

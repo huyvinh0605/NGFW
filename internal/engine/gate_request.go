@@ -24,8 +24,9 @@ const (
 )
 
 type gateConnectionRecord struct {
-	open    domain.ProxyConnectionOpen
-	expires time.Time
+	open      domain.ProxyConnectionOpen
+	sessionID string
+	expires   time.Time
 }
 
 type gateDecisionRecord struct {
@@ -41,9 +42,11 @@ func (service *GateService) rememberGateConnection(open domain.ProxyConnectionOp
 	if service.gateConnections == nil {
 		service.gateConnections = make(map[string]gateConnectionRecord)
 	}
-	if existing, exists := service.gateConnections[open.ConnectionID]; exists && time.Now().Before(existing.expires) && !sameGateConnection(existing.open, open) {
-		delete(service.gateConnections, open.ConnectionID)
-		return false
+	if existing, exists := service.gateConnections[open.ConnectionID]; exists && time.Now().Before(existing.expires) {
+		if !sameGateConnection(existing.open, open) || existing.sessionID != "" && existing.sessionID != decision.SessionID {
+			delete(service.gateConnections, open.ConnectionID)
+			return false
+		}
 	}
 	if decision.Action != domain.TLSGateInspectHTTP && decision.Action != domain.TLSGateDecrypt {
 		// Retain a prior connection identity until TTL so a request racing a
@@ -69,7 +72,7 @@ func (service *GateService) rememberGateConnection(open domain.ProxyConnectionOp
 	copyOpen := open
 	copyTLS := *open.IsTLS
 	copyOpen.IsTLS = &copyTLS
-	service.gateConnections[open.ConnectionID] = gateConnectionRecord{open: copyOpen, expires: time.Now().Add(gateConnectionTTL)}
+	service.gateConnections[open.ConnectionID] = gateConnectionRecord{open: copyOpen, sessionID: decision.SessionID, expires: time.Now().Add(gateConnectionTTL)}
 	return true
 }
 
@@ -308,12 +311,16 @@ func (service *GateService) EvaluateRequest(ctx context.Context, input domain.Pr
 	}
 	decision.ConfigGeneration = fresh.ConfigGeneration
 	decision.SessionID, decision.PolicyID, decision.ProfileID = fresh.SessionID, fresh.PolicyID, fresh.ProfileID
-	if fresh.Action != domain.TLSGateInspectHTTP && fresh.Action != domain.TLSGateDecrypt || fresh.SessionID != request.SessionID || request.Scheme == "https" && (open.IsTLS == nil || !*open.IsTLS) || request.Scheme == "http" && (open.IsTLS == nil || *open.IsTLS) {
+	if fresh.Action != domain.TLSGateInspectHTTP && fresh.Action != domain.TLSGateDecrypt || request.SessionID != "" && fresh.SessionID != request.SessionID || request.Scheme == "https" && (open.IsTLS == nil || !*open.IsTLS) || request.Scheme == "http" && (open.IsTLS == nil || *open.IsTLS) {
 		decision.HTTPStatus = 403
 		decision.ReasonCode = "GATE_POLICY_NOT_ALLOWED"
 		service.storeGateDecision(request, input.Inspection, decision)
 		return decision, nil
 	}
+	// A kernel notification may arrive while Suricata is inspecting the held
+	// request. Only the engine may enrich this initially unlinked connection;
+	// rememberGateConnection pins the first resolved M2 session against reuse.
+	request.SessionID = fresh.SessionID
 	program := service.Runtime.CurrentProgram()
 	plan, ok := program.CompiledRequestGateForPolicy(fresh.PolicyID)
 	if !ok || !plan.Enabled || plan.Generation != fresh.ConfigGeneration || plan.ProfileID != fresh.ProfileID || !plan.FailMode.Valid() || service.Runtime.CurrentGeneration() != fresh.ConfigGeneration {

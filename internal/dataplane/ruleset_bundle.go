@@ -124,7 +124,7 @@ func (n *NftRunner) verifyBundleLocked(ctx context.Context, bundle RulesetBundle
 			return fmt.Errorf("verify nft table %s: %w: %s", object, err, strings.TrimSpace(string(out)))
 		}
 	}
-	for _, object := range [][]string{{"chain", "inet", "ngfw", "forward"}, {"set", "inet", "ngfw_runtime", "source_blocks"}, {"set", "inet", "ngfw_runtime", "revoked_ctids"}, {"chain", "inet", "ngfw_inspection", "guard"}, {"chain", "inet", "ngfw_inspection", "inspect"}, {"set", "inet", "ngfw_inspection", "app_denied_v4"}, {"set", "inet", "ngfw_inspection", "ips_ready"}} {
+	for _, object := range [][]string{{"chain", "inet", "ngfw", "forward"}, {"set", "inet", "ngfw_runtime", "source_blocks"}, {"set", "inet", "ngfw_runtime", "revoked_ctids"}, {"chain", "inet", "ngfw_inspection", "guard"}, {"chain", "inet", "ngfw_inspection", "inspect"}, {"map", "inet", "ngfw_inspection", "app_denied_v4"}, {"set", "inet", "ngfw_inspection", "ips_ready"}} {
 		out, err := n.run(ctx, append([]string{"list"}, object...)...)
 		if err != nil {
 			return fmt.Errorf("verify nft %s %s/%s/%s: %w: %s", object[0], object[1], object[2], object[3], err, strings.TrimSpace(string(out)))

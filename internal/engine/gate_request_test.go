@@ -57,6 +57,46 @@ func TestM4EvaluateRequestAuthoritativeVerdicts(t *testing.T) {
 	}
 }
 
+func TestM4RequestBindsSessionArrivingAfterConnectionOpen(t *testing.T) {
+	service := gateTestService(t, gateTestConfig())
+	open := gateTestOpen(false)
+	connection, err := service.OpenConnection(context.Background(), open)
+	if err != nil || connection.SessionID != "" {
+		t.Fatalf("initial connection unexpectedly linked: %+v %v", connection, err)
+	}
+	tuple := domain.Tuple{Family: domain.FamilyIPv4, Protocol: 6,
+		SrcIP: netip.MustParseAddr(open.SourceIP), SrcPort: uint16(open.SourcePort),
+		DstIP: netip.MustParseAddr(open.OriginalIP), DstPort: uint16(open.OriginalPort)}
+	reply := tuple.Reverse()
+	record := conntrack.Record{Identity: domain.ConntrackIdentity{BootID: "boot", ID: 777, Family: domain.FamilyIPv4, Original: tuple},
+		OriginalTuple: tuple, ReplyTuple: &reply, Presence: conntrack.Presence{OriginalTuple: true, ReplyTuple: true, ID: true}}
+	tracked, _, err := service.Runtime.Store.Apply(record, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Runtime.Store.SetZones(tracked.SessionID, "lan", "wan"); err != nil {
+		t.Fatal(err)
+	}
+	input := gateRequestInput(open, connection)
+	clean, err := service.EvaluateRequest(context.Background(), input)
+	if err != nil || clean.Verdict != domain.RequestAllow || clean.ReasonCode != "GATE_INSPECTION_COMPLETE" || clean.SessionID != tracked.SessionID {
+		t.Fatalf("late conntrack caused a false policy denial: %+v %v", clean, err)
+	}
+	storedContext, _, ok := service.GetRequestDecision(input.Context.RequestID)
+	if !ok || storedContext.SessionID != tracked.SessionID {
+		t.Fatal("late session binding missing from request evidence")
+	}
+	input.Inspection.Alerts = []domain.RequestAlert{{Detector: "suricata", SignatureID: "9904004", Action: "allowed"}}
+	blocked, err := service.EvaluateRequest(context.Background(), input)
+	if err != nil || blocked.ReasonCode != "GATE_SIGNATURE_BLOCK" || blocked.Coverage != domain.CoverageComplete {
+		t.Fatalf("late-bound malicious request lost its signature verdict: %+v %v", blocked, err)
+	}
+	rebound := domain.ProxyConnectionDecision{SessionID: "different-kernel-session", Action: domain.TLSGateInspectHTTP}
+	if service.rememberGateConnection(open, &rebound) {
+		t.Fatal("bound connection was reassigned to another conntrack session")
+	}
+}
+
 func TestM4EvaluateRequestFailureModesAndPartial(t *testing.T) {
 	for _, failMode := range []domain.GateFailMode{domain.GateFailOpen, domain.GateFailClose} {
 		config := gateTestConfig()

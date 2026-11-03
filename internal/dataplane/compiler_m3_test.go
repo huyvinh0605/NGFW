@@ -44,7 +44,7 @@ func TestInspectionSchemaUsesQualifiedExpressionTypes(t *testing.T) {
 	if strings.Contains(script, "type integer") {
 		t.Fatal("unqualified integer type returned")
 	}
-	for _, want := range []string{"typeof ct zone . ct id", "flags timeout", "priority -15", "priority 10"} {
+	for _, want := range []string{"schema=2", "typeof ct id : verdict", "ct id vmap @app_denied_v4", "flags timeout", "priority -15", "priority 10"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("schema missing %q", want)
 		}

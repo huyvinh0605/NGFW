@@ -125,7 +125,7 @@ func (r *gateActivationRoute) Verify(context.Context) error {
 
 func TestM4ManagementCommitRollbackAndCompensationKeepOneGeneration(t *testing.T) {
 	value := gateTestConfig()
-	value.Zones = []domain.Zone{{ID:"lan"},{ID:"wan"},{ID:"dmz"}}
+	value.Zones = []domain.Zone{{ID: "lan"}, {ID: "wan"}, {ID: "dmz"}}
 	for i := range value.Interfaces {
 		value.Interfaces[i].SystemName = value.Interfaces[i].ID
 		value.Interfaces[i].Mode = domain.InterfaceL3
@@ -137,7 +137,7 @@ func TestM4ManagementCommitRollbackAndCompensationKeepOneGeneration(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.SyncRunning(value, domain.ConfigVersion{Version:1})
+	manager.SyncRunning(value, domain.ConfigVersion{Version: 1})
 	gate := gateTestService(t, value)
 	gate.RunningConfig = func() (domain.Config, uint64) { return manager.Running(), manager.Version().Version }
 	nft := &gateActivationNft{}

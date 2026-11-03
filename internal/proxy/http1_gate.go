@@ -113,6 +113,7 @@ type HTTP1RequestGate struct {
 	Limits         domain.RequestGateConfig
 	Inspector      RequestInspector
 	Authorizer     RequestAuthorizer
+	ResultReporter RequestResultReporter
 	DialContext    func(context.Context, string, string) (net.Conn, error)
 	Roots          *x509.CertPool
 	counters       requestGateCounters
@@ -180,16 +181,24 @@ func (gate *HTTP1RequestGate) ServeHTTPConnection(ctx context.Context, downstrea
 	if err != nil {
 		return err
 	}
+	upstreamHTTP2 := value.TLS && downstream.(*tls.Conn).ConnectionState().NegotiatedProtocol == "h2"
+	// This transport belongs to exactly one downstream connection. Its dial
+	// target and TLS identity cannot be changed by a later request's Host header.
+	transport, err := gate.newUpstreamTransport(value.OriginalDestination, value.TLS, upstreamHTTP2, connectionDecision.UpstreamHost)
+	if err != nil {
+		return err
+	}
+	defer transport.CloseIdleConnections()
 	server := &http.Server{
 		MaxHeaderBytes:    limits.MaxHeaderBytes,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       30 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			gate.handleRequest(w, request, downstream, value, connectionDecision, allocator, limits)
+			gate.handleRequest(w, request, downstream, value, connectionDecision, allocator, limits, transport)
 		}),
 	}
-	if value.TLS && downstream.(*tls.Conn).ConnectionState().NegotiatedProtocol == "h2" {
+	if upstreamHTTP2 {
 		stop := context.AfterFunc(ctx, func() { _ = downstream.Close() })
 		defer stop()
 		streams := min(limits.MaxHTTP2Streams, limits.MaxPerClientRequests)
@@ -212,7 +221,7 @@ func (gate *HTTP1RequestGate) ServeHTTPConnection(ctx context.Context, downstrea
 	return err
 }
 
-func (gate *HTTP1RequestGate) handleRequest(w http.ResponseWriter, request *http.Request, downstream net.Conn, connection ConnectionContext, connectionDecision domain.ProxyConnectionDecision, allocator *RequestIdentityAllocator, limits domain.RequestGateConfig) {
+func (gate *HTTP1RequestGate) handleRequest(w http.ResponseWriter, request *http.Request, downstream net.Conn, connection ConnectionContext, connectionDecision domain.ProxyConnectionDecision, allocator *RequestIdentityAllocator, limits domain.RequestGateConfig, transport *gateUpstreamTransport) {
 	gate.counters.intercepted.Add(1)
 	if request.ProtoMajor != 1 && request.ProtoMajor != 2 || request.ProtoMajor == 1 && request.ProtoMinor != 1 || request.ProtoMajor == 2 && request.ProtoMinor != 0 || request.Method == http.MethodConnect || request.Header.Get("Upgrade") != "" {
 		writeGateStatus(w, request, http.StatusBadRequest)
@@ -320,7 +329,7 @@ func (gate *HTTP1RequestGate) handleRequest(w http.ResponseWriter, request *http
 		return
 	}
 	defer replay.Close()
-	gate.forwardAllowed(w, request, replay, connection.OriginalDestination, connection.TLS, connectionDecision.UpstreamHost)
+	gate.forwardAllowed(w, request, replay, connection.OriginalDestination, connection.TLS, transport, requestContext, decision)
 }
 
 func deadlineOf(ctx context.Context) time.Time {
@@ -367,7 +376,11 @@ func writeGateStatus(w http.ResponseWriter, request *http.Request, status int) {
 	http.Error(w, http.StatusText(status), status)
 }
 
-func (gate *HTTP1RequestGate) forwardAllowed(w http.ResponseWriter, inbound *http.Request, body io.ReadCloser, target netip.AddrPort, secure bool, hostname string) {
+func (gate *HTTP1RequestGate) forwardAllowed(w http.ResponseWriter, inbound *http.Request, body io.ReadCloser, target netip.AddrPort, secure bool, transport *gateUpstreamTransport, requestContext domain.RequestContext, decision domain.RequestDecision) {
+	result := domain.ProxyRequestResult{RequestID: requestContext.RequestID, ConnectionID: requestContext.ConnectionID,
+		DecisionID: decision.DecisionID, ConfigGeneration: decision.ConfigGeneration,
+		HTTPStatus: http.StatusBadGateway, ReasonCode: "UPSTREAM_RESPONSE_INVALID"}
+	defer func() { gate.reportResult(inbound.Context(), result) }()
 	scheme := "http"
 	if secure {
 		scheme = "https"
@@ -375,6 +388,7 @@ func (gate *HTTP1RequestGate) forwardAllowed(w http.ResponseWriter, inbound *htt
 	requestURL := &url.URL{Scheme: scheme, Host: target.String(), Path: inbound.URL.Path, RawPath: inbound.URL.RawPath, RawQuery: inbound.URL.RawQuery, ForceQuery: inbound.URL.ForceQuery}
 	upstream, err := http.NewRequestWithContext(inbound.Context(), inbound.Method, requestURL.String(), body)
 	if err != nil {
+		result.HTTPStatus, result.ReasonCode = http.StatusBadRequest, "UPSTREAM_REQUEST_INVALID"
 		writeGateStatus(w, inbound, http.StatusBadRequest)
 		return
 	}
@@ -384,45 +398,23 @@ func (gate *HTTP1RequestGate) forwardAllowed(w http.ResponseWriter, inbound *htt
 	stripHopHeaders(upstream.Header)
 	upstream.ContentLength = inbound.ContentLength
 	upstream.Trailer = inbound.Trailer.Clone()
-	upstream.Close = true
-	dial := gate.DialContext
-	if dial == nil {
-		dial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
-	}
-	transport := &http.Transport{
-		Proxy: nil, DialContext: dial, DisableKeepAlives: true,
-		DisableCompression: true, ResponseHeaderTimeout: 10 * time.Second,
-		MaxResponseHeaderBytes: 64 << 10,
-	}
-	if secure {
-		transport.DialTLSContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			if inbound.ProtoMajor == 2 {
-				return DialVerifiedUpstream(ctx, target, hostname, gate.Roots, dial)
-			}
-			return DialVerifiedUpstreamHTTP1(ctx, target, hostname, gate.Roots, dial)
-		}
-		if inbound.ProtoMajor == 2 {
-			h2, err := http2.ConfigureTransports(transport)
-			if err != nil {
-				writeGateStatus(w, inbound, http.StatusBadGateway)
-				return
-			}
-			h2.MaxHeaderListSize = 64 << 10
-			h2.MaxReadFrameSize = 16 << 10
-			h2.MaxDecoderHeaderTableSize = 4096
-			h2.MaxEncoderHeaderTableSize = 4096
-			h2.StrictMaxConcurrentStreams = true
-			h2.IdleConnTimeout = 5 * time.Second
-		}
-	}
-	defer transport.CloseIdleConnections()
+	// The bounded connection-scoped transport may reuse an upstream connection
+	// after a fully consumed response. A BLOCK never calls this function.
+	upstream.Close = false
 	forwardCtx, cancel := context.WithTimeout(inbound.Context(), 30*time.Second)
 	defer cancel()
-	response, err := transport.RoundTrip(upstream.WithContext(forwardCtx))
+	response, requested, err := transport.roundTrip(upstream.WithContext(forwardCtx))
+	result.ClientCertificateRequested = requested
 	if err != nil {
-		if errors.Is(err, ErrUpstreamVerify) {
+		result.ReasonCode = upstreamFailureCode(err, secure)
+		switch {
+		case errors.Is(err, ErrUpstreamMTLS):
+			gate.counters.upstreamMTLSUnsupported.Add(1)
+		case errors.Is(err, ErrUpstreamVerify):
 			gate.counters.upstreamVerifyFail.Add(1)
-		} else {
+		case errors.Is(err, ErrUpstreamHandshake):
+			gate.counters.upstreamHandshakeFail.Add(1)
+		default:
 			gate.counters.upstreamConnectFail.Add(1)
 		}
 		writeGateStatus(w, inbound, http.StatusBadGateway)
@@ -441,11 +433,49 @@ func (gate *HTTP1RequestGate) forwardAllowed(w http.ResponseWriter, inbound *htt
 		}
 	}
 	w.WriteHeader(response.StatusCode)
+	result.HTTPStatus = response.StatusCode
+	result.ReasonCode = "UPSTREAM_RESPONSE_TRUNCATED"
 	if _, err := io.Copy(w, response.Body); err != nil {
 		// A truncated upstream response must not be reused as a valid keep-alive
 		// response to another downstream request.
 		panic(http.ErrAbortHandler)
 	}
+	result.ReasonCode = "UPSTREAM_RESPONSE_RECEIVED"
+}
+
+func (gate *HTTP1RequestGate) newUpstreamTransport(target netip.AddrPort, secure, http2Upstream bool, hostname string) (*gateUpstreamTransport, error) {
+	dial := gate.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+	}
+	transport := &gateUpstreamTransport{secure: secure, Transport: &http.Transport{
+		Proxy: nil, DialContext: dial,
+		DisableCompression: true, ResponseHeaderTimeout: 10 * time.Second,
+		MaxResponseHeaderBytes: 64 << 10, MaxConnsPerHost: 8,
+		MaxIdleConns: 2, MaxIdleConnsPerHost: 2, IdleConnTimeout: 15 * time.Second,
+	}}
+	if secure {
+		transport.DialTLSContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			protocols := []string{"http/1.1"}
+			if http2Upstream {
+				protocols = []string{"h2", "http/1.1"}
+			}
+			return dialTrackedUpstream(ctx, target, hostname, gate.Roots, dial, protocols, &transport.tlsStates)
+		}
+		if http2Upstream {
+			h2, err := http2.ConfigureTransports(transport.Transport)
+			if err != nil {
+				return nil, err
+			}
+			h2.MaxHeaderListSize = 64 << 10
+			h2.MaxReadFrameSize = 16 << 10
+			h2.MaxDecoderHeaderTableSize = 4096
+			h2.MaxEncoderHeaderTableSize = 4096
+			h2.StrictMaxConcurrentStreams = true
+			h2.IdleConnTimeout = 5 * time.Second
+		}
+	}
+	return transport, nil
 }
 
 func stripHopHeaders(headers http.Header) {

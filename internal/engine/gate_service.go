@@ -75,6 +75,16 @@ func (service *GateService) HandleGate(ctx context.Context, operation gateipc.Op
 			return gateipc.Result{}, err
 		}
 		return gateipc.Result{Meta: gateipc.ResponseMeta{ConfigGeneration: decision.ConfigGeneration, DecisionID: decision.DecisionID}, Data: decision}, nil
+	case gateipc.ReportRequestResult:
+		var input domain.ProxyRequestResult
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return gateipc.Result{}, &gateipc.ProtocolError{Code: gateipc.CodeMalformed}
+		}
+		receipt, err := service.ReportRequestResult(ctx, input)
+		if err != nil {
+			return gateipc.Result{}, err
+		}
+		return gateipc.Result{Meta: gateipc.ResponseMeta{ConfigGeneration: receipt.ConfigGeneration, DecisionID: receipt.DecisionID}, Data: receipt}, nil
 	case gateipc.EvaluateRequest:
 		var input domain.ProxyRequestEvaluation
 		if err := json.Unmarshal(payload, &input); err != nil {

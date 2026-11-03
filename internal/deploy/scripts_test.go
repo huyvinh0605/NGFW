@@ -7,7 +7,25 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kltngfw/ngfw/internal/dataplane"
 )
+
+func TestM3CapabilityProbeUsesProductionInspectionSchema(t *testing.T) {
+	payload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "tests", "integration", "m3", "probe-capabilities.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := strings.ReplaceAll(string(payload), "\r\n", "\n")
+	_, rest, ok := strings.Cut(script, "cat >\"$work/schema.nft\" <<'EOF'\n")
+	if !ok {
+		t.Fatal("probe has no isolated inspection schema fixture")
+	}
+	schema, _, ok := strings.Cut(rest, "\nEOF\n")
+	if !ok || schema+"\n" != dataplane.InspectionSchemaScript() {
+		t.Fatal("capability probe and production inspection schemas differ; update the probe when changing the engine schema")
+	}
+}
 
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
@@ -29,18 +47,80 @@ func TestLinuxShellScriptsParse(t *testing.T) {
 	root := repositoryRoot(t)
 	paths := []string{
 		"scripts/install-linux.sh",
+		"scripts/configure-network-ownership.sh",
+		"scripts/verify-m1-linux.sh",
 		"scripts/start-suricata-sensor.sh",
 		"scripts/rotate-suricata-logs.sh",
 		"scripts/verify-m3-linux.sh",
 		"tests/integration/m3/probe-capabilities.sh",
 		"tests/integration/m3/replay-suricata.sh",
 	}
-	args := []string{"-n"}
 	for _, path := range paths {
-		args = append(args, filepath.Join(root, filepath.FromSlash(path)))
+		if output, err := exec.Command(bash, "-n", filepath.Join(root, filepath.FromSlash(path))).CombinedOutput(); err != nil {
+			t.Fatalf("bash -n %s failed: %v\n%s", path, err, output)
+		}
 	}
-	if output, err := exec.Command(bash, args...).CombinedOutput(); err != nil {
-		t.Fatalf("bash -n failed: %v\n%s", err, output)
+}
+
+func TestNetworkOwnershipPreservesManagementAndRejectsUnsafeChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("network ownership helper targets Linux")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is unavailable")
+	}
+	work := t.TempDir()
+	config := filepath.Join(work, "running.json")
+	root := filepath.Join(work, "systemd")
+	script := filepath.Join(repositoryRoot(t), "scripts", "configure-network-ownership.sh")
+	valid := `{"config":{"interfaces":[{"system_name":"ens33","mode":"L3"},{"system_name":"ens38","mode":"VLAN_PARENT"},{"system_name":"ens39","mode":"MANAGEMENT"}]}}`
+	write := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(config, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func() ([]byte, error) {
+		return exec.Command(bash, script, "--config", config, "--root", root, "--apply").CombinedOutput()
+	}
+	write(valid)
+	if output, err := run(); err != nil {
+		t.Fatalf("helper failed: %v %s", err, output)
+	}
+	profile := filepath.Join(root, "network", "05-ngfw-dataplane.network")
+	before, _ := os.ReadFile(profile)
+	if !strings.Contains(string(before), "Name=ens33 ens38\n") || !strings.Contains(string(before), "Unmanaged=yes") || strings.Contains(string(before), "ens39") {
+		t.Fatalf("incorrect ownership or MGMT takeover: %s", before)
+	}
+	if output, err := run(); err != nil {
+		t.Fatalf("reinstall failed: %v %s", err, output)
+	}
+	after, _ := os.ReadFile(profile)
+	if string(before) != string(after) {
+		t.Fatal("reinstall changed a stable ownership selection")
+	}
+	write(`{"interfaces":[{"system_name":"ens33*","mode":"L3"}]}`)
+	if output, err := run(); err == nil {
+		t.Fatalf("unsafe name accepted: %s", output)
+	}
+	after, _ = os.ReadFile(profile)
+	if string(before) != string(after) {
+		t.Fatal("invalid config changed installed ownership")
+	}
+	write(valid)
+	if err := os.WriteFile(profile, []byte("# operator-owned\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := run(); err == nil {
+		t.Fatalf("foreign file overwritten: %s", output)
+	}
+	unchanged, _ := os.ReadFile(profile)
+	if string(unchanged) != "# operator-owned\n" {
+		t.Fatal("operator file was modified")
 	}
 }
 

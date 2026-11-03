@@ -8,6 +8,10 @@ directory owned by the dedicated `ngfw-proxy` account; do not place the key in
 
 After building/installing the `ngfw-proxy` binary on Ubuntu:
 
+Install the Ubuntu `acl` package before running the M4 asset installer; the
+proxy receives search-only directory ACLs and never joins the privileged
+`ngfw` group.
+
 ```bash
 sudo bash scripts/install-m4-assets.sh
 sudo install -d -o ngfw-proxy -g ngfw-proxy -m 0700 /var/lib/ngfw/ca
@@ -35,7 +39,12 @@ installer accepts `--proxy-binary /absolute/path/ngfw-proxy` and installs an
 engine systemd drop-in adding the `ngfw-proxy` supplementary group. Restart
 the engine once after installing that drop-in: it needs this membership to
 assign its owned IPC socket to `root:ngfw-proxy` without CAP_CHOWN. The API
-account remains outside that group.
+account remains outside that group. The proxy does not join `ngfw`: the M4
+installer grants only directory traversal through `/etc/ngfw` and
+`/var/lib/ngfw`, while the engine drop-in grants traversal through `/run/ngfw`
+at each service start. This keeps the management token and privileged
+`engine.sock` inaccessible to the proxy. Stop a running proxy before applying
+an account/unit upgrade, then restart engine before starting proxy.
 
 After provisioning the CA, run `systemctl enable --now ngfw-proxy.service`.
 The proxy waits for the engine. Commit the M4 Candidate through the API; the

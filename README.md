@@ -42,7 +42,20 @@ repository but are not installed or claimed by the M3 appliance path.
 
 ## Local development
 
-Requirements: Go 1.22+, Node.js/npm, and PowerShell or a POSIX shell.
+Requirements: Go 1.22+, Node.js 22+/npm, Python 3.10+, and PowerShell or a
+POSIX shell. After cloning, download the project dependencies with:
+
+```sh
+python scripts/bootstrap-dev.py
+```
+
+Use `python3` on Ubuntu when needed. Add `--with-lab-tools` to create a local
+`.venv` with the Python lab-controller packages, or `--with-ml` for the optional
+experimental ML packages. The bootstrap does not start services or run traffic.
+See [docs/SETUP.md](docs/SETUP.md) for clone, dependency and startup instructions,
+including the separate Ubuntu/M3/M4 installation steps. Historical logs,
+captures, binaries, screenshots and run reports under `artifacts/` are kept
+locally and are not part of a source clone.
 
 Run local code gates:
 
@@ -110,6 +123,22 @@ sudo /usr/local/lib/ngfw/verify-m2-linux.sh
 sudo /usr/local/lib/ngfw/verify-m3-linux.sh --preflight \
   --evidence-dir /tmp/ngfw-m3-preflight
 ```
+
+With `--start`, the installer derives networkd ownership from persisted Running
+(or the bootstrap config on first install). Non-management links are marked
+`Unmanaged=yes`; MGMT keeps its existing OS network profile. The installed
+networkd routing policy preserves engine-owned routes and policy rules across
+networkd restarts. NetworkManager/other managers must likewise leave dataplane
+links to the engine. After assigning a new physical NIC, refresh the selection
+with `sudo /usr/local/lib/ngfw/configure-network-ownership.sh --config
+/var/lib/ngfw/running.json --apply` and `sudo networkctl reload`.
+
+The engine checks configured links, VLANs, MTU, admin state, addresses and static
+routes every five seconds and repairs lost managed objects from the current
+applied configuration. This does not advance configuration generations or cache
+epochs. Pending activation/recovery blocks background repair. Preflight uses the
+same read-only checks via `ngfw-engine --verify-network --state-dir /var/lib/ngfw`
+and fails on a Running/kernel mismatch even if systemd and nftables are active.
 
 Run the isolated kernel/Suricata capability probe before M3 traffic tests:
 

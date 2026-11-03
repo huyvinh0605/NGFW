@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -30,6 +31,9 @@ import (
 
 // The engine binary is the privileged owner of all Linux M1 dataplane state.
 func main() {
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:], os.Stdout))
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if runtime.GOOS != "linux" {
 		logger.Error("ngfw-engine M1 dataplane requires Linux")
@@ -238,6 +242,15 @@ func main() {
 		if current != nil && (limits != activeInspectionLimits || modeMask != activeInspectionModes) {
 			current.Stop()
 			runtimeEngine.SetInspectionRuntime(nil)
+			// The replacement reducer will re-evaluate current sessions. Retire
+			// the previous executor's timeout sets/chains before creating a new
+			// owner, so repeated M3/M4 configuration changes cannot leak groups.
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupErr := nftables.ClearInspectionRuntimeState(cleanupCtx)
+			cancelCleanup()
+			if cleanupErr != nil {
+				return fmt.Errorf("clear previous inspection runtime guards: %w", cleanupErr)
+			}
 			current = nil
 		}
 		if current == nil {
@@ -301,6 +314,7 @@ func main() {
 	}()
 	service := engine.NewRuntimeServiceAdapter(runtimeEngine, m, nil)
 	service.Gate = gateService
+	service.CacheOptions = controller.CurrentM2CacheOptions
 	service.ApplyGeneration = func(ctx context.Context, desired domain.Config, generation uint64) error {
 		err := applyDataplane(ctx, desired, generation)
 		if err != nil {
@@ -330,6 +344,7 @@ func main() {
 		return result
 	}
 	service.AfterActivate = func(_ context.Context, value domain.Config, _ uint64) error { return configureInspection(value) }
+	go monitorNetwork(ctx, controller, logger)
 	ipcServer := engineipc.NewRuntimeServer(engineipc.DefaultSocketPath(stateDir), service)
 	ipcErrors := make(chan error, 1)
 	go func() { ipcErrors <- ipcServer.Serve(ctx) }()

@@ -186,6 +186,7 @@ install -o root -g root -m 0755 "$build_dir/ngfw-engine" /usr/local/lib/ngfw/ngf
 install -o root -g root -m 0755 "$build_dir/ngfw-api" /usr/local/lib/ngfw/ngfw-api
 install -o root -g root -m 0755 scripts/verify-m1-linux.sh /usr/local/lib/ngfw/verify-m1-linux.sh
 install -o root -g root -m 0755 scripts/verify-m2-linux.sh /usr/local/lib/ngfw/verify-m2-linux.sh
+install -o root -g root -m 0755 scripts/configure-network-ownership.sh /usr/local/lib/ngfw/configure-network-ownership.sh
 install -o root -g root -m 0644 configs/examples/*.json /usr/local/share/ngfw/examples/
 install -o root -g root -m 0644 deploy/ngfw-engine.service deploy/ngfw-api.service /etc/systemd/system/
 install -o root -g root -m 0644 deploy/90-ngfw-ip-forward.conf /etc/sysctl.d/90-ngfw-ip-forward.conf
@@ -326,6 +327,21 @@ done
 systemctl daemon-reload
 
 if [[ $start_services -eq 1 ]]; then
+  # Follow the same authoritative Running/config paths as the service. Never
+  # let a stale bootstrap JSON reclaim a live management interface on reinstall.
+  set -a
+  # shellcheck disable=SC1091
+  . "$env_file"
+  set +a
+  network_source="$config_target"
+  if [[ -f "${NGFW_STATE_DIR:-/var/lib/ngfw}/running.json" ]]; then
+    network_source="${NGFW_STATE_DIR:-/var/lib/ngfw}/running.json"
+  fi
+  info "Preparing exclusive engine ownership of dataplane links"
+  /usr/local/lib/ngfw/configure-network-ownership.sh --config "$network_source" --apply
+  if systemctl is-active --quiet systemd-networkd; then
+    networkctl reload || die "cannot reload networkd dataplane ownership"
+  fi
   info "Starting NGFW services"
   systemctl enable ngfw-engine.service ngfw-api.service
   if [[ $with_inspection -eq 1 ]]; then

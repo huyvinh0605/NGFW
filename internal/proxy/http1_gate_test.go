@@ -189,6 +189,81 @@ func TestHTTP1RequestGateReplaysChunkedBodyAndKeepsConnectionSafe(t *testing.T) 
 	}
 }
 
+func TestHTTP1RequestGateReusesBoundedUpstreamTransportAfterVerdict(t *testing.T) {
+	var upstreamConnections, upstreamRequests atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
+		_, _ = io.WriteString(w, r.URL.Path)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			upstreamConnections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	target := netip.MustParseAddrPort(server.Listener.Addr().String())
+	gate := &HTTP1RequestGate{
+		Inspector: RequestInspectorFunc(func(_ context.Context, id string, _ inspection.GateHTTPRequest) (domain.RequestInspectionResult, error) {
+			return completeEvidenceForTest(id), nil
+		}),
+		Authorizer: RequestAuthorizerFunc(func(_ context.Context, evaluation domain.ProxyRequestEvaluation, _ uint64) (domain.RequestDecision, error) {
+			decision := allowRequestForTest(evaluation)
+			if evaluation.Context.Path == "/blocked" {
+				decision.Verdict, decision.HTTPStatus = domain.RequestBlock, http.StatusForbidden
+			}
+			return decision, nil
+		}),
+	}
+	client, downstream := net.Pipe()
+	defer client.Close()
+	defer downstream.Close()
+	value := ConnectionContext{
+		ConnectionID:  "0123456789abcdef0123456789abcdef",
+		ClientAddress: netip.MustParseAddrPort("192.0.2.1:50000"), OriginalDestination: target,
+	}
+	decision := domain.ProxyConnectionDecision{
+		DecisionID: "connection", ConfigGeneration: 1, Action: domain.TLSGateInspectHTTP,
+		UpstreamIP: target.Addr().String(), UpstreamPort: int(target.Port()),
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- gate.ServeHTTPConnection(context.Background(), downstream, value, decision) }()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(client)
+	for _, step := range []struct {
+		path   string
+		status int
+	}{{"/one", 200}, {"/two", 200}, {"/blocked", 403}} {
+		if _, err := fmt.Fprintf(client, "GET %s HTTP/1.1\r\nHost: virtual.test\r\n\r\n", step.path); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != step.status {
+			t.Fatalf("%s: status=%d, want=%d", step.path, response.StatusCode, step.status)
+		}
+		if step.path == "/blocked" && upstreamRequests.Load() != 2 {
+			t.Fatal("blocked request reached upstream")
+		}
+	}
+	if upstreamRequests.Load() != 2 || upstreamConnections.Load() != 1 {
+		t.Fatalf("expected two allowed requests on one bounded upstream connection: requests=%d connections=%d", upstreamRequests.Load(), upstreamConnections.Load())
+	}
+	_ = client.Close()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate did not stop")
+	}
+}
+
 func TestHTTP1RequestGateOnlyEngineCanAllowUnavailableInspection(t *testing.T) {
 	var evidenceCode string
 	gate := &HTTP1RequestGate{

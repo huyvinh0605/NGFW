@@ -2,14 +2,31 @@ package dataplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 )
 
-const InspectionSchemaVersion = 1
+const InspectionSchemaVersion = 2
 
 func InspectionSchemaScript() string {
+	return `table inet ngfw_inspection {
+  comment "owner=ngfw-engine schema=2"
+  map app_denied_v4 { typeof ct id : verdict; }
+  set ips_ready { type nf_proto . inet_proto; flags timeout; timeout 3s; }
+  chain guard { type filter hook forward priority -15; policy accept; meta l4proto { tcp, udp } ct id vmap @app_denied_v4; }
+  chain inspect { type filter hook forward priority 10; policy accept; }
+  chain select_original { }
+  chain select_reply { }
+}
+`
+}
+
+// Kept solely to authenticate persisted schema-1/2 activation snapshots.
+// New activations never apply this seven-field concatenation: nft 1.0.9
+// truncates its datatype representation and crashes when reading it back.
+func legacyInspectionSchemaScript() string {
 	return `table inet ngfw_inspection {
   comment "owner=ngfw-engine schema=1"
   set app_denied_v4 { typeof ct zone . ct id . ct original ip saddr . ct original proto-src . ct original ip daddr . ct original proto-dst . meta l4proto; flags timeout; timeout 60s; }
@@ -38,6 +55,13 @@ func (n *NftRunner) ensureInspectionSchemaLocked(ctx context.Context) error {
 }
 
 func (n *NftRunner) ensureInspectionSchemaLockedState(ctx context.Context) (bool, error) {
+	// Inspect the old set directly before asking nft to dump its table. Older
+	// nft binaries crash while decoding the legacy seven-field guard rule.
+	if _, mapErr := n.run(ctx, "-j", "list", "map", "inet", "ngfw_inspection", "app_denied_v4"); mapErr != nil {
+		if _, setErr := n.run(ctx, "-j", "list", "set", "inet", "ngfw_inspection", "app_denied_v4"); setErr == nil {
+			return false, errors.New("legacy ngfw_inspection schema 1 requires a drained schema migration before activation; refusing to decode its unsupported seven-field guard")
+		}
+	}
 	exists, err := n.tableExists(ctx, "ngfw_inspection")
 	if err != nil {
 		return false, err
@@ -57,7 +81,7 @@ func (n *NftRunner) ensureInspectionSchemaLockedState(ctx context.Context) (bool
 		return false, err
 	}
 	text := string(out)
-	for _, required := range []string{"schema=1", "app_denied_v4", "ips_ready", "chain guard", "chain inspect"} {
+	for _, required := range []string{"owner=ngfw-engine schema=2", "map app_denied_v4", "ips_ready", "chain guard", "chain inspect"} {
 		if !strings.Contains(text, required) {
 			return false, fmt.Errorf("existing ngfw_inspection table has incompatible schema: missing %s", required)
 		}
@@ -71,6 +95,10 @@ func (n *NftRunner) ApplyInspectionMutation(ctx context.Context, script string) 
 	if err := n.ensureInspectionSchemaLocked(ctx); err != nil {
 		return err
 	}
+	return n.applyInspectionMutationLocked(ctx, script)
+}
+
+func (n *NftRunner) applyInspectionMutationLocked(ctx context.Context, script string) error {
 	if out, err := n.runInput(ctx, script, "-c", "-f", "-"); err != nil {
 		return fmt.Errorf("nft inspection mutation validation failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -81,13 +109,55 @@ func (n *NftRunner) ApplyInspectionMutation(ctx context.Context, script string) 
 }
 
 func (n *NftRunner) ClearInspectionRuntimeState(ctx context.Context) error {
-	return n.ApplyInspectionMutation(ctx, "flush set inet ngfw_inspection app_denied_v4\nflush set inet ngfw_inspection ips_ready\n")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if err := n.ensureInspectionSchemaLocked(ctx); err != nil {
+		return err
+	}
+	out, err := n.run(ctx, "-j", "list", "table", "inet", "ngfw_inspection")
+	if err != nil {
+		return err
+	}
+	var state struct {
+		NFT []struct {
+			Chain *struct {
+				Name string `json:"name"`
+			} `json:"chain"`
+			Set *struct {
+				Name string `json:"name"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &state); err != nil {
+		return err
+	}
+	var chains, sets []string
+	for _, object := range state.NFT {
+		if object.Chain != nil && validInspectionGuardChain(object.Chain.Name) {
+			chains = append(chains, object.Chain.Name)
+		}
+		if object.Set != nil && validInspectionGuardSet(object.Set.Name) {
+			sets = append(sets, object.Set.Name)
+		}
+	}
+	var script strings.Builder
+	script.WriteString("flush map inet ngfw_inspection app_denied_v4\nflush set inet ngfw_inspection ips_ready\n")
+	for _, name := range chains {
+		fmt.Fprintf(&script, "flush chain inet ngfw_inspection %s\n", name)
+	}
+	for _, name := range chains {
+		fmt.Fprintf(&script, "delete chain inet ngfw_inspection %s\n", name)
+	}
+	for _, name := range sets {
+		fmt.Fprintf(&script, "delete set inet ngfw_inspection %s\n", name)
+	}
+	return n.applyInspectionMutationLocked(ctx, script.String())
 }
 
 func (n *NftRunner) InspectionSetContains(ctx context.Context, setName, needle string) (bool, error) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	if setName != "app_denied_v4" && setName != "ips_ready" {
+	if setName != "app_denied_v4" && setName != "ips_ready" && !validInspectionGuardSet(setName) {
 		return false, fmt.Errorf("unsupported inspection set %q", setName)
 	}
 	if strings.ContainsAny(needle, "{}\n\r;") || strings.TrimSpace(needle) == "" {

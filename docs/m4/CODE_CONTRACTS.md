@@ -209,6 +209,7 @@ Minimum stable set:
 - `TLS_CLIENT_HANDSHAKE_FAILED`
 - `TLS_UPSTREAM_CONNECT_FAILED`
 - `TLS_UPSTREAM_VERIFY_FAILED`
+- `TLS_UPSTREAM_HANDSHAKE_FAILED`
 - `TLS_UPSTREAM_MTLS_UNSUPPORTED`
 - `TLS_PINNING_SUSPECTED`
 - `TLS_EXCLUSION`
@@ -216,6 +217,31 @@ Minimum stable set:
 - `PROXY_CAPACITY_EXCEEDED`
 
 Never use free-form error strings as branch logic.
+
+Upstream client authentication is observed with `GetClientCertificate`, which
+returns the ordinary empty certificate. Requesting a certificate alone does
+not cause a block: optional authentication must continue to work. A verified
+upstream that rejects the empty certificate with a certificate/handshake alert
+is classified as `TLS_UPSTREAM_MTLS_UNSUPPORTED`. Certificate verification
+failure, unrelated TLS alerts, EOF, TCP reset and timeout keep their distinct
+failure categories. The proxy never forwards a downstream client identity.
+
+The TCP Go TLS stack still exposes its peer alert as a private uint8 error
+inside `net.OpError`; the guarded compatibility adapter reads only that typed
+numeric value, without unsafe access or string matching. Exported `tls.AlertError`
+is supported too. An unknown representation falls back to a generic closed
+TLS/connect failure. Real TLS tests cover Go 1.22.2 on Linux and Go 1.27 on
+Windows, TLS 1.2/1.3, HTTP1/H2, optional/mandatory auth and unrelated failures.
+Recheck that adapter when changing Go toolchains. Certificate-request semantics
+follow [RFC 8446 section 4.4.2.4](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.4.2.4).
+
+After forwarding, the production proxy sends `ProxyRequestResult` through
+`report_request_result`. The engine retains it in `RequestGateEvidence.forward`
+with an engine timestamp and publishes a correlated result event. This object
+contains status, stable reason and `client_certificate_requested`; it never
+replaces the inspection decision. Counters include `upstream_mtls_unsupported`,
+`upstream_handshake_fail` and `result_report_fail`. See GATE_IPC_V1.md for
+identity, byte-budget, idempotency and reporting-deadline rules.
 
 ## 7. Health contract
 
@@ -239,6 +265,15 @@ type RequestGateHealth struct {
 ```
 
 Minimum counters: `intercepted`, `bypassed`, `decrypted`, `request_allowed`, `request_blocked`, `fail_open`, `fail_close`, `inspection_timeout`, `queue_rejected`, `tls_handshake_fail`, `upstream_verify_fail`, `body_limit`, `decompression_limit`.
+
+Health counters are snapshots of the last accepted proxy heartbeat, normally
+sent once per second. `updated_at` is the engine's receipt time for that
+heartbeat; completing a request does not synchronously refresh the health
+endpoint. Traffic acceptance must wait within a bounded deadline for the same
+generation and an `updated_at` later than the request evidence's `observed_at`,
+then check the required counter increments. A pre-request snapshot cannot prove
+that counters failed to increment. Use a monotonic timeout on the controller
+and compare engine timestamps with one another, since VM clocks can differ.
 
 T29 exposes read-only `GET /api/v1/request-gate/health`, `/capabilities` and
 authenticated, bounded `/evidence` through `ngfw-engine` runtime IPC. A missing

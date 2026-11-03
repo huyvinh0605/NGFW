@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,7 +44,71 @@ func (k InspectionGuardKey) element() string {
 	if k.Original.Protocol == 17 {
 		protocol = "udp"
 	}
-	return fmt.Sprintf("%d . %d . %s . %d . %s . %d . %s", k.ConntrackZone, k.ConntrackID, k.Original.SrcIP, k.Original.SrcPort, k.Original.DstIP, k.Original.DstPort, protocol)
+	return fmt.Sprintf("%s . %d . %s . %d . %s", k.Original.SrcIP, k.Original.SrcPort, k.Original.DstIP, k.Original.DstPort, protocol)
+}
+
+func (k InspectionGuardKey) setName() string {
+	return fmt.Sprintf("app_denied_z%d_i%d", k.ConntrackZone, k.ConntrackID)
+}
+
+func inspectionGuardChain(id uint32) string { return fmt.Sprintf("app_guard_i%d", id) }
+
+func validInspectionGuardChain(name string) bool {
+	raw, ok := strings.CutPrefix(name, "app_guard_i")
+	id, err := strconv.ParseUint(raw, 10, 32)
+	return ok && err == nil && id != 0 && name == inspectionGuardChain(uint32(id))
+}
+
+func validInspectionGuardSet(name string) bool {
+	raw, ok := strings.CutPrefix(name, "app_denied_z")
+	zoneRaw, idRaw, split := strings.Cut(raw, "_i")
+	zone, zoneErr := strconv.ParseUint(zoneRaw, 10, 16)
+	id, idErr := strconv.ParseUint(idRaw, 10, 32)
+	return ok && split && zoneErr == nil && idErr == nil && id != 0 && name == (InspectionGuardKey{ConntrackZone: uint16(zone), ConntrackID: uint32(id)}).setName()
+}
+
+const inspectionGuardTuple = "ct original ip saddr . ct original proto-src . ct original ip daddr . ct original proto-dst . meta l4proto"
+
+// nft datatype identifiers represent at most five concatenated fields. Route
+// the scalar conntrack ID through a verdict map, then match the zone and the
+// original five-tuple in its private timeout set. Every identity component is
+// still checked, including when two zones happen to share a conntrack ID.
+func inspectionGuardChainScript(id uint32, groups []InspectionGuardKey) string {
+	chain := inspectionGuardChain(id)
+	var out strings.Builder
+	fmt.Fprintf(&out, "add chain inet ngfw_inspection %s\nflush chain inet ngfw_inspection %s\n", chain, chain)
+	for _, group := range groups {
+		fmt.Fprintf(&out, "add rule inet ngfw_inspection %s ct zone %d %s @%s counter drop\n", chain, group.ConntrackZone, inspectionGuardTuple, group.setName())
+	}
+	return out.String()
+}
+
+func (g *InspectionGuardManager) groups(id uint32, add, remove *InspectionGuardKey) []InspectionGuardKey {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	byZone := map[uint16]InspectionGuardKey{}
+	for key := range g.owned {
+		if key.ConntrackID == id && (remove == nil || key != *remove) {
+			byZone[key.ConntrackZone] = key
+		}
+	}
+	if add != nil {
+		byZone[add.ConntrackZone] = *add
+	}
+	result := make([]InspectionGuardKey, 0, len(byZone))
+	for _, group := range byZone {
+		result = append(result, group)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ConntrackZone < result[j].ConntrackZone })
+	return result
+}
+
+func (g *InspectionGuardManager) installed(ctx context.Context, key InspectionGuardKey) (bool, error) {
+	present, err := g.nft.InspectionSetContains(ctx, key.setName(), key.element())
+	if err != nil || !present {
+		return false, err
+	}
+	return g.nft.InspectionSetContains(ctx, "app_denied_v4", strconv.FormatUint(uint64(key.ConntrackID), 10))
 }
 
 type InspectionGuardManager struct {
@@ -74,6 +139,9 @@ func (g *InspectionGuardManager) installAppGuardLocked(ctx context.Context, key 
 	if g == nil || g.nft == nil {
 		return errors.New("inspection nft adapter unavailable")
 	}
+	if _, err := BuildInspectionGuardKey(domain.ConntrackIdentity{ID: key.ConntrackID, Zone: key.ConntrackZone, Original: key.Original}); err != nil {
+		return err
+	}
 	if ttl <= 0 {
 		ttl = time.Minute
 	}
@@ -84,25 +152,37 @@ func (g *InspectionGuardManager) installAppGuardLocked(ctx context.Context, key 
 	}
 	g.mu.Unlock()
 	element := key.element()
-	script := fmt.Sprintf("add element inet ngfw_inspection app_denied_v4 { %s timeout %s }\n", element, nftDuration(ttl))
+	id := strconv.FormatUint(uint64(key.ConntrackID), 10)
+	rootPresent, err := g.nft.InspectionSetContains(ctx, "app_denied_v4", id)
+	if err != nil {
+		return err
+	}
+	script := fmt.Sprintf("add set inet ngfw_inspection %s { type ipv4_addr . inet_service . ipv4_addr . inet_service . inet_proto; flags timeout; timeout 60s; }\n", key.setName())
+	script += inspectionGuardChainScript(key.ConntrackID, g.groups(key.ConntrackID, &key, nil))
+	if rootPresent {
+		script += fmt.Sprintf("delete element inet ngfw_inspection app_denied_v4 { %s }\n", id)
+	}
+	script += fmt.Sprintf("add element inet ngfw_inspection app_denied_v4 { %s : jump %s }\nadd element inet ngfw_inspection %s { %s timeout %s }\n", id, inspectionGuardChain(key.ConntrackID), key.setName(), element, nftDuration(ttl))
 	if err := g.nft.ApplyInspectionMutation(ctx, script); err != nil {
 		// add is idempotent at the contract boundary: an exact readback proves
 		// that a concurrent/replayed install already achieved the requested key.
-		present, readErr := g.nft.InspectionSetContains(ctx, "app_denied_v4", element)
+		present, readErr := g.installed(ctx, key)
 		if readErr != nil || !present {
 			return err
 		}
 	}
-	present, err := g.nft.InspectionSetContains(ctx, "app_denied_v4", element)
+	// Keep ownership even when readback fails so a compensating remove can
+	// withdraw an accepted mutation instead of waiting for its timeout.
+	g.mu.Lock()
+	g.owned[key] = struct{}{}
+	g.mu.Unlock()
+	present, err := g.installed(ctx, key)
 	if err != nil {
 		return err
 	}
 	if !present {
 		return errors.New("application guard readback failed")
 	}
-	g.mu.Lock()
-	g.owned[key] = struct{}{}
-	g.mu.Unlock()
 	return nil
 }
 func (g *InspectionGuardManager) RemoveAppGuard(ctx context.Context, key InspectionGuardKey) error {
@@ -114,9 +194,44 @@ func (g *InspectionGuardManager) RemoveAppGuard(ctx context.Context, key Inspect
 	if g == nil || g.nft == nil {
 		return errors.New("inspection nft adapter unavailable")
 	}
-	script := fmt.Sprintf("delete element inet ngfw_inspection app_denied_v4 { %s }\n", key.element())
-	if err := g.nft.ApplyInspectionMutation(ctx, script); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such file") {
+	g.mu.Lock()
+	_, owned := g.owned[key]
+	g.mu.Unlock()
+	if !owned {
+		return nil
+	}
+	present, err := g.nft.InspectionSetContains(ctx, key.setName(), key.element())
+	if err != nil {
 		return err
+	}
+	script := ""
+	if present {
+		script = fmt.Sprintf("delete element inet ngfw_inspection %s { %s }\n", key.setName(), key.element())
+	}
+	groups := g.groups(key.ConntrackID, nil, &key)
+	keepGroup := false
+	for _, group := range groups {
+		keepGroup = keepGroup || group.ConntrackZone == key.ConntrackZone
+	}
+	if !keepGroup {
+		if len(groups) == 0 {
+			root, err := g.nft.InspectionSetContains(ctx, "app_denied_v4", strconv.FormatUint(uint64(key.ConntrackID), 10))
+			if err != nil {
+				return err
+			}
+			if root {
+				script += fmt.Sprintf("delete element inet ngfw_inspection app_denied_v4 { %d }\n", key.ConntrackID)
+			}
+			script += fmt.Sprintf("flush chain inet ngfw_inspection %s\ndelete chain inet ngfw_inspection %s\n", inspectionGuardChain(key.ConntrackID), inspectionGuardChain(key.ConntrackID))
+		} else {
+			script += inspectionGuardChainScript(key.ConntrackID, groups)
+		}
+		script += fmt.Sprintf("delete set inet ngfw_inspection %s\n", key.setName())
+	}
+	if script != "" {
+		if err := g.nft.ApplyInspectionMutation(ctx, script); err != nil {
+			return err
+		}
 	}
 	g.mu.Lock()
 	delete(g.owned, key)
@@ -132,6 +247,12 @@ func (g *InspectionGuardManager) RenewAppGuard(ctx context.Context, key Inspecti
 	if g == nil || g.nft == nil {
 		return errors.New("inspection nft adapter unavailable")
 	}
+	g.mu.Lock()
+	_, owned := g.owned[key]
+	g.mu.Unlock()
+	if !owned {
+		return g.installAppGuardLocked(ctx, key, ttl)
+	}
 	if ttl <= 0 {
 		ttl = time.Minute
 	}
@@ -139,13 +260,13 @@ func (g *InspectionGuardManager) RenewAppGuard(ctx context.Context, key Inspecti
 	// Element timeout is immutable when the userspace `add element` command
 	// sees an existing key. Delete+add in one nft batch refreshes it atomically,
 	// so packets never observe an intermediate missing guard.
-	script := fmt.Sprintf("delete element inet ngfw_inspection app_denied_v4 { %s }\nadd element inet ngfw_inspection app_denied_v4 { %s timeout %s }\n", element, element, nftDuration(ttl))
+	script := fmt.Sprintf("delete element inet ngfw_inspection %s { %s }\nadd element inet ngfw_inspection %s { %s timeout %s }\n", key.setName(), element, key.setName(), element, nftDuration(ttl))
 	if err := g.nft.ApplyInspectionMutation(ctx, script); err != nil {
 		// The element may have expired just before renewal. A normal install is
 		// safe because the coordinator already revalidated the exact session.
 		return g.installAppGuardLocked(ctx, key, ttl)
 	}
-	present, err := g.nft.InspectionSetContains(ctx, "app_denied_v4", element)
+	present, err := g.installed(ctx, key)
 	if err != nil {
 		return err
 	}

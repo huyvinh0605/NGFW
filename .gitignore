@@ -11,3 +11,27 @@ web/dist/
 ml/models/
 __pycache__/
 "GiaiThich"
+
+# Downloaded dependencies, virtual environments and local build products.
+.venv/
+venv/
+vendor/
+/bin/
+/build/
+*.exe
+*.test
+.pytest_cache/
+.coverage
+coverage.out
+
+# Local credentials and private key material; commit examples only.
+.env
+.env.*
+!.env.example
+*.env
+*.key
+*.p12
+*.pfx
+
+# Historical run output is retained locally, never published with source.
+/artifacts/
