@@ -19,7 +19,9 @@
 
 ## 1. Mục tiêu và phân tích đặc tả
 
-Xây dựng appliance NGFW Linux nhiều NIC, bao phủ toàn bộ chức năng trong tài liệu, triển khai theo các mốc có thể chạy và nghiệm thu độc lập.
+**Mục tiêu chính: nghiên cứu ablation giữa Suricata và mô hình ML** trong việc phát hiện request HTTP độc hại tại cổng kiểm tra trước server (M4). Câu hỏi nghiên cứu: mỗi phương pháp — luật chữ ký (Suricata) và mô hình học máy (TF-IDF ký tự + Logistic Regression) — đóng góp gì khi dùng riêng và khi kết hợp, và việc kết hợp có cải thiện phát hiện mà không tăng cảnh báo sai trên lưu lượng sạch hay không.
+
+Appliance NGFW Linux nhiều NIC (M1–M4) là **nền tảng thử nghiệm**: cung cấp đường giữ request, chuẩn hóa HTTP/1.1 và HTTP/2, adapter Suricata và Risk Engine để chạy các cấu hình ablation trên cùng một luồng xử lý. Thiết kế thí nghiệm ở mục [1.1](#11-thiết-kế-ablation-suricata-và-ml).
 
 Các lựa chọn đã thống nhất:
 
@@ -38,6 +40,38 @@ Trạng thái source hiện tại và phạm vi công việc tiếp theo đượ
 Traffic → Session → Security Context → Detector Signals
         → Risk → Policy → Enforcement → Cached Decision
 ```
+
+Trong chuỗi này, bước **Detector Signals → Risk** là nơi thực hiện ablation.
+
+### 1.1. Thiết kế ablation Suricata và ML
+
+**Cấu hình so sánh** — chạy cùng tập test, cùng topology, cùng ruleset/model version:
+
+| Mã | Cấu hình | Request bị coi là độc hại khi |
+|---|---|---|
+| S | Chỉ Suricata | Suricata có alert/drop cho request. |
+| M | Chỉ ML | Lớp dự đoán khác `BENIGN` và confidence ≥ τ; báo cáo nhiều ngưỡng τ (mặc định 0,9). |
+| S∨M | Kết hợp OR | S hoặc M phát hiện. |
+| R | Risk Engine, không bonus | Điểm risk ≥ 80 với trọng số mặc định, `CorrelationBonus = 0`. |
+| R+ | Risk Engine đầy đủ | Điểm risk ≥ 80 với trọng số mặc định (IPS 40, ML 20, bonus tương quan 25). |
+
+Lưu ý: với trọng số mặc định, ML đơn lẻ tối đa 20 điểm nên không thể đạt ngưỡng 80; vì vậy cấu hình M phải đánh giá trên đầu ra trực tiếp của mô hình, không qua Risk Engine.
+
+**Dữ liệu:** tập request HTTP có nhãn năm lớp (`BENIGN`, `SQL_INJECTION`, `XSS`, `COMMAND_INJECTION`, `ANOMALOUS`), chia train/validation/test theo nguồn/template để tránh leakage. Tập test gồm thêm nhóm biến thể đã làm rối (encoding, đổi hoa/thường, chèn comment) để đo khả năng tổng quát hóa so với luật chữ ký. Tập test chỉ dùng một lần cho báo cáo cuối.
+
+**Ruleset:** ruleset lab hiện tại chỉ là fixture nghiệm thu, không phù hợp để so sánh. Phải cố định một ruleset thực tế (ví dụ ET Open) theo phiên bản và ghi vào báo cáo.
+
+**Công bằng về đầu vào:** hiện Suricata nhận request đã chuẩn hóa, body đã giải nén và phần lớn header; ML chỉ nhận `METHOD Host URL\nbody` thô, không header. Chạy thêm biến thể M′ với ML nhận cùng nội dung đã chuẩn hóa như Suricata để tách ảnh hưởng của phương pháp khỏi ảnh hưởng của đầu vào.
+
+**Chỉ số:** precision/recall/F1 từng lớp, macro F1, tỷ lệ false positive trên `BENIGN`, tỷ lệ phát hiện trên nhóm biến thể, số request chỉ một phương pháp phát hiện được, và độ trễ p50/p95/p99 của request gate cho từng cấu hình. Chưa cam kết chỉ tiêu độ chính xác trước khi có dữ liệu.
+
+**Điều kiện tiên quyết trong mã hiện tại:**
+
+- Kết nối `MLClient` vào `cmd/ngfw-proxy` (hiện chưa được nối).
+- Đưa Risk Engine vào đường quyết định M4 (hiện M4 chặn theo action của Suricata, chưa dùng risk score).
+- Thêm cấu hình bật/tắt từng detector và trọng số để chạy các cấu hình S/M/R mà không sửa code.
+- Ghi log quyết định của từng detector theo `RequestID` để tính chỉ số cho mọi cấu hình từ cùng một lần chạy.
+- Xây dataset, manifest và quy trình chuẩn hóa đầu vào ML.
 
 ### Những điểm cần giải quyết trong thiết kế
 

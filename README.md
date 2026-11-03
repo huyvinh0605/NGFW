@@ -1,7 +1,14 @@
 # SENTINEL NGFW
 
-Linux NGFW appliance for a virtual multi-NIC lab. The implemented appliance
-path currently covers:
+**Objective:** an ablation study of Suricata (signature rules) and an ML
+classifier (character TF-IDF + Logistic Regression) for detecting malicious
+HTTP requests before they reach the server. The study compares each detector
+alone, both combined, and both combined through the Risk Engine with and
+without the IPS+ML correlation bonus. Experiment design, metrics and the code
+prerequisites are in [PLAN.md section 1.1](PLAN.md#11-thiết-kế-ablation-suricata-và-ml).
+
+The Linux NGFW appliance for a virtual multi-NIC lab is the test platform for
+that study. The implemented appliance path currently covers:
 
 - **M1:** interfaces/VLANs/routes, IPv4 forwarding, stateful nftables policy,
   SNAT/MASQUERADE/DNAT, transactional activation and rollback;
