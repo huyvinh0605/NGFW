@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -476,6 +478,71 @@ func TestHTTP1RequestGateOversizeUsesEngineVerdictAndRawReplay(t *testing.T) {
 				t.Fatalf("oversize request was not counted: %+v", stats)
 			}
 		})
+	}
+}
+
+func TestHTTP1RequestGateDecompressionLimitIsPartialAndPreservesRawReplay(t *testing.T) {
+	for _, limit := range []struct {
+		name    string
+		decoded int
+		ratio   int
+	}{
+		{"decoded-bytes", 16, 100},
+		{"compression-ratio", 4096, 2},
+	} {
+		for _, allow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/allow=%v", limit.name, allow), func(t *testing.T) {
+				var compressed bytes.Buffer
+				writer := gzip.NewWriter(&compressed)
+				_, _ = io.WriteString(writer, strings.Repeat("A", 512))
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				raw := compressed.Bytes()
+				gate := &HTTP1RequestGate{
+					Limits: domain.RequestGateConfig{MaxDecompressedBodyBytes: limit.decoded, MaxDecompressionRatio: limit.ratio},
+					Inspector: RequestInspectorFunc(func(context.Context, string, inspection.GateHTTPRequest) (domain.RequestInspectionResult, error) {
+						t.Error("decompression-limited input reached the signature worker")
+						return domain.RequestInspectionResult{}, nil
+					}),
+					Authorizer: RequestAuthorizerFunc(func(_ context.Context, evaluation domain.ProxyRequestEvaluation, _ uint64) (domain.RequestDecision, error) {
+						if evaluation.Context.Truncated || evaluation.Context.BodyBytes != len(raw) || evaluation.Inspection.Completed || evaluation.Inspection.Coverage != domain.RequestCoveragePartial || evaluation.Inspection.ErrorCode != "GATE_DECOMPRESSION_LIMIT" {
+							t.Errorf("wrong decompression-limit evidence: %+v", evaluation)
+						}
+						decision := allowRequestForTest(evaluation)
+						decision.ReasonCode = "GATE_DECOMPRESSION_LIMIT"
+						if !allow {
+							decision.Verdict, decision.HTTPStatus = domain.RequestBlock, 413
+						}
+						return decision, nil
+					}),
+				}
+				client, _, arrivals := http1GateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil || !bytes.Equal(body, raw) || r.Header.Get("Content-Encoding") != "gzip" {
+						t.Errorf("ALLOW_PARTIAL changed compressed upstream bytes: %x %v", body, err)
+					}
+					w.WriteHeader(200)
+				}, gate)
+				_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+				headers := fmt.Sprintf("POST /compressed HTTP/1.1\r\nHost: example.test\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(raw))
+				if _, err := client.Write(append([]byte(headers), raw...)); err != nil {
+					t.Fatal(err)
+				}
+				response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodPost})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = io.Copy(io.Discard, response.Body)
+				_ = response.Body.Close()
+				if allow && (response.StatusCode != 200 || arrivals.Load() != 1) || !allow && (response.StatusCode != 413 || arrivals.Load() != 0) {
+					t.Fatalf("decompression policy was not enforced: status=%d upstream=%d", response.StatusCode, arrivals.Load())
+				}
+				if gate.Stats().Counters["decompression_limit"] != 1 {
+					t.Fatal("decompression limit counter missing")
+				}
+			})
+		}
 	}
 }
 

@@ -280,6 +280,9 @@ func (gate *HTTP1RequestGate) handleRequest(w http.ResponseWriter, request *http
 		decoded, decodeErr := inspection.DecodeGateBody(requestCtx, normalized.ContentEncoding, normalized.Body, false, limits.MaxDecompressedBodyBytes, limits.MaxDecompressionRatio)
 		if decodeErr != nil {
 			evidence.ErrorCode = inspectionFailureCode(decodeErr)
+			if errors.Is(decodeErr, inspection.ErrGateDecompressionLimit) {
+				evidence.Coverage = domain.RequestCoveragePartial
+			}
 		} else {
 			requestContext.DecodedBodyBytes = len(decoded)
 			normalized.Body = decoded

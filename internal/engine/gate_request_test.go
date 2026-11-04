@@ -151,6 +151,47 @@ func TestM4BlockedOversizeCannotBecomeFailOpenFromMissingSensorIdentity(t *testi
 	}
 }
 
+func TestM4DecompressionLimitUsesOversizePolicy(t *testing.T) {
+	for _, mode := range []domain.GateFailMode{domain.GateFailOpen, domain.GateFailClose} {
+		for _, action := range []string{"BLOCK", "ALLOW_PARTIAL"} {
+			for _, reportedCoverage := range []domain.RequestCoverage{domain.RequestCoveragePartial, domain.RequestCoverageUnavailable} {
+				t.Run(string(mode)+"/"+action+"/"+string(reportedCoverage), func(t *testing.T) {
+					config := gateTestConfig()
+					config.Profiles[0].RequestGate.FailMode = mode
+					config.Profiles[0].RequestGate.OversizeAction = action
+					service := gateTestService(t, config)
+					open := gateTestOpen(false)
+					connection, err := service.OpenConnection(context.Background(), open)
+					if err != nil {
+						t.Fatal(err)
+					}
+					input := gateRequestInput(open, connection)
+					input.Context.BodyBytes = 424 // The entire compressed body fit the raw limit.
+					input.Inspection = domain.RequestInspectionResult{
+						RequestID: input.Context.RequestID, Coverage: reportedCoverage,
+						ErrorCode: "GATE_DECOMPRESSION_LIMIT", RulesetID: "m4-builtin-v1",
+					}
+					decision, err := service.EvaluateRequest(context.Background(), input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want, status := domain.RequestBlock, 413
+					if mode == domain.GateFailOpen && action == "ALLOW_PARTIAL" {
+						want, status = domain.RequestAllow, 0
+					}
+					if decision.Verdict != want || decision.HTTPStatus != status || decision.Coverage != domain.RequestCoveragePartial || decision.ReasonCode != "GATE_DECOMPRESSION_LIMIT" {
+						t.Fatalf("decompression limit ignored %s/%s: %+v", mode, action, decision)
+					}
+					stored, _, ok := service.GetRequestDecision(input.Context.RequestID)
+					if !ok || stored.Truncated || stored.BodyBytes != 424 {
+						t.Fatalf("decoded limit corrupted raw-body metadata: %+v", stored)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestM4EvaluateRequestUnsupportedEncodingUsesProfileAction(t *testing.T) {
 	for _, test := range []struct {
 		name   string

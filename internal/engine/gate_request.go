@@ -339,9 +339,12 @@ func (service *GateService) EvaluateRequest(ctx context.Context, input domain.Pr
 	} else if input.Inspection.Completed && (input.Inspection.Coverage == domain.CoverageComplete || input.Inspection.Coverage == domain.RequestCoveragePartial) && input.Inspection.ErrorCode == "" && hasBlockingGateAlert(input.Inspection.Alerts, input.Inspection.RulesetID) {
 		decision.Coverage = input.Inspection.Coverage
 		decision.HTTPStatus, decision.ReasonCode = 403, "GATE_SIGNATURE_BLOCK"
-	} else if request.Truncated {
+	} else if request.Truncated || input.Inspection.ErrorCode == "GATE_DECOMPRESSION_LIMIT" {
 		decision.Coverage = domain.RequestCoveragePartial
 		decision.HTTPStatus, decision.ReasonCode = 413, "GATE_REQUEST_TOO_LARGE"
+		if input.Inspection.ErrorCode == "GATE_DECOMPRESSION_LIMIT" {
+			decision.ReasonCode = "GATE_DECOMPRESSION_LIMIT"
+		}
 		if plan.FailMode == domain.GateFailOpen && plan.OversizeAction == "ALLOW_PARTIAL" {
 			decision.Verdict, decision.HTTPStatus = domain.RequestAllow, 0
 		}

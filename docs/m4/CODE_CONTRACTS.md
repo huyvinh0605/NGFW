@@ -179,6 +179,13 @@ Default M4 decision table:
 | oversize | CLOSE/BLOCK | BLOCK | 413 | PARTIAL |
 | malformed request | any | BLOCK | 400 | UNAVAILABLE |
 
+Both the raw-body cap and the decoded-byte/decompression-ratio caps use the
+oversize rows. `GATE_DECOMPRESSION_LIMIT` remains a distinct reason with PARTIAL
+coverage; it is not a detector outage. Only `OPEN` plus `ALLOW_PARTIAL` may
+forward the original compressed bytes. `oversize_action=BLOCK` must still
+return 413 when the detector failure mode is OPEN. The raw body's `truncated`
+flag remains false when all compressed bytes were received.
+
 ## 6. Stable error/reason codes
 
 Minimum stable set:
