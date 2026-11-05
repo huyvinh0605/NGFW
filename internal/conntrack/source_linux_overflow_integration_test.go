@@ -46,6 +46,10 @@ func (s *overflowSink) ReportLoss(loss Loss) {
 func (s *overflowSink) unblock() { s.release.Do(func() { close(s.resume) }) }
 
 func socketDrops(conn *netlink.Conn) (uint64, error) {
+	return socketStatField(conn, 8)
+}
+
+func socketStatField(conn *netlink.Conn, column int) (uint64, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
 		return 0, err
@@ -72,7 +76,7 @@ func socketDrops(conn *netlink.Conn) (uint64, error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 10 && fields[1] == "12" && fields[2] == strconv.FormatUint(uint64(pid), 10) {
-			return strconv.ParseUint(fields[8], 10, 64)
+			return strconv.ParseUint(fields[column], 10, 64)
 		}
 	}
 	return 0, fmt.Errorf("NETLINK_NETFILTER socket pid %d not found", pid)
@@ -155,6 +159,23 @@ func TestLinuxSourceRecoversAfterReceiveOverflow(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("kernel loss was not reported")
 	}
+	// ENOBUFS can be reported while older multicast messages still occupy the
+	// deliberately tiny receive queue. A marker sent then may suffer a second
+	// overflow, which does not prove that the subscription stopped recovering.
+	for {
+		remaining, err := socketStatField(source.events, 4) // Rmem
+		if err != nil {
+			t.Fatal(err)
+		}
+		if remaining == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("original subscription did not drain after overflow")
+		case <-time.After(time.Millisecond):
+		}
+	}
 	// This flow is created after the overflow, on the same live subscription.
 	send(32001)
 	var marker Record
@@ -175,9 +196,23 @@ func TestLinuxSourceRecoversAfterReceiveOverflow(t *testing.T) {
 		}
 	}
 	t.Logf("new event after overflow observed, CT ID=%d", marker.Identity.ID)
+	// Kernel NEW notifications can omit CTA_TIMESTAMP even when a subsequent
+	// DUMP/Get includes it. Compare every observed identity field, and retain
+	// the timestamp check when the event actually supplied one.
+	observedIdentity := func(record Record) bool {
+		identity := record.Identity
+		if !marker.Presence.Timestamp {
+			identity.KernelStart = 0
+		}
+		return identity == marker.Identity
+	}
+	verified, err := source.Get(ctx, Identity(marker.Identity))
+	if err != nil || !observedIdentity(verified) {
+		t.Fatalf("post-loss identity lookup failed: marker=%+v got=%+v err=%v", marker.Identity, verified.Identity, err)
+	}
 	found := false
 	result, err := source.Dump(ctx, DumpLimits{MaxRecords: 2048, MaxBytes: 8 << 20, Deadline: 3 * time.Second}, func(record Record) error {
-		if record.Identity == marker.Identity {
+		if observedIdentity(record) {
 			found = true
 		}
 		return nil
