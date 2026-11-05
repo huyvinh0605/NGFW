@@ -693,3 +693,7 @@ still require their listed evidence. New screenshots were taken in the NGFW VM
 using Wireshark/Xvfb, without operating the Windows desktop. Configuration,
 origin logs and exported evidence are retained; RAM history remains subject to
 its documented TTL and service lifetime.
+
+## 2026-11-05 continued VM acceptance — m4-continuation-20261105T152913Z
+
+Cumulative 39 PASS, 3 PARTIAL, 0 FAIL, 1 NOT_RUN. See [report](../../artifacts/m4-continuation-20261105T152913Z/RESULTS.md) and [ledger](../../artifacts/m4-continuation-20261105T152913Z/CASE_LEDGER.json). The new live checks cover M4-00/02, engine restart, QUIC behavior and a 20-minute soak. M4-40 passes after correcting the test to wait for multicast receive drain and compare observed timestamp presence; source adapter and deployed binaries are unchanged. M4-42 remains PARTIAL because one initial plaintext request reset; its separate recheck does not erase that failure. M4-12/30 remain partial and M4-35 still requires its full activation-failure/reboot proof. VM source changes were reviewed in a separate worktree; dirty appliance work was preserved.
