@@ -25,28 +25,44 @@ Each row requires the source hash, configuration generation/hash, kernel/nftable
 | M4-18 | 20+ concurrent H2 requests show no cross-request verdict/body contamination | decision map + upstream nonces | PASS: [24 concurrent requests](../artifacts/m4-forward-fix-20261030/h2-isolation/M4-18/assessment.json), 16 clean/8 SQLi-XSS, one socket/session, matching origin body hashes; 2 workers and configured 10-second inspection deadline, not a throughput/overload claim |
 | M4-19 | Attack in chunked body is inspected and blocked | client + EVE + upstream absence | PASS: [live body run](../artifacts/m4-forward-fix-20261030/body-limits-run2/result.json), clean dechunked body hash preserved, SQLi split across chunks blocked with SID 9904003 and no origin request |
 | M4-20 | gzip/deflate attack is blocked after decompression | decoded-size evidence + EVE | PASS: [live body run](../artifacts/m4-forward-fix-20261030/body-limits-run2/result.json), gzip and zlib-deflate clean/SQLi controls; original compressed clean bytes preserved, decoded attacks blocked before origin |
-| M4-21 | Decompression bomb above limit follows configured policy | 413/allow-partial + counters | FAIL: [live diagnosis](../artifacts/m4-forward-fix-20261030/M4-21-DIAGNOSIS.json), 424-byte gzip expands to 400,000 bytes; CLOSE/BLOCK returns 503/UNAVAILABLE instead of 413/PARTIAL coverage-limit contract; zero origin requests. Testing stopped |
-| M4-22 | Body above max follows BLOCK or ALLOW_PARTIAL profile behavior without silent bypass | response + coverage event | NOT_RUN |
-| M4-23 | Malformed framing/header overflow is never forwarded upstream | 400/431 + server absence | NOT_RUN |
-| M4-24 | Suricata request-worker timeout under fail-open | request passes + coverage unavailable + counter | NOT_RUN |
-| M4-25 | Suricata request-worker timeout under fail-close | 503 + server absence + reason | NOT_RUN |
-| M4-26 | Request-worker crash/socket down produces degraded health and correct policy behavior | health + open/close tests | NOT_RUN |
-| M4-27 | Worker queue full remains bounded with no unbounded memory growth | queue counters + RSS/soak | NOT_RUN |
-| M4-28 | Proxy capacity/per-client limit remains bounded | 429/503 + counters + recovery | NOT_RUN |
+| M4-21 | Decompression bomb above limit follows configured policy | 413/allow-partial + counters | PASS after fix `62d6e0e`: [2026-11-04 LIVE](../artifacts/m4-acceptance-20261104T085259Z/RESULTS.md), all four fail-mode/oversize combinations, independent decoded-byte/ratio limits, PARTIAL coverage and original gzip replay only for OPEN+ALLOW_PARTIAL. [Earlier FAIL retained](../artifacts/m4-forward-fix-20261030/M4-21-DIAGNOSIS.json) |
+| M4-22 | Body above max follows BLOCK or ALLOW_PARTIAL profile behavior without silent bypass | response + coverage event | PASS: [2026-11-04](../artifacts/m4-acceptance-20261104T085259Z/CASE_LEDGER.json), BLOCK at 64 KiB; OPEN+ALLOW_PARTIAL at 4 KiB forwards all 8,200 original bytes with PARTIAL coverage |
+| M4-23 | Malformed framing/header overflow is never forwarded upstream | 400/431 + server absence | PASS: [2026-11-04](../artifacts/m4-acceptance-20261104T085259Z/CASE_LEDGER.json), malformed header/chunk return 400, 40,000-byte header returns 431; no upstream packets or false inspection result |
+| M4-24 | Suricata request-worker timeout under fail-open | request passes + coverage unavailable + counter | PASS: [monitored LIVE case](../artifacts/m4-acceptance-20261104T085259Z/M4-24-timeout-open-monitored/evidence.json), verified TLS 1.3, 200/original body at origin, ALLOW/UNAVAILABLE, GATE_INSPECTION_TIMEOUT and counter increment before pool recovery; initial missed-sample assertion retained |
+| M4-25 | Suricata request-worker timeout under fail-close | 503 + server absence + reason | PASS: [2026-11-04](../artifacts/m4-acceptance-20261104T085259Z/M4-25-timeout-close/evidence.json), 503/BLOCK/UNAVAILABLE with timeout reason/counter, zero upstream packets |
+| M4-26 | Request-worker crash/socket down produces degraded health and correct policy behavior | health + open/close tests | PASS: [2026-11-04](../artifacts/m4-acceptance-20261104T085259Z/CASE_LEDGER.json), real worker crash under OPEN/CLOSE gives 200/503 with GATE_SENSOR_UNAVAILABLE, degraded health then recovery; subsequent clean 200 and SQLi 403 |
+| M4-27 | Worker queue full remains bounded with no unbounded memory growth | queue counters + RSS/soak | PASS for bounded overload: [2026-11-05 LIVE](../artifacts/m4-continuation-20261105T005325Z/RESULTS.md), 1-item queue yields 3 allowed/5 rejected; independent 64 KiB byte cap with 40,000-byte bodies yields 1 allowed/7 rejected; GATE_QUEUE_FULL/UNAVAILABLE, exact origin correlation, zero residual job directories and measured proxy/worker RSS. Long soak remains M4-41 NOT_RUN |
+| M4-28 | Proxy capacity/per-client limit remains bounded | 429/503 + counters + recovery | PASS: [2026-11-05 LIVE](../artifacts/m4-continuation-20261105T005325Z/CASE_LEDGER.json), per-client 2 with global 4 and independent global 2 across two client IPs; each batch 2×200/6×503, capacity counter increments, no upstream request or false inspection for rejected requests. Cold-start RSS diagnostic guard failure retained; steady-state recheck and recovery controls pass |
 | M4-29 | DNAT public HTTPS -> DMZ: original destination/session is correct and gate still blocks | conntrack + API + proxy + server log | NOT_RUN |
 | M4-30 | MASQUERADE outbound HTTPS gate preserves correct session/NAT alias identity | CT/API/request IDs | NOT_RUN |
-| M4-31 | API/UI outage does not stop proxy/engine request enforcement | stop API + repeat malicious/clean | NOT_RUN |
+| M4-31 | API/UI outage does not stop proxy/engine request enforcement | stop API + repeat malicious/clean | PASS: [2026-11-05](../artifacts/m4-continuation-20261105T005325Z/M4-31-api-outage-assessment.json), API stopped/8080 connection refused; clean 200 and SQLi 403/zero upstream packets, correlated engine verdicts after API recovery; engine/proxy PIDs unchanged |
 | M4-32 | Proxy restart has explicit behavior for existing connections and recovers for new connections | logs/health/client behavior | NOT_RUN |
 | M4-33 | Engine restart does not reuse stale request decisions; selector/gate resyncs | generation IDs + nft + new decisions | NOT_RUN |
 | M4-34 | Commit OFF→DECRYPT/gate→rollback changes nft/proxy behavior correctly | generations + rules + traffic | NOT_RUN |
 | M4-35 | Activation failure/reboot journal restores previous M1/M3/M4 state | induced failure + restart evidence | NOT_RUN |
-| M4-36 | CA key permissions are correct and API cannot read the private key | stat/getfacl + API negative test | NOT_RUN |
-| M4-37 | Logs/events redact Authorization/Cookie/body/token query data | synthetic secret test + grep evidence | NOT_RUN |
-| M4-38 | Unsupported WebSocket Upgrade is rejected before upstream forwarding and never claims frame inspection | 400 + upstream absence + explicit limitation | NOT_RUN |
+| M4-36 | CA key permissions are correct and API cannot read the private key | stat/getfacl + API negative test | PASS: [real UID open tests](../artifacts/m4-acceptance-20261104T085259Z/M4-36-ca-permissions/evidence.json), CA directory 0700/key 0600 owned by proxy, no additional ACL; API UID gets PermissionError, proxy UID can open; no key bytes exported |
+| M4-37 | Logs/events redact Authorization/Cookie/body/token query data | synthetic secret test + grep evidence | PASS in tested log paths: [2026-11-05](../artifacts/m4-continuation-20261105T005325Z/M4-37-redaction-assessment.json), synthetic Authorization/Cookie/query/body values in clean and SQLi requests; 200/403 with positive input/origin proof, zero occurrences in request evidence, correlated session detail, new runtime events and API/engine/proxy journal. Input/client/origin fixtures intentionally retain dummy values |
+| M4-38 | Unsupported WebSocket Upgrade is rejected before upstream forwarding and never claims frame inspection | 400 + upstream absence + explicit limitation | PASS: [2026-11-04 LIVE](../artifacts/m4-acceptance-20261104T085259Z/M4-38-websocket-upgrade/evidence.json), 400/no upstream packets; [capability](../artifacts/m4-acceptance-20261104T085259Z/prechecks-36-38.json) explicitly rejects Upgrade and disclaims WebSocket frame inspection |
 | M4-39 | UDP/443 follows explicit profile behavior: block or unsupported, never falsely reported as decrypted | QUIC client/counter/event | NOT_RUN |
 | M4-40 | Race/fuzz/full Go/vet/web gates PASS on Linux | raw command outputs | NOT_RUN |
 | M4-41 | Request-gate soak keeps memory/temp-file/queue growth bounded | RSS, file count, counters | NOT_RUN |
 | M4-42 | Benchmark HTTP1/H2 plaintext/TLS gate across 3 runs and report p50/p95/p99 | raw results + config hashes | NOT_RUN |
+
+## Current checkpoint — 2026-11-05
+
+Cumulative matrix: **27 PASS, 3 PARTIAL, 13 NOT_RUN** across 43 rows. These
+include historical runs on several builds, not 27 cases rerun on one appliance
+today. [The 2026-11-04 report](../artifacts/m4-acceptance-20261104T085259Z/RESULTS.md)
+records the M4-21 repair and rows 21–26/36/38; [the next run](../artifacts/m4-continuation-20261105T005325Z/RESULTS.md)
+adds rows 27/28/31/37 with 65 bounded TLS requests and VM-only screenshots.
+
+Current Running/Candidate content is restored at v257; M4 remains enabled for
+manual review, with the original strict profile. No product binary or ruleset
+changed in the 2026-11-05 run. Two strict M3 PID-preservation checks failed:
+background retention rotated EVE/signaled HUP and the sensors subsequently
+restarted; both are healthy at final readback. The report preserves those
+failures separately from the M4 case verdicts and does not claim complete
+baseline/process preservation or full M4 acceptance.
 
 ## Evidence layout
 

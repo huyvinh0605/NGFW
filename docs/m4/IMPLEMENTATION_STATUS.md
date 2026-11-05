@@ -1,6 +1,6 @@
 # M4 implementation status
 
-Baseline date: 2026-09-28; last updated 2026-10-23. This ledger tracks implementation separately from Ubuntu appliance acceptance. Historical task checkpoints below record their state at the time and are superseded by the current-status section at the end.
+Baseline date: 2026-09-28; last updated 2026-11-05. This ledger tracks implementation separately from Ubuntu appliance acceptance. Historical task checkpoints below record their state at the time and are superseded by the current-status section at the end.
 
 ## Source and worktree
 
@@ -652,3 +652,44 @@ version 219. M4 is OFF, no activation journal/selector/policy route remains,
 temporary secrets are removed, engine/API are active, and proxy/IDS/IPS are back
 to their entry inactive state. M4-22 onward remains unrun. See
 [repair, deployment and live evidence](../../artifacts/m4-forward-fix-20261030/RESULTS.md).
+
+## Decompression repair and continued LIVE acceptance — 2026-11-05
+
+Product commit `62d6e0e` fixes M4-21 at the proxy/engine boundary: decoded-byte
+and decompression-ratio limits retain PARTIAL coverage and use the oversize
+policy. OPEN no longer overrides `oversize_action=BLOCK`. Regression tests fail
+before the fix and pass afterward; full Linux Go tests/vet/build pass. The
+engine and proxy were deployed from an isolated VM worktree, preserving the
+older dirty checkout and exporting runtime RAM before their restart.
+
+The [2026-11-04 run](../../artifacts/m4-acceptance-20261104T085259Z/RESULTS.md)
+accepts M4-21–26, M4-36 and M4-38. It covers all four decompression policy
+combinations, independent decoded-byte/ratio caps, raw oversize/partial replay,
+400/431 parser rejection, timeout and crash under OPEN/CLOSE, real CA key UID
+permissions, and WebSocket rejection. A missed heartbeat-counter sample is
+retained and followed by a monitored recheck. It is not a detector fix.
+
+The [2026-11-05 run](../../artifacts/m4-continuation-20261105T005325Z/RESULTS.md)
+adds bounded queue item/byte overload, per-client and independent global
+capacity checks, API-outage enforcement, and synthetic-secret redaction checks
+in request/session/event/journal observations. It sends 65 verified TLS 1.3
+requests: 22 HTTP 200, 40 HTTP 503 overload rejections, and 3 HTTP 403 SQLi
+blocks. Cold-start worker RSS exceeded an initial diagnostic guard; the raw
+failure is retained and subsequent warm measurements are recorded. These are
+short pressure checks, not the M4-41 soak or M4-42 benchmark.
+
+No product source, binary or rule bytes changed in the latter run. M4 remains
+enabled at v257 with Running/Candidate contents and checksum equal to its v252
+baseline; the temporary second LAN client IP and selector are removed.
+Engine/proxy PIDs remain stable, and the API is active after its intentional
+stop/start. Two M3 PID-preservation checks failed during background EVE
+rotation/SIGHUP and subsequent sensor recovery; both sensors are healthy on
+readback. Those failures remain visible in the preservation report.
+
+The cumulative matrix is 27 PASS, 3 PARTIAL and 13 NOT_RUN, including historical
+results. M4 is not fully accepted; NAT, restart/rollback/activation failures,
+remaining TLS variants, QUIC, complete race/fuzz/web gates, soak and benchmark
+still require their listed evidence. New screenshots were taken in the NGFW VM
+using Wireshark/Xvfb, without operating the Windows desktop. Configuration,
+origin logs and exported evidence are retained; RAM history remains subject to
+its documented TTL and service lifetime.
