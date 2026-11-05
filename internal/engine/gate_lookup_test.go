@@ -124,6 +124,50 @@ func TestM4LiveReplyLookupResolvesPostDNAT(t *testing.T) {
 	}
 }
 
+func TestM4NewSessionWaitsForZoneEnrichmentBeforeBinding(t *testing.T) {
+	service := gateTestService(t, gateTestConfig())
+	open := gateTestOpen(false)
+	record := proxyLookupRecord(open, 250)
+	value, _, err := service.Runtime.Store.Apply(record, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Runtime.Source = proxyReplySource{Source: conntrack.NewFakeSource(8), record: record}
+	connection, err := service.OpenConnection(context.Background(), open)
+	if err != nil || connection.Action != domain.TLSGateInspectHTTP || connection.SessionID != "" {
+		t.Fatalf("partially published session caused a false connection denial: %+v %v", connection, err)
+	}
+	current, _ := service.Runtime.Store.Get(value.SessionID)
+	if current.Decision != "" || current.EffectiveDecision != "" {
+		t.Fatalf("zone-less session poisoned the policy cache: %+v", current)
+	}
+	if _, err := service.Runtime.Store.SetZones(value.SessionID, "lan", "wan"); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := service.EvaluateRequest(context.Background(), gateRequestInput(open, connection))
+	if err != nil || decision.Verdict != domain.RequestAllow || decision.SessionID != value.SessionID {
+		t.Fatalf("fully initialized session did not bind to the clean request: %+v %v", decision, err)
+	}
+}
+
+func TestM4UninitializedSessionCannotBypassRevoke(t *testing.T) {
+	service := gateTestService(t, gateTestConfig())
+	open := gateTestOpen(false)
+	record := proxyLookupRecord(open, 251)
+	value, _, err := service.Runtime.Store.Apply(record, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Runtime.Store.MarkRevoked(value.SessionID, 1, "test"); err != nil {
+		t.Fatal(err)
+	}
+	service.Runtime.Source = proxyReplySource{Source: conntrack.NewFakeSource(8), record: record}
+	decision, err := service.OpenConnection(context.Background(), open)
+	if err != nil || decision.Action != domain.TLSGateBlock {
+		t.Fatalf("uninitialized revoked session was bypassed: %+v %v", decision, err)
+	}
+}
+
 type proxyReplySource struct {
 	conntrack.Source
 	record conntrack.Record

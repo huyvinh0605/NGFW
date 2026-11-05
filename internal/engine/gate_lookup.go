@@ -45,5 +45,14 @@ func (service *GateService) resolveProxySession(ctx context.Context, tuple domai
 	if identity.KernelStart != 0 && value.Identity.KernelStart != 0 && identity.KernelStart != value.Identity.KernelStart {
 		return domain.RuntimeSession{}, session.ErrSessionMissing
 	}
+	// ApplyObserved publishes the record before the event reducer sets zones.
+	// Evaluating that interim record would cache a false default-deny result.
+	// Keep the connection unbound and use OpenConnection's authoritative
+	// first-match fallback until enrichment completes. An existing deny or
+	// revoke must still be returned to the caller and enforced.
+	if (value.SourceZone == "" || value.DestinationZone == "") &&
+		value.Decision == "" && value.EffectiveDecision == "" && !value.Revoked && value.State != domain.SessionClosed {
+		return domain.RuntimeSession{}, session.ErrSessionMissing
+	}
 	return value, nil
 }
