@@ -176,6 +176,27 @@ func (s *LinuxSource) Get(ctx context.Context, id Identity) (Record, error) {
 	return getConntrackFlow(ctx, conn, id, s.networkNS, s.bootID)
 }
 
+func (s *LinuxSource) LookupReply(ctx context.Context, reply domain.Tuple, zone uint16) (Record, error) {
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
+	if !reply.Valid() {
+		return Record{}, ErrAmbiguousIdentity
+	}
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return Record{}, ErrSourceClosed
+	}
+	conn, err := netlink.Dial(unix.NETLINK_NETFILTER, &netlink.Config{Strict: true})
+	if err != nil {
+		return Record{}, err
+	}
+	defer conn.Close()
+	return queryConntrackFlow(ctx, conn, Identity{Zone: zone, Family: reply.Family}, reply, true, s.networkNS, s.bootID)
+}
+
 func (s *LinuxSource) Close() error {
 	s.mu.Lock()
 	if s.closed {

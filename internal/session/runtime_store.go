@@ -681,6 +681,22 @@ func (s *RuntimeStore) Resolve(tuple flow.Key) (domain.RuntimeSession, error) {
 	return v.Clone(), nil
 }
 
+// ResolveIdentity uses existing scoped identity indexes instead of an alias
+// that can temporarily contain both old and new incarnations of a TCP tuple.
+func (s *RuntimeStore) ResolveIdentity(identity domain.ConntrackIdentity) (domain.RuntimeSession, error) {
+	if !identity.Original.Valid() || identity.ID == 0 && identity.KernelStart == 0 {
+		return domain.RuntimeSession{}, ErrIdentityMissing
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id := s.resolveIdentityLocked(identity)
+	value := s.byID[id]
+	if value == nil || identity.ID != 0 && value.Identity.ID != identity.ID {
+		return domain.RuntimeSession{}, ErrSessionMissing
+	}
+	return value.Clone(), nil
+}
+
 func (s *RuntimeStore) Get(id string) (domain.RuntimeSession, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

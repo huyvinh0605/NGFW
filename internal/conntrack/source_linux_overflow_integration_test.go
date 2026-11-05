@@ -210,6 +210,13 @@ func TestLinuxSourceRecoversAfterReceiveOverflow(t *testing.T) {
 	if err != nil || !observedIdentity(verified) {
 		t.Fatalf("post-loss identity lookup failed: marker=%+v got=%+v err=%v", marker.Identity, verified.Identity, err)
 	}
+	if verified.ReplyTuple == nil {
+		t.Fatal("live marker has no reply tuple")
+	}
+	byReply, err := source.LookupReply(ctx, *verified.ReplyTuple, verified.Identity.Zone)
+	if err != nil || byReply.Identity != verified.Identity {
+		t.Fatalf("reply lookup lost the current kernel incarnation: got=%+v err=%v", byReply.Identity, err)
+	}
 	found := false
 	result, err := source.Dump(ctx, DumpLimits{MaxRecords: 2048, MaxBytes: 8 << 20, Deadline: 3 * time.Second}, func(record Record) error {
 		if observedIdentity(record) {

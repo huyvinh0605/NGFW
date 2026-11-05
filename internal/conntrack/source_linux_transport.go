@@ -297,9 +297,18 @@ func tupleQueryAttribute(tuple domain.Tuple, zone uint16) (netfilter.Attribute, 
 }
 
 func getConntrackFlow(ctx context.Context, conn *netlink.Conn, id Identity, networkNS, bootID string) (Record, error) {
-	attribute, family, err := tupleQueryAttribute(id.Original, id.Zone)
+	return queryConntrackFlow(ctx, conn, id, id.Original, false, networkNS, bootID)
+}
+
+func queryConntrackFlow(ctx context.Context, conn *netlink.Conn, id Identity, tuple domain.Tuple, reply bool, networkNS, bootID string) (Record, error) {
+	// CTA_ZONE applies to both directions. Also encoding CTA_TUPLE_ZONE
+	// would select a directional zone and Linux rejects the duplicate.
+	attribute, family, err := tupleQueryAttribute(tuple, 0)
 	if err != nil {
 		return Record{}, err
+	}
+	if reply {
+		attribute.Type = 2 // CTA_TUPLE_REPLY; payload has the same nested schema.
 	}
 	attrs := []netfilter.Attribute{attribute}
 	if id.Zone != 0 {
@@ -365,7 +374,11 @@ func getConntrackFlow(ctx context.Context, conn *netlink.Conn, id Identity, netw
 			if err != nil {
 				return Record{}, err
 			}
-			if record.Identity.Zone != id.Zone || record.Identity.Family != id.Family || record.Identity.Original != id.Original ||
+			tupleMatches := record.Identity.Original == tuple
+			if reply {
+				tupleMatches = record.Presence.ReplyTuple && record.ReplyTuple != nil && *record.ReplyTuple == tuple && record.Presence.ID && record.Identity.ID != 0
+			}
+			if record.Identity.Zone != id.Zone || record.Identity.Family != id.Family || !tupleMatches ||
 				(id.ID != 0 && (!record.Presence.ID || record.Identity.ID != id.ID)) ||
 				(id.KernelStart != 0 && (!record.Presence.Timestamp || record.Identity.KernelStart != id.KernelStart)) {
 				return Record{}, ErrAmbiguousIdentity

@@ -109,6 +109,13 @@ type Source interface {
 	Close() error
 }
 
+// ReplyLookupSource resolves the current kernel incarnation independently of
+// asynchronous session events. A proxy has the post-DNAT client tuple, whose
+// reverse is the conntrack reply tuple, including for published services.
+type ReplyLookupSource interface {
+	LookupReply(context.Context, domain.Tuple, uint16) (Record, error)
+}
+
 type SourceHealth struct {
 	Ready       bool
 	Degraded    bool
@@ -297,6 +304,32 @@ func (f *FakeSource) Get(ctx context.Context, id Identity) (Record, error) {
 		}
 		if id.ID != 0 && identity.ID != id.ID ||
 			id.KernelStart != 0 && identity.KernelStart != id.KernelStart || found != nil {
+			return Record{}, ErrAmbiguousIdentity
+		}
+		copy := record
+		found = &copy
+	}
+	if found == nil {
+		return Record{}, ErrFlowNotFound
+	}
+	return *found, nil
+}
+
+func (f *FakeSource) LookupReply(ctx context.Context, reply domain.Tuple, zone uint16) (Record, error) {
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return Record{}, ErrSourceClosed
+	}
+	var found *Record
+	for _, record := range f.records {
+		if record.Identity.Zone != zone || record.ReplyTuple == nil || *record.ReplyTuple != reply {
+			continue
+		}
+		if found != nil {
 			return Record{}, ErrAmbiguousIdentity
 		}
 		copy := record

@@ -139,7 +139,6 @@ func (service *GateService) OpenConnection(ctx context.Context, open domain.Prox
 		Family: family, SrcIP: client.Addr(), SrcPort: client.Port(),
 		DstIP: upstream.Addr(), DstPort: upstream.Port(), Protocol: 6,
 	}
-	key := flow.Key{Scope: service.Scope, Tuple: tuple}
 	// A generation switch may race conntrack lookup or policy evaluation. A
 	// bounded retry keeps old ALLOW results from escaping after activation.
 	for attempt := 0; attempt < 3; attempt++ {
@@ -153,7 +152,7 @@ func (service *GateService) OpenConnection(ctx context.Context, open domain.Prox
 		}
 		decision := base
 		decision.ConfigGeneration = generation
-		linked, lookupErr := service.Runtime.Store.Resolve(key)
+		linked, lookupErr := service.resolveProxySession(ctx, tuple)
 		switch {
 		case errors.Is(lookupErr, session.ErrAliasAmbiguous):
 			decision.ReasonCode = "GATE_ENGINE_UNAVAILABLE"
