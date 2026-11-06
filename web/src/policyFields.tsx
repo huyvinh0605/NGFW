@@ -52,15 +52,17 @@ export function ZonePicker({ title, field, zones, selected, multiple, onMultiple
   const awaitingSingle = !multiple && selected.length > 1;
   return <fieldset className="zone-picker">
     <legend>{title}</legend>
-    <label className="zone-multiple"><input type="checkbox" aria-label={`Chọn nhiều vùng ${label}`} checked={multiple} onChange={(event) => onMultiple(event.target.checked)}/>Chọn nhiều vùng</label>
     <div className="choice-grid zone-options" role="group" aria-label={title} aria-describedby={id}>
-      <label className="choice"><input type={multiple ? "checkbox" : "radio"} name={id} checked={!selected.length} aria-label={`Bất kỳ vùng ${label}`} onChange={() => onChange([])}/><span>Bất kỳ</span></label>
       {options.map((zone) => <label className="choice" key={zone}>
         <input type={multiple ? "checkbox" : "radio"} name={id} aria-label={`Vùng ${label} ${zone.toUpperCase()}`} checked={!awaitingSingle && selected.includes(zone)} disabled={!zones.includes(zone)} onChange={() => onChange(multiple ? selected.includes(zone) ? selected.filter((item) => item !== zone) : [...selected, zone] : [zone])}/>
         <span>{zone}{!zones.includes(zone) ? " (đang giữ)" : ""}</span>
       </label>)}
     </div>
-    <small id={id}>{awaitingSingle ? `Đang giữ ${selected.join(", ")}. Chọn một vùng hoặc Bất kỳ để thay thế.` : !selected.length ? "Áp dụng cho mọi vùng." : multiple ? "Khớp một trong các vùng đã chọn." : "Chọn vùng khác sẽ thay thế vùng hiện tại."}</small>
+    <small className="zone-options-help" id={id}>
+      <label className="zone-any"><input type={multiple ? "checkbox" : "radio"} name={id} checked={!selected.length} aria-label={`Bất kỳ vùng ${label}`} onChange={() => onChange([])}/><span>Không chọn = any zone</span></label>
+      <label className="zone-multiple"><input type="checkbox" aria-label={`Chọn nhiều vùng ${label}`} checked={multiple} onChange={(event) => onMultiple(event.target.checked)}/><span>Chọn nhiều vùng</span></label>
+    </small>
+    {awaitingSingle && <small>Đang giữ {selected.join(", ")}. Chọn một vùng hoặc Bất kỳ để thay thế.</small>}
   </fieldset>;
 }
 
@@ -83,9 +85,9 @@ export function ServicePicker({ entries, onChange, nextKey, error }: {
     })) return;
     onChange([...entries, { ...serviceEntries([service])[0], key: nextKey() }]);
   }
-  return <fieldset className="service-picker" aria-describedby={id}>
-    <legend>Services</legend><small id={id}>Chọn giao thức và cổng đích. Có thể thêm nhiều dịch vụ.</small>
-    <div className="service-presets" role="group" aria-label="Dịch vụ thường dùng">{presets.map((item) => <button type="button" key={item.service} onClick={() => addPreset(item.service)}>{item.name}</button>)}</div>
+  return <div className="policy-input-group service-picker" aria-describedby={id}>
+    <span>Services</span><small id={id}>Chọn giao thức và cổng đích. Có thể thêm nhiều dịch vụ.</small>
+    <div className="service-toolbar"><div className="service-presets" role="group" aria-label="Dịch vụ thường dùng">{presets.map((item) => <button type="button" key={item.service} onClick={() => addPreset(item.service)}>{item.name}</button>)}</div><button type="button" className="service-add" onClick={() => onChange([...entries, { key: nextKey(), protocol: "tcp", kind: "port", first: "", last: "" }])}>+ Thêm dịch vụ</button></div>
     {!entries.length && <p className="selection-summary">Không giới hạn dịch vụ — mọi giao thức và cổng.</p>}
     <div className="service-entries">{entries.map((entry, index) => <div className="service-entry" key={entry.key}>
       {entry.opaque ? <div className="service-legacy"><code>{entry.original}</code><small>Giữ nguyên dịch vụ đã có; dùng JSON nếu cần sửa giá trị này.</small></div> : <>
@@ -98,9 +100,8 @@ export function ServicePicker({ entries, onChange, nextKey, error }: {
       </>}
       <button type="button" className="service-remove" aria-label={`Xóa dịch vụ ${index + 1}`} onClick={() => onChange(entries.filter((item) => item.key !== entry.key))}>Xóa</button>
     </div>)}</div>
-    <button type="button" className="service-add" onClick={() => onChange([...entries, { key: nextKey(), protocol: "tcp", kind: "port", first: "", last: "" }])}>+ Thêm dịch vụ</button>
     {error && <small className="field-error" role="alert">{error}</small>}
-  </fieldset>;
+  </div>;
 }
 
 export function ApplicationPicker({ applications, supported, available, canRestrict, onChange, error }: {
@@ -109,14 +110,13 @@ export function ApplicationPicker({ applications, supported, available, canRestr
 }) {
   const id = useId();
   const options = [...new Set([...supported, ...applications])];
-  return <fieldset className="application-picker" aria-describedby={id}>
-    <legend>Applications</legend>
-    <button type="button" className="selection-any" aria-pressed={!applications.length} onClick={() => onChange([])}>Không giới hạn ứng dụng</button>
+  return <div className="policy-input-group application-picker" aria-describedby={id}>
+    <div className="policy-field-heading"><span>Applications</span><button type="button" className="selection-any" aria-pressed={!applications.length} onClick={() => onChange([])}>Không giới hạn ứng dụng</button></div>
+    <small id={id}>{!available ? "Chưa đọc được danh sách ứng dụng hỗ trợ. Các lựa chọn đã có được giữ nguyên." : !canRestrict ? "Chọn Action ALLOW và security profile IPS để giới hạn ứng dụng." : "Cho phép các ứng dụng đã chọn sau khi nhận diện. UNKNOWN vẫn theo cơ chế fail-open của M3."}</small>
     <div className="choice-grid application-options" role="group" aria-label="Ứng dụng được phép">{options.map((app) => <label className="choice" key={app}>
       <input type="checkbox" aria-label={`Ứng dụng ${app}`} checked={applications.includes(app)} disabled={!available || !canRestrict || !supported.includes(app)} onChange={() => onChange(applications.includes(app) ? applications.filter((item) => item !== app) : [...applications, app])}/>
       <span>{app}{!supported.includes(app) ? " (đang giữ)" : ""}</span>
     </label>)}</div>
-    <small id={id}>{!available ? "Chưa đọc được danh sách ứng dụng hỗ trợ. Các lựa chọn đã có được giữ nguyên." : !canRestrict ? "Chọn Action ALLOW và security profile IPS để giới hạn ứng dụng." : "Cho phép các ứng dụng đã chọn sau khi nhận diện. UNKNOWN vẫn theo cơ chế fail-open của M3."}</small>
     {error && <small className="field-error" role="alert">{error}</small>}
-  </fieldset>;
+  </div>;
 }
