@@ -436,6 +436,40 @@ fieldset > small { display: block; color: #5a7186; font-size: 7px; margin-top: 8
 .choice input { position: absolute; opacity: 0; pointer-events: none; }
 .choice span { display: block; padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; color: #70879a; background: #091625; font-size: 8px; text-transform: uppercase; cursor: pointer; }
 .choice input:checked + span { color: var(--cyan); border-color: rgba(54, 214, 197, .25); background: rgba(54, 214, 197, .08); }
+.zone-picker > small, .policy-criteria fieldset > small { font-size: 12px; line-height: 1.45; color: #96adbf; }
+.zone-multiple { display: flex; flex-direction: row; align-items: center; gap: 7px; margin-bottom: 12px; font-size: 12px; color: #adbfce; }
+.zone-multiple input { accent-color: var(--cyan); }
+.zone-options .choice, .application-options .choice { display: flex; flex-direction: row; align-items: center; gap: 5px; }
+.zone-options .choice input, .application-options .choice input { position: static; opacity: 1; pointer-events: auto; width: 15px; height: 15px; margin: 0; accent-color: var(--cyan); }
+.zone-options .choice span, .application-options .choice span { padding: 7px 9px; font-size: 12px; }
+.zone-options .choice input:focus-visible + span, .application-options .choice input:focus-visible + span { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.zone-options .choice input:disabled + span, .application-options .choice input:disabled + span { cursor: default; opacity: .65; }
+.policy-criteria { align-items: start; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+.policy-criteria legend, .zone-picker legend { font-size: 12px; }
+.service-presets { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0; }
+.service-presets button, .service-add, .selection-any { padding: 7px 9px; border: 1px solid #304a60; border-radius: 6px; background: #102235; color: #bfdae8; font: inherit; font-size: 12px; cursor: pointer; }
+.service-presets button:hover, .service-add:hover, .selection-any:hover { border-color: var(--cyan); color: var(--cyan); }
+.service-presets button:focus-visible, .service-add:focus-visible, .service-remove:focus-visible, .selection-any:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.service-entries { display: grid; gap: 10px; }
+.service-entry { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; padding: 10px 0; border-top: 1px solid var(--line); }
+.service-entry label { min-width: 0; font-size: 12px; }
+.service-entry input, .service-entry select { width: 100%; min-height: 38px; min-width: 0; font-size: 14px; }
+.service-protocol { grid-column: 1; grid-row: 1; }
+.service-kind { grid-column: 2; grid-row: 1; }
+.service-port { grid-column: 1; grid-row: 2; }
+.service-end { grid-column: 2; grid-row: 2; }
+.service-remove { grid-column: 3; grid-row: 1; padding: 9px 0 9px 5px; border: 0; background: transparent; color: #f6a4ad; font-size: 12px; cursor: pointer; }
+.service-no-port { grid-column: 1 / 3; font-size: 12px; color: #96adbf; }
+.service-legacy { grid-column: 1 / 3; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.service-legacy small { display: block; margin-top: 6px; color: #96adbf; line-height: 1.4; }
+.service-add { margin-top: 10px; }
+.selection-summary { color: #adbfce; font-size: 12px; line-height: 1.45; }
+.selection-any { margin: 10px 0 12px; }
+.selection-any[aria-pressed="true"] { color: var(--cyan); border-color: rgba(54, 214, 197, .4); }
+.policy-scope { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.policy-scope > span { color: #a7bac9; font-size: 9px; }
+.policy-scope output { display: flex; align-items: center; min-height: 38px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 7px; background: #091625; color: #c8dbe7; font-size: 13px; }
+.policy-scope small { color: #96adbf; font-size: 11px; line-height: 1.4; }
 .switch-stack { display: flex; flex-direction: column; justify-content: center; gap: 8px; padding-top: 15px; }
 .switch-line { display: flex; flex-direction: row; align-items: center; gap: 7px; }
 .switch-line input { width: 13px; height: 13px; accent-color: var(--cyan); }

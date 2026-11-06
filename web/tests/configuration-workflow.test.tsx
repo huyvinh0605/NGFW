@@ -221,7 +221,7 @@ test("Commit fails closed when the API does not expose validation state", async 
   view.unmount();
 });
 
-test("Policy editor keeps comma separated service text and allows clearing Priority while typing", async () => {
+test("Policy editor builds services from protocol/port choices and allows clearing Priority", async () => {
   const value: SecurityPolicy = {
     id: "allow-web",
     name: "Web access",
@@ -243,11 +243,10 @@ test("Policy editor keeps comma separated service text and allows clearing Prior
   });
 
   const priority = () => view.root.findByProps({ "aria-label": "Policy priority" });
-  const services = () => view.root.findByProps({ "aria-label": "Services" });
   act(() => priority().props.onChange({ target: { value: "" } }));
   assert.equal(priority().props.value, "", "Priority must be clearable during editing");
-  act(() => services().props.onChange({ target: { value: "tcp:80, udp:53, tcp:443" } }));
-  assert.equal(services().props.value, "tcp:80, udp:53, tcp:443", "editor must preserve the raw comma separated text");
+  act(() => button(view, "DNS (UDP)").props.onClick());
+  act(() => button(view, "HTTPS").props.onClick());
 
   await act(async () => {
     view.root.findByType("form").props.onSubmit({ preventDefault() {} });
@@ -262,7 +261,7 @@ test("Policy editor keeps comma separated service text and allows clearing Prior
     await Promise.resolve();
   });
   assert.equal(saved?.priority, 20);
-  assert.deepEqual(saved?.services, ["tcp:80", "tcp:443", "udp:53"]);
+  assert.deepEqual(saved?.services, ["tcp:80", "udp:53", "tcp:443"]);
   view.unmount();
 });
 
@@ -358,7 +357,8 @@ test("M3 profile and application restriction round-trip through both editors", a
   await act(async () => {
     policyView = create(<PolicyEditor value={policy} zones={["lan", "wan"]} profiles={[savedProfile!]} capabilities={capabilities} busy={false} onClose={() => undefined} onSave={async (value) => { savedPolicy = value; }}/>);
   });
-  assert.equal(policyView.root.findByProps({ "aria-label": "Applications" }).props.value, "HTTP, TLS");
+  assert.equal(policyView.root.findByProps({ "aria-label": "Ứng dụng HTTP" }).props.checked, true);
+  assert.equal(policyView.root.findByProps({ "aria-label": "Ứng dụng TLS" }).props.checked, true);
   await act(async () => {
     policyView.root.findByType("form").props.onSubmit({ preventDefault() {} });
     await Promise.resolve();

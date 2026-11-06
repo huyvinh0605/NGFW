@@ -19,7 +19,7 @@ import {
   normalizeSessionPage,
   normalizeStats,
 } from "./runtimeData";
-import { normalizeServiceList } from "./policy";
+import { ApplicationPicker, ServicePicker, ZonePicker, serializeServices, serviceEntries } from "./policyFields";
 import { normalizeInspectionCapabilities, normalizeInspectionHealth, normalizeThreatEventPageData } from "./inspectionData";
 import { ApplicationBadge, InspectionBadge, InspectionHealthPanel, SessionInspectionDetails } from "./inspectionComponents";
 import { authenticatedSocketProtocols, closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay, requiresEventCatchup } from "./wsLifecycle";
@@ -1027,18 +1027,20 @@ export function ConfigStatusBar({ config, dirty, comment, onComment, busy, onVal
 
 export function PolicyEditor({ value, zones, profiles, capabilities, busy, onClose, onSave }: { value: SecurityPolicy; zones: string[]; profiles: Array<string | SecurityProfile>; capabilities?: InspectionCapabilities | null; busy: boolean; onClose: () => void; onSave: (policy: SecurityPolicy) => Promise<void> }) {
   const [draft, setDraft] = useState<SecurityPolicy>(() => ({ ...value, source_zones: [...(value.source_zones ?? [])], destination_zones: [...(value.destination_zones ?? [])], services: [...(value.services ?? [])], applications: [...(value.applications ?? [])] }));
-  const [servicesText, setServicesText] = useState(() => (value.services ?? []).join(", "));
-  const [applicationsText, setApplicationsText] = useState(() => (value.applications ?? []).join(", "));
+  const [services, setServices] = useState(() => serviceEntries(value.services ?? []));
+  const nextServiceKey = useRef((value.services ?? []).length);
+  const [sourceMultiple, setSourceMultiple] = useState((value.source_zones ?? []).length > 1);
+  const [destinationMultiple, setDestinationMultiple] = useState((value.destination_zones ?? []).length > 1);
+  const [zoneError, setZoneError] = useState("");
   const [priorityText, setPriorityText] = useState(() => String(value.priority ?? ""));
   const [priorityError, setPriorityError] = useState("");
   const [serviceError, setServiceError] = useState("");
   const [applicationError, setApplicationError] = useState("");
   const profileOptions = profiles.map((profile) => typeof profile === "string" ? { id: profile, mode: "" } : { id: profile.id, mode: profile.inspection?.mode ?? "" });
+  const selectedProfile = profileOptions.find((profile) => profile.id === draft.security_profile_id);
+  const supportedApplications = capabilities?.supported ? capabilities.applications : [];
+  const canRestrictApplications = draft.action === "ALLOW" && selectedProfile?.mode === "IPS";
   const isNew = !value.id;
-  function toggleZone(field: "source_zones" | "destination_zones", zone: string) {
-    const current = draft[field] ?? [];
-    setDraft({ ...draft, [field]: current.includes(zone) ? current.filter((item) => item !== zone) : [...current, zone] });
-  }
   function submit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
@@ -1053,33 +1055,39 @@ export function PolicyEditor({ value, zones, profiles, capabilities, busy, onClo
       return;
     }
     setPriorityError("");
-    let services: string[];
+    if ((!sourceMultiple && (draft.source_zones?.length ?? 0) > 1) || (!destinationMultiple && (draft.destination_zones?.length ?? 0) > 1)) {
+      setZoneError("Chọn một vùng để thay thế các vùng đang giữ, hoặc bật Chọn nhiều vùng.");
+      return;
+    }
+    setZoneError("");
+    let serializedServices: string[];
     try {
-      services = normalizeServiceList(servicesText);
+      serializedServices = serializeServices(services);
     } catch (error) {
       setServiceError(error instanceof Error ? error.message : "Service không hợp lệ.");
       return;
     }
     setServiceError("");
-	const applications = [...new Set(applicationsText.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean))];
-	const supportedApplications = capabilities?.applications ?? ["HTTP", "TLS", "DNS", "SSH"];
-	if (applications.some((app) => !supportedApplications.includes(app))) {
-	  setApplicationError(`Ứng dụng hỗ trợ trong M3: ${supportedApplications.join(", ")}.`);
+	const applications = draft.applications ?? [];
+	const addedApplications = applications.filter((app) => !(value.applications ?? []).includes(app));
+	if (addedApplications.some((app) => !supportedApplications.includes(app))) {
+	  setApplicationError("Chỉ chọn ứng dụng được backend báo hỗ trợ. Hãy tải lại capability trước khi thêm ứng dụng.");
 	  return;
 	}
-	const selectedProfile = profileOptions.find((profile) => profile.id === draft.security_profile_id);
-	if (applications.length && selectedProfile?.mode && selectedProfile.mode !== "IPS") {
-	  setApplicationError("Application restriction cần profile IPS; IDS chỉ cảnh báo và không chặn session.");
+	if (applications.length && !canRestrictApplications) {
+	  setApplicationError("Giới hạn ứng dụng cần Action ALLOW và profile IPS. Các lựa chọn đang có được giữ nguyên.");
 	  return;
 	}
 	setApplicationError("");
-	void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services, applications, application_match_mode: applications.length ? "RESTRICT_L3_ALLOW" : undefined });
+	const applicationsChanged = JSON.stringify(applications) !== JSON.stringify(value.applications ?? []);
+	void onSave({ ...draft, id: draft.id.trim(), name: draft.name.trim(), priority, services: serializedServices, applications, application_match_mode: applicationsChanged ? applications.length ? "RESTRICT_L3_ALLOW" : undefined : value.application_match_mode });
   }
   return <div className="modal-layer"><button className="modal-scrim" aria-label="Đóng" onClick={onClose}/><form className="modal policy-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">CANDIDATE POLICY</span><h2>{isNew ? "Thêm policy" : `Sửa ${value.name}`}</h2></div><button type="button" className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="modal-body">
-    <div className="form-row"><label>ID<input required disabled={!isNew} pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input aria-label="Policy priority" type="number" min="0" aria-required="true" aria-invalid={Boolean(priorityError)} value={priorityText} onChange={(event) => { setPriorityText(event.target.value); if (priorityError) setPriorityError(""); }}/>{priorityError && <small className="field-error" role="alert">{priorityError}</small>}</label></div>
-    <div className="form-row two"><fieldset><legend>Source zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.source_zones?.includes(zone) ?? false} onChange={() => toggleZone("source_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset><fieldset><legend>Destination zones</legend><div className="choice-grid">{zones.map((zone) => <label className="choice" key={zone}><input type="checkbox" checked={draft.destination_zones?.includes(zone) ?? false} onChange={() => toggleZone("destination_zones", zone)}/><span>{zone}</span></label>)}</div><small>Không chọn = any zone</small></fieldset></div>
-    <div className="form-row two"><label>Services <small>Bắt buộc ghi protocol, ví dụ tcp:80, tcp:443, udp:53</small><input aria-label="Services" aria-invalid={Boolean(serviceError)} value={servicesText} onChange={(event) => { setServicesText(event.target.value); if (serviceError) setServiceError(""); }} placeholder="tcp:80, tcp:443"/>{serviceError && <small className="field-error" role="alert">{serviceError}</small>}</label><label>Applications <small>M3 whitelist: HTTP, TLS, DNS, SSH. Restriction áp dụng bất đồng bộ sau L3 ALLOW; UNKNOWN fail-open.</small><input aria-label="Applications" aria-invalid={Boolean(applicationError)} value={applicationsText} onChange={(event) => { setApplicationsText(event.target.value); if (applicationError) setApplicationError(""); }} placeholder="HTTP, TLS"/>{applicationError && <small className="field-error" role="alert">{applicationError}</small>}</label></div>
-    <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><label>Scope<select value={draft.scope || "SESSION"} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}><option>SESSION</option></select><small>M2/M3 connectivity dùng SESSION scope.</small></label><label>Security profile <small>Chọn IDS để quan sát; IPS để inline drop/app restriction.</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profileOptions.map((profile) => <option key={profile.id} value={profile.id}>{profile.id}{profile.mode ? ` (${profile.mode})` : ""}</option>)}</select></label></div>
+    <div className="form-row"><label>ID<input required disabled={!isNew} pattern={"[a-zA-Z0-9][a-zA-Z0-9_.\\-]{0,63}"} value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="allow-lan-web"/></label><label>Tên hiển thị<input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="LAN web access"/></label><label>Priority<input aria-label="Policy priority" type="number" min="0" aria-required="true" aria-invalid={Boolean(priorityError)} value={priorityText} onChange={(event) => { setPriorityText(event.target.value); if (priorityError) setPriorityError(""); }}/>{priorityError && <small className="field-error" role="alert">{priorityError}</small>}</label></div>
+    <div className="form-row two"><ZonePicker title="Source zones" field="source" zones={zones} selected={draft.source_zones ?? []} multiple={sourceMultiple} onMultiple={(multiple) => { setSourceMultiple(multiple); setZoneError(""); }} onChange={(selected) => { setDraft({ ...draft, source_zones: selected }); setZoneError(""); }}/><ZonePicker title="Destination zones" field="destination" zones={zones} selected={draft.destination_zones ?? []} multiple={destinationMultiple} onMultiple={(multiple) => { setDestinationMultiple(multiple); setZoneError(""); }} onChange={(selected) => { setDraft({ ...draft, destination_zones: selected }); setZoneError(""); }}/></div>
+    {zoneError && <small className="field-error" role="alert">{zoneError}</small>}
+    <div className="form-row two policy-criteria"><ServicePicker entries={services} nextKey={() => nextServiceKey.current++} error={serviceError} onChange={(entries) => { setServices(entries); setServiceError(""); }}/><ApplicationPicker applications={draft.applications ?? []} supported={supportedApplications} available={Boolean(capabilities?.supported)} canRestrict={canRestrictApplications} error={applicationError} onChange={(applications) => { setDraft({ ...draft, applications }); setApplicationError(""); }}/></div>
+    <div className="form-row"><label>Action<select value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })}><option>ALLOW</option><option>DROP</option><option>REJECT</option></select></label><div className="policy-scope"><span>Scope</span><output aria-label="Policy scope">{draft.scope || "SESSION"}</output><small>Phạm vi cố định cho policy M2/M3/M4.</small></div><label>Security profile <small>Chọn IDS để quan sát; IPS để inline drop/app restriction.</small><select value={draft.security_profile_id || ""} onChange={(event) => setDraft({ ...draft, security_profile_id: event.target.value || undefined })}><option value="">Không áp dụng</option>{profileOptions.map((profile) => <option key={profile.id} value={profile.id}>{profile.id}{profile.mode ? ` (${profile.mode})` : ""}</option>)}</select></label></div>
     <div className="form-row"><label>Minimum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.minimum_risk ?? ""} onChange={(event) => setDraft({ ...draft, minimum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><label>Maximum risk <small>M3+; để trống trong M2</small><input type="number" min="0" max="100" value={draft.maximum_risk ?? ""} onChange={(event) => setDraft({ ...draft, maximum_risk: event.target.value === "" ? undefined : Number(event.target.value) })}/></label><div className="switch-stack"><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/><span>Policy được bật</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_start} onChange={(event) => setDraft({ ...draft, log_start: event.target.checked })}/><span>Log khi bắt đầu</span></label><label className="switch-line"><input type="checkbox" checked={draft.log_end} onChange={(event) => setDraft({ ...draft, log_end: event.target.checked })}/><span>Log khi kết thúc</span></label></div></div>
   </div><div className="modal-footer"><Button type="button" variant="ghost" onClick={onClose}>Hủy</Button><Button type="submit" variant="primary" icon="check" busy={busy}>Lưu vào Candidate</Button></div></form></div>;
 }

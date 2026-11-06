@@ -592,15 +592,20 @@ Các trường trong modal:
 - **ID**: bắt buộc khi tạo; chỉ gồm ký tự identifier và không đổi sau khi tạo;
 - **Tên hiển thị**: tên dùng trên bảng/audit;
 - **Priority**: số nguyên từ 0; số thấp hơn chạy trước;
-- **Source zones**: chọn một hoặc nhiều zone; bỏ chọn nghĩa là any;
+- **Source zones**: mặc định chọn một zone; bấm LAN sẽ thay WAN đang chọn.
+  Bật **Chọn nhiều vùng** nếu rule cần khớp nhiều zone; chọn **Bất kỳ** để không
+  giới hạn zone. Rule cũ có nhiều zone mở sẵn chế độ chọn nhiều;
 - **Destination zones**: tương tự source zones;
-- **Services**: danh sách cách nhau bởi dấu phẩy, ví dụ `tcp:80, tcp:443`;
-  chỉ nhập `80` là sai cú pháp;
-- **Applications**: whitelist M3 gồm HTTP/TLS/DNS/SSH, cách nhau bằng dấu phẩy;
-  chỉ có hiệu lực khi người dùng chọn rõ và backend lưu
-  `application_match_mode=RESTRICT_L3_ALLOW`;
+- **Services**: bấm HTTP/HTTPS/DNS/SSH để thêm nhanh, hoặc **Thêm dịch vụ**, chọn
+  giao thức và điền cổng đích (1–65535), khoảng cổng hay mọi cổng. ICMP/ICMPv6
+  không dùng cổng. Không cần gõ dấu `:` hoặc `,`; UI tạo đúng selector cho API.
+  Danh sách rỗng nghĩa là không giới hạn dịch vụ; dòng mới chưa điền đủ sẽ chặn lưu;
+- **Applications**: đánh dấu ứng dụng từ danh sách capability thực của backend.
+  Chọn Action ALLOW và profile IPS trước khi giới hạn ứng dụng; bỏ giới hạn bằng
+  **Không giới hạn ứng dụng**. UI lưu `application_match_mode=RESTRICT_L3_ALLOW`
+  khi có lựa chọn; UNKNOWN vẫn theo cơ chế fail-open của M3;
 - **Action**: action khi tất cả matcher của rule phù hợp;
-- **Scope**: M2/M3 chỉ hỗ trợ `SESSION` cho connectivity policy;
+- **Scope**: giá trị `SESSION` cố định cho connectivity policy, không có menu chọn;
 - **Security profile**: chọn IDS để quan sát hoặc IPS để inline verdict/app guard;
   application restriction yêu cầu profile IPS;
 - **Minimum risk/Maximum risk**: chưa thuộc M3, phải để trống;
