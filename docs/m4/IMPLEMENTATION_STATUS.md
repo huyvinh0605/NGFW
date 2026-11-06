@@ -1,6 +1,6 @@
 # M4 implementation status
 
-Baseline date: 2026-09-28; last updated 2026-11-05. This ledger tracks implementation separately from Ubuntu appliance acceptance. Historical task checkpoints below record their state at the time and are superseded by the current-status section at the end.
+Baseline date: 2026-09-28; last updated 2026-11-06. This ledger tracks implementation separately from Ubuntu appliance acceptance. Historical task checkpoints below record their state at the time and are superseded by the current-status section at the end.
 
 ## Source and worktree
 
@@ -697,3 +697,34 @@ its documented TTL and service lifetime.
 ## 2026-11-05 continued VM acceptance — m4-continuation-20261105T152913Z
 
 Cumulative 39 PASS, 3 PARTIAL, 0 FAIL, 1 NOT_RUN. See [report](../../artifacts/m4-continuation-20261105T152913Z/RESULTS.md) and [ledger](../../artifacts/m4-continuation-20261105T152913Z/CASE_LEDGER.json). The new live checks cover M4-00/02, engine restart, QUIC behavior and a 20-minute soak. M4-40 passes after correcting the test to wait for multicast receive drain and compare observed timestamp presence; source adapter and deployed binaries are unchanged. M4-42 remains PARTIAL because one initial plaintext request reset; its separate recheck does not erase that failure. M4-12/30 remain partial and M4-35 still requires its full activation-failure/reboot proof. VM source changes were reviewed in a separate worktree; dirty appliance work was preserved.
+
+## 2026-11-06 VM continuation — m4-continuation-20261105T162636Z
+
+Current cumulative matrix: **41 PASS, 2 PARTIAL**; no full sign-off or claim that
+all 43 rows were rerun on one build. [Report](../../artifacts/m4-continuation-20261105T162636Z/RESULTS.md)
+and [ledger](../../artifacts/m4-continuation-20261105T162636Z/CASE_LEDGER.json).
+
+2630451 binds new proxy connections to the live conntrack incarnation through
+the reply tuple, including DNAT; 0ff1e96 defers binding until zone enrichment
+without bypassing a deny/revoke. Original clean false403 and reset traces are
+retained. The final reused-tuple run is 3000/3000 HTTP200; all 18 fresh-connection
+benchmark cells pass with 100 measured plus 5 warmup requests each.
+
+M4-35 now has real kernel failure/compensation, an actual interrupted journal
+and guest reboot, and postboot M1/M3/M4 traffic controls. The first boot failed
+because proxy/IDS/IPS units were disabled. Existing units were enabled and the
+entire interruption/reboot test repeated successfully. The approximately
+two-minute Ubuntu network-online wait and manually restarted Vite remain explicit.
+
+M4-12 has real standard-library TLS1.3 ECH controls: BYPASS200 verified and strict
+ECH clients reject DECRYPT OPEN/CLOSE with no HTTP origin/clean request evidence.
+Explicit TLS_METADATA_PARTIAL/ECH classification is still missing; the decrypted
+counter represents TLS termination and cannot prove ECH payload inspection.
+M4-30 remains partial for client/proxy/upstream NAT identity correlation.
+
+Final Running/Candidate contents match baseline at v301. API/proxy/rules/YAML,
+addresses/routes and the older dirty appliance checkout are preserved; only
+engine was rebuilt/deployed from the reviewed source. RAM history was exported
+before intentional restarts/reboots. Product logs/rules/profiles were not deleted;
+proxy/IDS/IPS autostart is intentionally retained. Source/docs go to GitHub and
+artifacts stay local.
