@@ -167,6 +167,7 @@ export function normalizeInspectionCapabilities(value: unknown): InspectionCapab
 export function normalizeThreatEvent(value: unknown, index = 0): SecurityEvent | null {
   const input = record(value);
   if (!input) return null;
+  if (!text(input.event_id)) return null;
   const tuple = record(input.observed_tuple) ?? record(input.flow_tuple);
   const application = normalizeApplicationIdentity(input.application);
   const enforcement = normalizeEnforcement(input.enforcement);
@@ -178,6 +179,9 @@ export function normalizeThreatEvent(value: unknown, index = 0): SecurityEvent |
   const observed = timestamp(input.observed_at) || timestamp(input.ingested_at);
   return {
     event_id: eventID,
+    feed: "security",
+    sequence: typeof input.sequence === "string" && /^\d+$/.test(input.sequence) ? input.sequence : Number.isSafeInteger(input.sequence) ? String(input.sequence) : undefined,
+    revision: number(input.correlation_revision),
     timestamp: observed,
     flow_id: text(input.suricata_flow_id) || undefined,
     session_id: text(input.session_id) || undefined,
@@ -190,6 +194,9 @@ export function normalizeThreatEvent(value: unknown, index = 0): SecurityEvent |
     confidence_available: false,
     source_ip: text(tuple?.src_ip) || undefined,
     destination_ip: text(tuple?.dst_ip) || undefined,
+    source_port: Number.isInteger(tuple?.src_port) ? Number(tuple?.src_port) : undefined,
+    destination_port: Number.isInteger(tuple?.dst_port) ? Number(tuple?.dst_port) : undefined,
+    policy_id: text(input.policy_id) || undefined,
     application: application.name === "UNKNOWN" ? undefined : application.name,
     evidence: text(input.correlation_reason) || undefined,
     recommended_action: enforcement.requested_action,
@@ -197,7 +204,7 @@ export function normalizeThreatEvent(value: unknown, index = 0): SecurityEvent |
     correlation_state: correlation,
     verdict,
     packet_verdict: text(input.packet_verdict) || undefined,
-    enforcement,
+    enforcement: record(input.enforcement) ? enforcement : undefined,
     metadata: {
       sensor_id: text(input.sensor_id) || undefined,
       sensor_epoch: text(input.sensor_epoch) || undefined,

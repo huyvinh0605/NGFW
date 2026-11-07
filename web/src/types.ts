@@ -103,6 +103,10 @@ export type SessionDetail = {
 
 export type SecurityEvent = {
   event_id: string;
+  feed?: "runtime" | "security" | "request";
+  stream_id?: string;
+  sequence?: string;
+  revision?: number;
   timestamp: string;
   flow_id?: string;
   session_id?: string;
@@ -115,6 +119,9 @@ export type SecurityEvent = {
   confidence_available?: boolean;
   source_ip?: string;
   destination_ip?: string;
+  source_port?: number;
+  destination_port?: number;
+  policy_id?: string;
   application?: string;
   evidence?: string;
   recommended_action?: string;
@@ -124,6 +131,19 @@ export type SecurityEvent = {
   verdict?: "UNKNOWN" | "ALERT" | "DROP" | "ERROR" | string;
   packet_verdict?: string;
   enforcement?: EnforcementResult;
+  request?: {
+    id: string;
+    connection_id: string;
+    method: string;
+    scheme: string;
+    path: string;
+    coverage: string;
+    completed: boolean;
+    error_code: string;
+    reason_code: string;
+    http_status?: number;
+    forward?: { http_status?: number; reason_code: string; observed_at: string };
+  };
 };
 
 export type SecurityEventPage = {

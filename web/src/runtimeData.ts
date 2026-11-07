@@ -135,8 +135,9 @@ export function normalizeEvent(value: unknown, index = 0): SecurityEvent | null 
   const record = objectValue(value);
   if (!record) return null;
   const kind = stringValue(record.kind);
-  const sequence = numberValue(record.sequence, 0);
-  const eventID = stringValue(record.event_id) || (sequence > 0 ? String(sequence) : `runtime-${index}`);
+  const rawSequence = record.sequence;
+  const sequence = typeof rawSequence === "string" && /^\d+$/.test(rawSequence) ? rawSequence : typeof rawSequence === "number" && Number.isSafeInteger(rawSequence) && rawSequence > 0 ? String(rawSequence) : "";
+  const eventID = (kind && sequence ? sequence : stringValue(record.event_id)) || sequence || `runtime-${index}`;
   const category = stringValue(record.category) || kind || "Security signal";
   const detector = stringValue(record.detector) || (kind ? "SESSION_ENGINE" : "UNKNOWN");
   const metadata = objectValue(record.metadata);
@@ -145,13 +146,16 @@ export function normalizeEvent(value: unknown, index = 0): SecurityEvent | null 
   const runtimeMetadata = kind ? {
     ...(metadata ?? {}),
     kind,
-    ...(sequence > 0 ? { sequence } : {}),
+    ...(sequence ? { sequence } : {}),
+    ...(stringValue(record.event_id) ? { related_event_id: stringValue(record.event_id) } : {}),
     ...(numberValue(record.generation, 0) > 0 ? { generation: numberValue(record.generation) } : {}),
     ...(numberValue(record.revision, 0) > 0 ? { revision: numberValue(record.revision) } : {}),
     ...(stringValue(record.reason) ? { reason: stringValue(record.reason) } : {}),
   } : metadata;
   return {
     event_id: eventID,
+    feed: kind ? "runtime" : undefined,
+    sequence: sequence || undefined,
     timestamp: validTimestamp(record.timestamp),
     flow_id: stringValue(record.flow_id) || undefined,
     session_id: stringValue(record.session_id) || undefined,

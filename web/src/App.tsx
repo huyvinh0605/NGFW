@@ -10,8 +10,6 @@ import {
   normalizeAuditPage,
   normalizeBlocks,
   normalizeConfigExport,
-  normalizeEvent,
-  normalizeEventPage,
   normalizeHealth,
   normalizeMLStatus,
   normalizeReputation,
@@ -20,9 +18,12 @@ import {
   normalizeStats,
 } from "./runtimeData";
 import { ApplicationPicker, ServicePicker, ZonePicker, serializeServices, serviceEntries } from "./policyFields";
-import { normalizeInspectionCapabilities, normalizeInspectionHealth, normalizeThreatEventPageData } from "./inspectionData";
+import { normalizeInspectionCapabilities, normalizeInspectionHealth } from "./inspectionData";
+import { EventsPanel } from "./eventViewer";
+import { eventKey, needsAttention } from "./eventData";
+import { useEventFeed, type EventMonitor } from "./useEventFeed";
 import { ApplicationBadge, InspectionBadge, InspectionHealthPanel, SessionInspectionDetails } from "./inspectionComponents";
-import { authenticatedSocketProtocols, closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay, requiresEventCatchup } from "./wsLifecycle";
+import { authenticatedSocketProtocols, closeSocketAfterOpen, INITIAL_WEBSOCKET_DIAL_DELAY_MS, reconnectDelay } from "./wsLifecycle";
 import type {
   AuditEntry,
   ConfigExport,
@@ -105,7 +106,7 @@ const navItems: Array<{ page: Page; label: string; icon: IconName }> = [
 const pageMeta: Record<Page, { title: string; subtitle: string }> = {
   overview: { title: "Tổng quan runtime", subtitle: "Trạng thái M1/M2 và session theo thời gian thực" },
   sessions: { title: "Sessions", subtitle: "Theo dõi tuple, zone và quyết định L3/L4" },
-  threats: { title: "Sự kiện & kiểm soát", subtitle: "Sự kiện runtime/policy, chặn tạm thời và dữ liệu quản trị" },
+  threats: { title: "Sự kiện & kiểm soát", subtitle: "Cảnh báo bảo mật, request M4 và chẩn đoán runtime" },
   policy: { title: "Chính sách bảo mật", subtitle: "Thứ tự first-match và profile áp dụng cho traffic" },
   network: { title: "Hạ tầng mạng", subtitle: "Interface, zone, route và NAT trong candidate hiện tại" },
   configuration: { title: "Cấu hình JSON nâng cao", subtitle: "Biên tập toàn bộ Candidate trong cùng workflow cấu hình" },
@@ -180,14 +181,9 @@ type LiveData = {
   ml: MLStatus | null;
   inspection: InspectionHealth | null;
   inspectionCapabilities: InspectionCapabilities | null;
-  securityStreamID: string;
-  securityNextCursor: string;
-  securityHasMore: boolean;
-  securityGap: boolean;
-  securityEvicted: number;
 };
 
-const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null, inspection: null, inspectionCapabilities: null, securityStreamID: "", securityNextCursor: "", securityHasMore: false, securityGap: false, securityEvicted: 0 };
+const emptyLive: LiveData = { health: null, stats: null, sessions: [], events: [], blocks: [], reputation: [], audit: [], ml: null, inspection: null, inspectionCapabilities: null };
 
 export default function App() {
   const initialNavigation = useRef(readConsoleNavigation(window.location.hash, window.history.state)).current;
@@ -201,6 +197,7 @@ export default function App() {
   const [connectionError, setConnectionError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<string>();
   const [token, setToken] = useState(storedToken);
+  const eventMonitor = useEventFeed(token);
   const [user, setUser] = useState<User | null>(null);
   const [accessOpen, setAccessOpen] = useState(false);
   const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string } | null>(null);
@@ -209,8 +206,6 @@ export default function App() {
   const liveError = useRef("");
   const configError = useRef("");
   const commitInFlight = useRef(false);
-  const securityCursor = useRef("");
-  const securityLoading = useRef(false);
 
   const refreshConnectionError = useCallback(() => {
     setConnectionError(liveError.current || configError.current);
@@ -228,21 +223,19 @@ export default function App() {
     liveLoading.current = true;
     if (!quiet) setRefreshing(true);
     try {
-      const endpointLabels = ["health", "sessions", "events", "blocks", "stats", "ML", "reputation", "audit", "inspection health", "security events", "inspection capabilities"];
+      const endpointLabels = ["health", "sessions", "blocks", "stats", "ML", "reputation", "audit", "inspection health", "inspection capabilities"];
       // These resources have independent failure modes (notably the runtime
       // IPC-backed sessions/config paths), so keep healthy panels rendering
       // when one endpoint is unavailable.
       const results = await Promise.allSettled([
         api<unknown>("/api/v1/health"),
         api<unknown>("/api/v1/sessions"),
-        api<unknown>("/api/v1/events"),
         api<unknown>("/api/v1/blocks"),
         api<unknown>("/api/v1/stats/system"),
         api<unknown>("/api/v1/ml/status"),
         api<unknown>("/api/v1/reputation"),
         api<unknown>("/api/v1/audit?limit=250"),
 		api<unknown>("/api/v1/inspection/health"),
-		api<unknown>(`/api/v1/security/events?limit=200${securityCursor.current ? `&cursor=${encodeURIComponent(securityCursor.current)}` : ""}`),
 		api<unknown>("/api/v1/inspection/capabilities"),
       ]);
       const read = <T,>(index: number, previous: T, normalize: (value: unknown) => T | null): T => {
@@ -256,36 +249,18 @@ export default function App() {
           return previous;
         }
       };
-      setLive((current) => {
-		const runtimeEvents = read(2, current.events.filter((event) => event.event_class !== "security"), (value) => normalizeEventPage(value));
-		const securityResult = results[9];
-		let page: ReturnType<typeof normalizeThreatEventPageData> | null = null;
-		if (securityResult.status === "fulfilled") {
-		  try { page = normalizeThreatEventPageData(securityResult.value); } catch { page = null; }
-		}
-		const replaceSecurity = Boolean(page?.reset_required || (page?.stream_id && current.securityStreamID && page.stream_id !== current.securityStreamID));
-		const priorSecurity = replaceSecurity ? [] : current.events.filter((event) => event.event_class === "security");
-		const securityEvents = page ? [...priorSecurity, ...page.items] : priorSecurity;
-		const mergedEvents = [...securityEvents, ...runtimeEvents].filter((event, index, values) => values.findIndex((candidate) => candidate.event_id === event.event_id) === index).slice(-10000);
-		if (page?.next_cursor) securityCursor.current = page.next_cursor;
-		return {
-		  health: read(0, current.health, normalizeHealth),
-		  sessions: read(1, current.sessions, (value) => normalizeSessionPage(value)),
-		  events: mergedEvents,
-		  blocks: read(3, current.blocks, (value) => normalizeBlocks(value)),
-		  stats: read(4, current.stats, (value) => normalizeStats(value)),
-		  ml: read(5, current.ml, normalizeMLStatus),
-		  reputation: read(6, current.reputation, (value) => normalizeReputation(value)),
-		  audit: read(7, current.audit, (value) => normalizeAuditPage(value)),
-		  inspection: read(8, current.inspection, normalizeInspectionHealth),
-		  inspectionCapabilities: read(10, current.inspectionCapabilities, normalizeInspectionCapabilities),
-		  securityStreamID: page?.stream_id || current.securityStreamID,
-		  securityNextCursor: page?.next_cursor || current.securityNextCursor,
-		  securityHasMore: page?.has_more ?? current.securityHasMore,
-		  securityGap: page ? page.gap || page.reset_required : current.securityGap,
-		  securityEvicted: page?.evicted_count ?? current.securityEvicted,
-		};
-	  });
+      setLive((current) => ({
+        ...current,
+        health: read(0, current.health, normalizeHealth),
+        sessions: read(1, current.sessions, normalizeSessionPage),
+        blocks: read(2, current.blocks, normalizeBlocks),
+        stats: read(3, current.stats, normalizeStats),
+        ml: read(4, current.ml, normalizeMLStatus),
+        reputation: read(5, current.reputation, normalizeReputation),
+        audit: read(6, current.audit, normalizeAuditPage),
+        inspection: read(7, current.inspection, normalizeInspectionHealth),
+        inspectionCapabilities: read(8, current.inspectionCapabilities, normalizeInspectionCapabilities),
+      }));
       const failures = results.flatMap((result, index) => result.status === "rejected" ? [`${endpointLabels[index]}: ${errorMessage(result.reason)}`] : []);
       liveError.current = failures.length ? `Một số nguồn dữ liệu tạm thời không khả dụng (${failures.join("; ")})` : "";
       if (results.some((result) => result.status === "fulfilled")) setLastUpdated(new Date().toISOString());
@@ -296,36 +271,6 @@ export default function App() {
       setRefreshing(false);
     }
   }, [refreshConnectionError]);
-
-  const loadMoreSecurity = useCallback(async () => {
-    if (securityLoading.current) return;
-    securityLoading.current = true;
-    try {
-      const cursor = securityCursor.current;
-      const page = normalizeThreatEventPageData(await api<unknown>(`/api/v1/security/events?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`));
-      setLive((current) => {
-        const replace = Boolean(page.reset_required || (page.stream_id && current.securityStreamID && page.stream_id !== current.securityStreamID));
-        const runtimeEvents = current.events.filter((event) => event.event_class !== "security");
-        const securityEvents = [...(replace ? [] : current.events.filter((event) => event.event_class === "security")), ...page.items]
-          .filter((event, index, values) => values.findIndex((candidate) => candidate.event_id === event.event_id) === index)
-          .slice(-10000);
-        if (page.next_cursor) securityCursor.current = page.next_cursor;
-        return {
-          ...current,
-          events: [...securityEvents, ...runtimeEvents],
-          securityStreamID: page.stream_id || current.securityStreamID,
-          securityNextCursor: page.next_cursor || current.securityNextCursor,
-          securityHasMore: page.has_more,
-          securityGap: page.gap || page.reset_required,
-          securityEvicted: page.evicted_count,
-        };
-      });
-    } catch (error) {
-      notify("error", `Không tải được trang security event tiếp theo: ${errorMessage(error)}`);
-    } finally {
-      securityLoading.current = false;
-    }
-  }, [notify]);
 
   const loadConfig = useCallback(async () => {
     if (configLoading.current) return;
@@ -420,17 +365,6 @@ export default function App() {
       try {
         const normalized = normalizeStats(stats);
         setLive((current) => ({ ...current, stats: normalized }));
-      } catch { /* polling remains the fallback for malformed frames */ }
-    });
-    connect<unknown>("/ws/events", (value, messageType) => {
-      try {
-        if (requiresEventCatchup(messageType)) {
-          void loadLive(true);
-          return;
-        }
-        const event = normalizeEvent(value);
-        if (!event) return;
-        setLive((current) => ({ ...current, events: [event, ...current.events.filter((item) => item.event_id !== event.event_id)].slice(0, 10000) }));
       } catch { /* polling remains the fallback for malformed frames */ }
     });
     return () => {
@@ -635,7 +569,7 @@ export default function App() {
   }, [notify, token]);
 
   const hasCandidateChanges = !!config && objectChanged(config.running, config.candidate);
-  const criticalEvents = live.events.filter((event) => event.severity === "CRITICAL" || event.severity === "HIGH").length;
+  const criticalEvents = eventMonitor.events.filter((event) => event.feed !== "runtime" && (event.severity === "CRITICAL" || event.severity === "HIGH")).length;
 
   function navigate(next: Page, origin?: Page) {
     if (next === page) {
@@ -687,17 +621,17 @@ export default function App() {
         <div className="top-actions">
           {hasCandidateChanges && <button className="pending-config" onClick={() => navigate("configuration")}><span/> Candidate chưa commit</button>}
           <span className={cx("health-pill", live.health?.status ?? "unknown")}><i/>{live.health?.status === "healthy" ? "Runtime healthy" : live.health?.status === "degraded" ? "Runtime suy giảm" : "Đang kết nối"}</span>
-          <Button variant="ghost" icon="refresh" busy={refreshing} onClick={() => { void loadLive(); void loadConfig(); }}>Làm mới</Button>
+          <Button variant="ghost" icon="refresh" busy={refreshing} onClick={() => { void loadLive(); void loadConfig(); void eventMonitor.refresh(); }}>Làm mới</Button>
         </div>
       </header>
 
-      {connectionError && <div className="connection-banner"><Icon name="warning"/><div><strong>Không cập nhật được dữ liệu</strong><span>{connectionError}. Dữ liệu cũ vẫn được giữ trên màn hình.</span></div><Button variant="ghost" onClick={() => { void loadLive(); void loadConfig(); }}>Thử lại</Button></div>}
+      {connectionError && <div className="connection-banner"><Icon name="warning"/><div><strong>Không cập nhật được dữ liệu</strong><span>{connectionError}. Dữ liệu cũ vẫn được giữ trên màn hình.</span></div><Button variant="ghost" onClick={() => { void loadLive(); void loadConfig(); void eventMonitor.refresh(); }}>Thử lại</Button></div>}
 
       <main className="content">
         {initialLoading && !live.health ? <div className="page-loading"><span className="spinner large"/><p>Đang kết nối tới appliance…</p></div> : <>
-          {page === "overview" && <OverviewPage live={live} config={config} lastUpdated={lastUpdated} onNavigate={navigate}/>} 
+          {page === "overview" && <OverviewPage live={{ ...live, events: eventMonitor.events }} config={config} lastUpdated={lastUpdated} onNavigate={navigate}/>}
           {page === "sessions" && <SessionsPage sessions={live.sessions} onTerminate={terminateSession} onNeedAccess={() => setAccessOpen(true)}/>} 
-          {page === "threats" && <ThreatsPage events={live.events} blocks={live.blocks} reputation={live.reputation} audit={live.audit} securityHasMore={live.securityHasMore} securityGap={live.securityGap} securityEvicted={live.securityEvicted} onLoadMoreSecurity={loadMoreSecurity} onAddBlock={addBlock} onDeleteBlock={deleteBlock} onAddReputation={addReputation} onDeleteReputation={deleteReputation}/>} 
+          {page === "threats" && <ThreatsPage key={token} monitor={eventMonitor} blocks={live.blocks} reputation={live.reputation} audit={live.audit} onAddBlock={addBlock} onDeleteBlock={deleteBlock} onAddReputation={addReputation} onDeleteReputation={deleteReputation}/>}
 		  {page === "policy" && <PolicyPage
 			config={config}
 			capabilities={live.inspectionCapabilities}
@@ -708,7 +642,7 @@ export default function App() {
             onRollback={rollback}
             onOpenAdvanced={() => navigate("configuration", "policy")}
           />}
-          {page === "network" && <NetworkPage config={config} onNavigate={navigate}/>} 
+          {page === "network" && <NetworkPage config={config} onNavigate={navigate}/>}
           {page === "configuration" && <ConfigurationPage
             config={config}
             originPage={pageOrigin}
@@ -733,7 +667,7 @@ function OverviewPage({ live, config, lastUpdated, onNavigate }: { live: LiveDat
   const unavailableDecisions = live.sessions.filter((session) => session.decision_status !== "EVALUATED").length;
   const healthyComponents = live.health ? Object.values(live.health.components).filter((item) => item.status === "ok" || item.status === "healthy").length : 0;
   const componentCount = live.health ? Object.keys(live.health.components).length : 0;
-  const recentEvents = [...live.events].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 5);
+  const recentEvents = live.events.filter(needsAttention).slice(0, 5);
 
   return <div className="page-stack">
     <section className="hero-panel">
@@ -756,14 +690,14 @@ function OverviewPage({ live, config, lastUpdated, onNavigate }: { live: LiveDat
     <section className="metric-grid">
       <MetricCard label="Sessions hoạt động" value={formatNumber(live.stats?.active_sessions ?? live.sessions.length)} detail={`${allowed} được phép`} icon="sessions" tone="blue" onClick={() => onNavigate("sessions")}/>
       <MetricCard label="Decision chưa sẵn sàng" value={formatNumber(unavailableDecisions)} detail="Unavailable hoặc invalidated" icon="warning" tone={unavailableDecisions ? "amber" : "green"} onClick={() => onNavigate("sessions")}/>
-      <MetricCard label="Runtime / policy events" value={formatNumber(live.events.length)} detail={`${live.events.filter((event) => event.event_class === "security").length} security`} icon="threats" tone="amber" onClick={() => onNavigate("threats")}/>
+      <MetricCard label="Sự kiện đã tải" value={formatNumber(live.events.length)} detail={`${live.events.filter((event) => event.feed === "security").length} cảnh báo M3 · cửa sổ trong browser`} icon="threats" tone="amber" onClick={() => onNavigate("threats")}/>
       <MetricCard label="Temporary blocks" value={formatNumber(live.blocks.length)} detail={`${formatNumber(live.stats?.event_queue_dropped)} event bị bỏ`} icon="shield" tone="purple" onClick={() => onNavigate("threats")}/>
     </section>
 
     <div className="overview-grid">
       <section className="panel span-2">
-        <div className="panel-heading"><div><h2>Sự kiện runtime gần đây</h2><p>Lifecycle session và thay đổi quyết định policy</p></div><button className="text-button" onClick={() => onNavigate("threats")}>Xem tất cả <Icon name="chevron" size={14}/></button></div>
-        {recentEvents.length ? <div className="event-list">{recentEvents.map((event) => <div className="event-row" key={event.event_id}><span className={cx("severity-mark", severityClass(event.severity))}/><div><strong>{event.category || event.signature_id || "Runtime event"}</strong><p>{event.event_class} · {event.detector} · session {event.session_id || "unavailable"}</p></div><Badge tone="blue">{event.event_class}</Badge><time>{relativeTime(event.timestamp)}</time></div>)}</div> : <EmptyState icon="check" title="Chưa có sự kiện runtime" description="Session lifecycle và policy events sẽ xuất hiện khi conntrack có traffic."/>}
+        <div className="panel-heading"><div><h2>Cảnh báo & trạng thái bảo vệ</h2><p>Các bản ghi gần đây trong cửa sổ đã tải; xem Sự kiện để kiểm tra từng nguồn</p></div><button className="text-button" onClick={() => onNavigate("threats")}>Xem tất cả <Icon name="chevron" size={14}/></button></div>
+        {recentEvents.length ? <div className="event-list">{recentEvents.map((event) => <div className="event-row" key={eventKey(event)}><span className={cx("severity-mark", severityClass(event.severity))}/><div><strong>{event.category || event.signature_id || "Runtime event"}</strong><p>{event.event_class} · {event.detector} · session {event.session_id || "unavailable"}</p></div><Badge tone="blue">{event.event_class}</Badge><time>{relativeTime(event.timestamp)}</time></div>)}</div> : <EmptyState icon="check" title="Chưa có cảnh báo phù hợp trong dữ liệu đã tải" description="Mở Sự kiện để xem trạng thái nguồn hoặc log runtime chẩn đoán."/>}
       </section>
 
       <section className="panel">
@@ -860,33 +794,20 @@ function DetailSection({ title, children }: { title: string; children: ReactNode
 function DetailPair({ label, value }: { label: string; value: string }) { return <div className="detail-pair"><span>{label}</span><strong>{value}</strong></div>; }
 
 type ThreatTab = "events" | "blocks" | "reputation" | "audit";
-function ThreatsPage({ events, blocks, reputation, audit, securityHasMore, securityGap, securityEvicted, onLoadMoreSecurity, onAddBlock, onDeleteBlock, onAddReputation, onDeleteReputation }: {
-  events: SecurityEvent[];
+function ThreatsPage({ monitor, blocks, reputation, audit, onAddBlock, onDeleteBlock, onAddReputation, onDeleteReputation }: {
+  monitor: EventMonitor;
   blocks: TemporaryBlock[];
   reputation: ReputationEntry[];
   audit: AuditEntry[];
-  securityHasMore: boolean;
-  securityGap: boolean;
-  securityEvicted: number;
-  onLoadMoreSecurity: () => Promise<void>;
   onAddBlock: (input: { indicator: string; reason: string; minutes: number; source_event?: string }) => Promise<boolean>;
   onDeleteBlock: (id: string) => Promise<boolean>;
   onAddReputation: (entry: ReputationEntry) => Promise<boolean>;
   onDeleteReputation: (indicator: string) => Promise<boolean>;
 }) {
   const [tab, setTab] = useState<ThreatTab>("events");
-  const [severity, setSeverity] = useState("ALL");
-  const [eventClass, setEventClass] = useState("ALL");
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<SecurityEvent | null>(null);
   const [blockForm, setBlockForm] = useState({ indicator: "", reason: "Manual block", minutes: 15 });
   const [repForm, setRepForm] = useState({ indicator: "", indicator_type: "IP", reputation_score: 80, category: "malicious" });
   const [saving, setSaving] = useState(false);
-  const orderedEvents = useMemo(() => [...events].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).filter((event) => {
-    const text = `${event.event_class} ${event.category} ${event.detector} ${event.session_id} ${event.source_ip} ${event.destination_ip} ${event.signature_id}`.toLowerCase();
-    return (severity === "ALL" || event.severity === severity) && (eventClass === "ALL" || event.event_class === eventClass) && text.includes(query.toLowerCase());
-  }), [eventClass, events, query, severity]);
-
   async function submitBlock(event: FormEvent) {
     event.preventDefault();
     if (!blockForm.indicator.trim()) return;
@@ -906,14 +827,9 @@ function ThreatsPage({ events, blocks, reputation, audit, securityHasMore, secur
   }
 
   return <div className="page-stack">
-    <section className="subnav panel compact"><button className={cx(tab === "events" && "active")} onClick={() => setTab("events")}>Events <Badge>{events.length}</Badge></button><button className={cx(tab === "blocks" && "active")} onClick={() => setTab("blocks")}>Temporary blocks <Badge>{blocks.length}</Badge></button><button className={cx(tab === "reputation" && "active")} onClick={() => setTab("reputation")}>Reputation <Badge>{reputation.length}</Badge></button><button className={cx(tab === "audit" && "active")} onClick={() => setTab("audit")}>Audit log <Badge>{audit.length}</Badge></button></section>
+    <section className="subnav panel compact"><button className={cx(tab === "events" && "active")} onClick={() => setTab("events")}>Events <Badge>{monitor.events.length}</Badge></button><button className={cx(tab === "blocks" && "active")} onClick={() => setTab("blocks")}>Temporary blocks <Badge>{blocks.length}</Badge></button><button className={cx(tab === "reputation" && "active")} onClick={() => setTab("reputation")}>Reputation <Badge>{reputation.length}</Badge></button><button className={cx(tab === "audit" && "active")} onClick={() => setTab("audit")}>Audit log <Badge>{audit.length}</Badge></button></section>
 
-    {tab === "events" && <>
-      {securityGap && <div className="connection-banner"><Icon name="warning"/><div><strong>Security event stream có khoảng trống</strong><span>Engine đã loại bỏ {formatNumber(securityEvicted)} bản ghi cũ hoặc vừa khởi động lại. Danh sách được đồng bộ lại từ phần lịch sử còn giữ.</span></div></div>}
-      <section className="toolbar panel compact"><div className="search-box"><Icon name="search" size={16}/><input placeholder="Tìm loại event, session, detector hoặc IP…" value={query} onChange={(event) => setQuery(event.target.value)}/></div><select aria-label="Lọc loại event" value={eventClass} onChange={(event) => setEventClass(event.target.value)}><option value="ALL">Mọi loại event</option><option value="runtime">Runtime</option><option value="policy">Policy</option><option value="security">Security</option></select><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="ALL">Mọi severity</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select><span className="result-count">{orderedEvents.length} events</span></section>
-      <section className="panel table-panel"><div className="table-scroll"><table><thead><tr><th>Thời gian</th><th>Loại</th><th>Sự kiện</th><th>Session</th><th>Severity</th><th>Chi tiết</th></tr></thead><tbody>{orderedEvents.map((event) => <tr className="clickable-row" key={event.event_id} onClick={() => setSelected(event)}><td><time>{relativeTime(event.timestamp)}</time><small>{formatDate(event.timestamp)}</small></td><td><Badge tone={event.event_class === "security" ? "critical" : event.event_class === "policy" ? "medium" : "blue"}>{event.event_class}</Badge></td><td><strong>{event.category || "Unknown"}</strong><small>{event.detector}{event.signature_id ? ` · ${event.signature_id}` : ""}</small></td><td className="mono">{event.session_id || "—"}</td><td><Badge tone={severityClass(event.severity)}>{event.severity}</Badge></td><td>{event.evidence || "—"}</td></tr>)}{!orderedEvents.length && <tr><td colSpan={6}><EmptyState icon="check" title="Không có event phù hợp" description="Hệ thống chưa ghi nhận sự kiện theo bộ lọc hiện tại."/></td></tr>}</tbody></table></div></section>
-      {securityHasMore && <div className="panel-actions"><Button variant="ghost" onClick={() => void onLoadMoreSecurity()}>Tải thêm security events</Button></div>}
-    </>}
+    {tab === "events" && <EventsPanel monitor={monitor} onBlock={event => onAddBlock({ indicator: event.source_ip!, reason: `${event.detector}: ${event.category}`, minutes: 60, source_event: event.event_id })}/>}
 
     {tab === "blocks" && <div className="split-grid">
       <section className="panel form-panel"><div className="panel-heading"><div><h2>Thêm temporary block</h2><p>Chặn source indicator có thời hạn trong enforcement layer</p></div></div><form onSubmit={submitBlock}><label>IP hoặc indicator<input required placeholder="203.0.113.42" value={blockForm.indicator} onChange={(event) => setBlockForm({ ...blockForm, indicator: event.target.value })}/></label><label>Lý do<input required value={blockForm.reason} onChange={(event) => setBlockForm({ ...blockForm, reason: event.target.value })}/></label><label>Thời hạn<select value={blockForm.minutes} onChange={(event) => setBlockForm({ ...blockForm, minutes: Number(event.target.value) })}><option value={5}>5 phút</option><option value={15}>15 phút</option><option value={60}>1 giờ</option><option value={1440}>24 giờ</option></select></label><Button type="submit" variant="primary" icon="shield" busy={saving}>Áp dụng block</Button></form></section>
@@ -927,12 +843,7 @@ function ThreatsPage({ events, blocks, reputation, audit, securityHasMore, secur
 
     {tab === "audit" && <section className="panel table-panel"><div className="panel-heading padded"><div><h2>Management audit log</h2><p>Các thao tác làm thay đổi trạng thái; không lưu credentials hoặc payload</p></div><Badge tone="blue">{audit.length} gần nhất</Badge></div><div className="table-scroll"><table><thead><tr><th>Thời gian</th><th>Actor</th><th>Action</th><th>Resource</th><th>Result</th><th>Thông tin</th></tr></thead><tbody>{audit.map((entry) => <tr key={entry.id}><td><strong>{relativeTime(entry.timestamp)}</strong><small>{formatDate(entry.timestamp)}</small></td><td><strong>{entry.actor}</strong><small>{entry.role || "unknown role"}</small></td><td><Badge tone="blue">{entry.action}</Badge></td><td><strong>{entry.resource}</strong><small className="mono">{entry.resource_id || "—"}</small></td><td><Badge tone={entry.result === "SUCCESS" ? "low" : "critical"}>{entry.result}</Badge></td><td>{entry.message || "—"}</td></tr>)}{!audit.length && <tr><td colSpan={6}><EmptyState icon="policy" title="Chưa có audit entry" description="Các thao tác commit, block, terminate và cập nhật candidate sẽ xuất hiện tại đây."/></td></tr>}</tbody></table></div></section>}
 
-    {selected && <EventDrawer event={selected} onClose={() => setSelected(null)} onBlock={async () => { if (selected.source_ip) { const ok = await onAddBlock({ indicator: selected.source_ip, reason: `${selected.detector}: ${selected.category}`, minutes: 60, source_event: selected.event_id }); if (ok) setSelected(null); } }}/>} 
   </div>;
-}
-
-function EventDrawer({ event, onClose, onBlock }: { event: SecurityEvent; onClose: () => void; onBlock: () => Promise<void> }) {
-	return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng" onClick={onClose}/><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">{event.event_class.toUpperCase()} EVENT</span><h2>{event.category}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div><div className="drawer-body"><div className="event-hero"><Badge tone={event.event_class === "security" ? severityClass(event.severity) : "blue"}>{event.event_class}</Badge>{event.event_class === "security" && event.confidence_available && <strong>{Math.round(event.confidence * 100)}% confidence</strong>}<span>{formatDate(event.timestamp)}</span></div><DetailSection title="Nguồn sự kiện"><DetailPair label="Class" value={event.event_class}/><DetailPair label="Producer" value={event.detector}/><DetailPair label="Capture mode" value={event.capture_mode || "Unavailable"}/><DetailPair label="Signature" value={event.signature_id || "Unavailable"}/><DetailPair label="Recommended" value={event.recommended_action || "Unavailable"}/></DetailSection><DetailSection title="Verdict và enforcement"><DetailPair label="Correlation" value={event.correlation_state || "Unavailable"}/><DetailPair label="Alert verdict" value={event.verdict || "Unknown"}/><DetailPair label="Packet verdict" value={event.packet_verdict || "Not reported"}/><DetailPair label="Enforcement" value={event.enforcement ? `${event.enforcement.mechanism} / ${event.enforcement.scope} / ${event.enforcement.status}` : "NOT_REQUESTED"}/></DetailSection><DetailSection title="Liên kết"><DetailPair label="Source" value={event.source_ip || "Unavailable"}/><DetailPair label="Destination" value={event.destination_ip || "Unavailable"}/><DetailPair label="Session" value={event.session_id || "Unavailable"}/></DetailSection>{event.evidence && <DetailSection title="Chi tiết"><pre className="evidence">{event.evidence}</pre></DetailSection>}{event.metadata && <DetailSection title="Metadata"><pre className="json-preview">{JSON.stringify(event.metadata, null, 2)}</pre></DetailSection>}</div>{event.event_class === "security" && event.source_ip && <div className="drawer-footer"><Button variant="danger" icon="shield" onClick={() => void onBlock()}>Chặn source trong 1 giờ</Button></div>}</aside></div>;
 }
 
 export function PolicyPage({ config, capabilities, onSave, onSaveProfiles, onValidate, onCommit, onRollback, onOpenAdvanced }: { config: ConfigExport | null; capabilities?: InspectionCapabilities | null; onSave: (policies: SecurityPolicy[]) => Promise<boolean>; onSaveProfiles?: (profiles: SecurityProfile[]) => Promise<boolean>; onValidate: () => Promise<boolean>; onCommit: (comment: string) => Promise<boolean>; onRollback: () => Promise<boolean>; onOpenAdvanced: () => void }) {
