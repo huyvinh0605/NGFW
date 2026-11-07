@@ -86,16 +86,25 @@ and the M3 preflight instructions. `--start` is an explicit service/network
 activation step. Cloning or running `bootstrap-dev.py` never activates it.
 
 The backend installer does not install Node/npm or start Vite. Prepare the UI
-as a normal user with the development bootstrap command, then run:
+as a normal user with the development bootstrap command. On the Linux VM, run
+this command from the repository root to start the UI in the background:
 
 ```sh
-cd web
-npm run dev -- --host 0.0.0.0
+bash start-web.sh
 ```
 
-Vite is a development server. It is not installed as an automatic startup
-service, and `0.0.0.0` exposes it on the VM's listening interfaces. Use the
-management network when accessing it remotely.
+The script finds `web/` relative to its own real path, so a home-directory
+symlink also works, for example `~/start-web.sh`. It reuses Vite already
+serving that checkout on port 5173 and refuses a port owned by another service.
+It does not install dependencies, rebuild binaries, restart backend services,
+or change Running/Candidate. New process logs are in
+`~/.local/state/ngfw/web-5173/vite.log`. Set `NGFW_WEB_PORT` or `NGFW_WEB_HOST`
+to override the default port or bind address.
+
+Vite is a development server. The script keeps it running after SSH closes;
+it does not configure automatic startup after reboot. The default `0.0.0.0`
+exposes it on the VM's listening interfaces. Use the management network when
+accessing it remotely, such as `http://192.168.100.1:5173` in this lab.
 
 ## M4 and lab-specific assets
 

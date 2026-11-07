@@ -96,6 +96,10 @@ Open `http://127.0.0.1:5173`. Vite proxies `/api` and `/ws` to the API at
 `127.0.0.1:8080`. Restarting systemd on Ubuntu does not rebuild binaries; rerun
 the installer whenever source changes.
 
+On a Linux VM with the web dependencies already installed, `bash start-web.sh`
+starts Vite in the background on port 5173 and can be called again safely.
+See [VM web startup](docs/SETUP.md#ubuntu-2404-appliance) for details.
+
 ## Ubuntu installation
 
 Copy the repository to an Ubuntu Server 24.04 VM. For M1/M2 only:
