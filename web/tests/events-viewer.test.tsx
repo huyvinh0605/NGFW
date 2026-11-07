@@ -50,6 +50,16 @@ test("M4 decision and later forward annotation upsert one request without copyin
   assert.doesNotMatch(JSON.stringify(merged), /SECRET|PRIVATE|Authorization|headers/);
 });
 
+test("routine runtime updates cannot evict every protection transition from the default view", () => {
+  const protection = event("health", { feed: "runtime", category: "InspectionHealthChanged", timestamp: "2026-11-07T03:00:00Z" });
+  const updates = Array.from({ length: 2000 }, (_, i) => event(String(i), { feed: "runtime", category: "SessionUpdated", sequence: String(i) }));
+  const merged = mergeEvents([protection], updates);
+  assert.equal(merged.length, FEED_LIMIT);
+  const alerts = filterEvents(merged, defaultQuery, Date.parse(at));
+  assert.equal(alerts.length, 1); assert.equal(alerts[0].event_id, "health");
+  assert.equal(alerts[0].timestamp, "2026-11-07T03:00:00Z");
+});
+
 test("default view retains LOW detections and protection changes, excludes routine lifecycle noise", () => {
   const rows = [event("low"), event("life", { feed: "runtime", event_class: "runtime", category: "SessionUpdated" }),
     event("health", { feed: "runtime", event_class: "inspection", category: "InspectionHealthChanged" })];

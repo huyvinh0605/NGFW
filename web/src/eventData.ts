@@ -3,6 +3,7 @@ import { normalizeEventPage } from "./runtimeData";
 
 export type EventFeed = "runtime" | "security" | "request";
 export const FEED_LIMIT = 1000;
+export const IMPORTANT_RUNTIME_LIMIT = 100;
 export const EVENT_PAGE_SIZE = 100;
 export type FeedStatus = { updated?: string; error?: string; stream?: string; hasMore?: boolean; gap?: boolean; evicted?: number };
 export const feedNames: Record<EventFeed, string> = { runtime: "Runtime / policy", security: "Suricata M3", request: "Request M4" };
@@ -42,15 +43,19 @@ export function mergeEvents(previous: SecurityEvent[], incoming: SecurityEvent[]
       (prior.sequence && event.sequence && BigInt(prior.sequence) > BigInt(event.sequence)))) continue;
     index.set(key, event);
   }
-  const counts = { runtime: 0, security: 0, request: 0 };
-  return [...index.values()].sort((a, b) => {
+  const ordered = [...index.values()].sort((a, b) => {
     const time = (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
     if (time) return time;
     if (sourceOf(a) === sourceOf(b) && a.sequence && b.sequence) {
       return BigInt(a.sequence) === BigInt(b.sequence) ? 0 : BigInt(a.sequence) > BigInt(b.sequence) ? -1 : 1;
     }
     return eventKey(a).localeCompare(eventKey(b));
-  }).filter(e => ++counts[sourceOf(e)] <= FEED_LIMIT);
+  });
+  // Retain a small, bounded set of protection transitions even when routine
+  // SessionUpdated notifications fill the runtime cache. Their timestamps stay unchanged.
+  const important = new Set(ordered.filter(e => sourceOf(e) === "runtime" && needsAttention(e)).slice(0, IMPORTANT_RUNTIME_LIMIT).map(eventKey));
+  const counts = { runtime: important.size, security: 0, request: 0 };
+  return ordered.filter(e => important.has(eventKey(e)) || ++counts[sourceOf(e)] <= FEED_LIMIT);
 }
 
 export function runtimePage(value: unknown) {

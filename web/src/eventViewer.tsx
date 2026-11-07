@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, APIError, errorMessage } from "./api";
 import { normalizeSessionDetail } from "./runtimeData";
-import { defaultQuery, EVENT_PAGE_SIZE, eventCSV, eventKey, eventOutcome, eventTitle, FEED_LIMIT, feedNames, fieldNames, filterEvents, safeEventText as safeText, sourceOf, text,
+import { defaultQuery, EVENT_PAGE_SIZE, eventCSV, eventKey, eventOutcome, eventTitle, FEED_LIMIT, IMPORTANT_RUNTIME_LIMIT, feedNames, fieldNames, filterEvents, safeEventText as safeText, sourceOf, text,
   type EventFeed, type EventFilter, type FilterField, type ViewerQuery } from "./eventData";
 import type { EventMonitor } from "./useEventFeed";
 import type { SecurityEvent, SessionDetail } from "./types";
@@ -98,7 +98,7 @@ export function EventsPanel({ monitor, onBlock }: { monitor: EventMonitor; onBlo
         <button className="button button-ghost" disabled={!rows.length} onClick={exportPage}>Xuất CSV trang này</button>
         <details onToggle={e => { if (e.currentTarget.open) pause(); }}><summary>Cột hiển thị</summary><div className="event-options">{(Object.keys(columnNames) as Column[]).map(c => <label key={c}><input type="checkbox" checked={columns.includes(c)} onChange={e => setColumns(v => e.target.checked ? [...v, c] : v.filter(x => x !== c))}/>{columnNames[c]}</label>)}</div></details>
       </div>
-      <p className="muted">Lọc trong cửa sổ đã tải, tối đa {FEED_LIMIT} bản ghi mỗi nguồn. Mỗi trang {EVENT_PAGE_SIZE} dòng; không phải truy vấn toàn bộ lịch sử. Tạm dừng bảng vẫn tiếp nhận dữ liệu, không dừng NGFW.</p>
+      <p className="muted">Lọc trong cửa sổ đã tải, tối đa {FEED_LIMIT} bản ghi mỗi nguồn; runtime giữ riêng tối đa {IMPORTANT_RUNTIME_LIMIT} thông báo quan trọng trong giới hạn đó. Mỗi trang {EVENT_PAGE_SIZE} dòng; không phải truy vấn toàn bộ lịch sử. Tạm dừng bảng vẫn tiếp nhận dữ liệu, không dừng NGFW.</p>
       <details className="event-filter-options"><summary>Bộ lọc theo trường & chế độ xem đã lưu</summary>
         <div className="event-actions"><select aria-label="Trường lọc" value={filter.field} onChange={e => setFilter(f => ({ ...f, field: e.target.value as FilterField }))}>{Object.entries(fieldNames).map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select>
           <select aria-label="Kiểu lọc" value={filter.exclude ? "exclude" : "include"} onChange={e => setFilter(f => ({ ...f, exclude: e.target.value === "exclude" }))}><option value="include">Bao gồm</option><option value="exclude">Loại trừ</option></select>
