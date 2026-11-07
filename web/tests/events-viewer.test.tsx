@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 import { renderToStaticMarkup } from "react-dom/server";
-import { defaultQuery, eventCSV, eventKey, eventOutcome, FEED_LIMIT, filterEvents, mergeEvents, needsAttention, requestPage, runtimePage, sequence } from "../src/eventData.ts";
+import { defaultQuery, eventCSV, eventKey, eventOutcome, FEED_LIMIT, filterEvents, formatEndpoint, mergeEvents, needsAttention, requestPage, runtimePage, sequence } from "../src/eventData.ts";
 import { EventDetails, EventsPanel } from "../src/eventViewer.tsx";
 import { normalizeThreatEvent } from "../src/inspectionData.ts";
 import type { SecurityEvent } from "../src/types.ts";
@@ -14,6 +14,14 @@ function event(id: string, patch: Partial<SecurityEvent> = {}): SecurityEvent {
   return { event_id: id, timestamp: at, event_class: "security", feed: "security", detector: "SURICATA", severity: "LOW", confidence: 0, category: "Test alert", ...patch };
 }
 function content(node: ReactTestInstance): string { return node.children.map(c => typeof c === "string" ? c : content(c)).join(""); }
+
+test("endpoint display keeps IPv6 address boundaries, measured port zero and missing fields distinct", () => {
+  assert.equal(formatEndpoint("10.0.0.3", 32001), "10.0.0.3:32001");
+  assert.equal(formatEndpoint("2001:db8::1234", 65535), "[2001:db8::1234]:65535");
+  assert.equal(formatEndpoint("2001:db8::1", 0), "[2001:db8::1]:0");
+  assert.equal(formatEndpoint("10.0.0.3"), "10.0.0.3");
+  assert.equal(formatEndpoint(undefined, 443), "—");
+});
 
 test("runtime pagination advances only to the delivered row, retaining exact decimal identifiers", () => {
   const page = runtimePage({ stream_id: "A", next_sequence: "18446744073709551615", items: [

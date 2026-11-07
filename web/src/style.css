@@ -230,6 +230,7 @@ textarea { padding: 12px; }
 .event-table td, .event-table td strong { font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
 .event-table td small, .events-viewer .badge { font-size: 12px; white-space: normal; }
 .event-table .event-reason { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.event-table td.event-tuple > span, .event-table td.event-tuple > small { white-space: nowrap; overflow-wrap: normal; }
 .event-table td:first-child { min-width: 160px; }
 .event-table td:nth-child(3) { min-width: 210px; max-width: 380px; }
 .event-table .mono { overflow-wrap: anywhere; }

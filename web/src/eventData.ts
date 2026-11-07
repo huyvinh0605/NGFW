@@ -12,6 +12,11 @@ export function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 export function text(value: unknown): string { return typeof value === "string" ? value : ""; }
+export function formatEndpoint(ip?: string, port?: number): string {
+  if (!ip) return "—";
+  const address = ip.includes(":") && !ip.startsWith("[") ? `[${ip}]` : ip;
+  return port == null ? address : `${address}:${port}`;
+}
 export function safeEventText(value: string): string {
   return value.replace(/\bBearer\s+[\w.+/=-]+/gi, "Bearer [đã ẩn]").replace(/\b(authorization|cookie|password|token)\s*[:=]\s*[^\s;,]+/gi, "$1=[đã ẩn]");
 }
