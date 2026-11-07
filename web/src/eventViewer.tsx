@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, APIError, errorMessage } from "./api";
 import { normalizeSessionDetail } from "./runtimeData";
-import { defaultQuery, EVENT_PAGE_SIZE, eventCSV, eventKey, eventOutcome, FEED_LIMIT, feedNames, fieldNames, filterEvents, safeEventText as safeText, sourceOf, text,
+import { defaultQuery, EVENT_PAGE_SIZE, eventCSV, eventKey, eventOutcome, eventTitle, FEED_LIMIT, feedNames, fieldNames, filterEvents, safeEventText as safeText, sourceOf, text,
   type EventFeed, type EventFilter, type FilterField, type ViewerQuery } from "./eventData";
 import type { EventMonitor } from "./useEventFeed";
 import type { SecurityEvent, SessionDetail } from "./types";
@@ -115,7 +115,7 @@ export function EventsPanel({ monitor, onBlock }: { monitor: EventMonitor; onBlo
       <table className="event-table"><thead><tr><th>Thời gian · UTC+7</th><th>Loại / nguồn</th><th>Sự kiện</th>{columns.map(c => <th key={c}>{columnNames[c]}</th>)}</tr></thead><tbody>
         {rows.map(e => <tr className="clickable-row" key={eventKey(e)} onClick={() => openEvent(e)} onKeyDown={key => { if (key.target === key.currentTarget && ["Enter", " "].includes(key.key)) { key.preventDefault(); openEvent(e); } }} tabIndex={0} aria-label={`Chi tiết ${e.category}`}>
           <td><time dateTime={e.timestamp}>{eventTime(e.timestamp)}</time></td><td><Tag tone={sourceOf(e) === "security" ? "critical" : "blue"}>{e.request ? "request M4" : e.event_class}</Tag><small>{feedNames[sourceOf(e)]}</small></td>
-          <td><strong>{safeText(e.category)}</strong><small>{e.detector}{e.signature_id ? ` · SID ${e.signature_id}` : ""}</small></td>
+          <td><strong>{safeText(eventTitle(e))}</strong><small>{e.detector}{e.signature_id ? ` · SID ${e.signature_id}` : ""}</small>{e.evidence && <small className="event-reason">{safeText(e.evidence)}</small>}</td>
           {columns.map(c => <td key={c}>{c === "tuple" ? <><span>{e.source_ip ? `${e.source_ip}${e.source_port != null ? `:${e.source_port}` : ""}` : "—"}</span><small>→ {e.destination_ip ? `${e.destination_ip}${e.destination_port != null ? `:${e.destination_port}` : ""}` : "—"}</small></> :
             c === "session" ? <span className="mono">{e.request?.id || e.session_id || "—"}</span> : c === "severity" ? sourceOf(e) === "runtime" ? "Không áp dụng" : <Tag tone={e.severity.toLowerCase()}>{e.severity}</Tag> : c === "outcome" ? eventOutcome(e) : e.policy_id || "—"}</td>)}
         </tr>)}
@@ -163,7 +163,7 @@ export function EventDetails({ event: e, onClose, onFilter, onContext, onBlock }
   };
   const filterButtons = (field: FilterField, value?: string) => value ? <div className="event-actions"><button className="button button-ghost" onClick={() => onFilter({ field, value, exclude: false })}>Gồm {fieldNames[field]}: {value}</button><button className="button button-ghost" onClick={() => onFilter({ field, value, exclude: true })}>Loại {fieldNames[field]}: {value}</button></div> : null;
   const security = sourceOf(e) === "security";
-  return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng chi tiết sự kiện" onClick={onClose}/><aside ref={dialog} className="drawer event-detail-drawer" role="dialog" aria-modal="true" aria-label="Chi tiết sự kiện"><div className="drawer-header"><div><span className="eyebrow">{feedNames[sourceOf(e)]}</span><h2>{safeText(e.category)}</h2></div><button ref={closeButton} className="icon-button" aria-label="Đóng" onClick={onClose}>×</button></div>
+  return <div className="drawer-layer"><button className="drawer-scrim" aria-label="Đóng chi tiết sự kiện" onClick={onClose}/><aside ref={dialog} className="drawer event-detail-drawer" role="dialog" aria-modal="true" aria-label="Chi tiết sự kiện"><div className="drawer-header"><div><span className="eyebrow">{feedNames[sourceOf(e)]}</span><h2>{safeText(eventTitle(e))}</h2></div><button ref={closeButton} className="icon-button" aria-label="Đóng" onClick={onClose}>×</button></div>
     <div className="drawer-body"><p className="muted">Bản ghi đang xem được giữ cố định. Đóng chi tiết rồi bấm Tiếp tục cập nhật để nhận thay đổi.</p>
       <Section title="Nguồn sự kiện"><Pair label="Thời gian" value={eventTime(e.timestamp)}/><Pair label="Loại" value={e.event_class}/><Pair label="Producer" value={e.detector}/><Pair label="Event ID" value={e.event_id}/><Pair label="Session ID" value={e.session_id}/><Pair label="Policy" value={e.policy_id}/></Section>
       {security && <><Section title="Phát hiện Suricata"><Pair label="Capture mode" value={e.capture_mode || "Chưa có dữ liệu nguồn"}/><Pair label="Signature ID" value={e.signature_id}/><Pair label="Severity" value={e.severity}/><Pair label="Correlation" value={e.correlation_state}/><Pair label="App được nhận diện" value={e.application}/></Section>

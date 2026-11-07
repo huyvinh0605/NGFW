@@ -229,6 +229,7 @@ textarea { padding: 12px; }
 .event-table th { position: sticky; top: 0; z-index: 1; background: #0d1c2d; font-size: 12px; }
 .event-table td, .event-table td strong { font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
 .event-table td small, .events-viewer .badge { font-size: 12px; white-space: normal; }
+.event-table .event-reason { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .event-table td:first-child { min-width: 160px; }
 .event-table td:nth-child(3) { min-width: 210px; max-width: 380px; }
 .event-table .mono { overflow-wrap: anywhere; }
@@ -239,7 +240,7 @@ textarea { padding: 12px; }
 .event-detail-drawer .drawer-body p { font-size: 12px; line-height: 1.6; }
 .event-detail-drawer .detail-pair strong { overflow-wrap: anywhere; white-space: normal; }
 .event-retention { font-size: 12px; line-height: 1.6; }
-@media (max-width: 800px) { .event-source-status { grid-template-columns: 1fr; } .event-toolbar > select { width: 100%; } }
+@media (max-width: 800px) { .event-source-status { grid-template-columns: 1fr; } .event-toolbar > select { width: 100%; } .events-subnav { flex-wrap: wrap; } }
 table { width: 100%; border-collapse: collapse; font-size: 9px; }
 th { height: 41px; padding: 0 13px; color: #637c91; border-bottom: 1px solid var(--line); background: rgba(5, 15, 26, .25); font-size: 8px; font-weight: 600; letter-spacing: .035em; text-align: left; text-transform: uppercase; white-space: nowrap; }
 td { height: 55px; padding: 8px 13px; border-bottom: 1px solid var(--line-soft); color: #a8b9c8; vertical-align: middle; }

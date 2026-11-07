@@ -827,7 +827,7 @@ function ThreatsPage({ monitor, blocks, reputation, audit, onAddBlock, onDeleteB
   }
 
   return <div className="page-stack">
-    <section className="subnav panel compact"><button className={cx(tab === "events" && "active")} onClick={() => setTab("events")}>Events <Badge>{monitor.events.length}</Badge></button><button className={cx(tab === "blocks" && "active")} onClick={() => setTab("blocks")}>Temporary blocks <Badge>{blocks.length}</Badge></button><button className={cx(tab === "reputation" && "active")} onClick={() => setTab("reputation")}>Reputation <Badge>{reputation.length}</Badge></button><button className={cx(tab === "audit" && "active")} onClick={() => setTab("audit")}>Audit log <Badge>{audit.length}</Badge></button></section>
+    <section className="subnav panel compact events-subnav"><button className={cx(tab === "events" && "active")} onClick={() => setTab("events")}>Events <Badge>{monitor.events.length}</Badge></button><button className={cx(tab === "blocks" && "active")} onClick={() => setTab("blocks")}>Temporary blocks <Badge>{blocks.length}</Badge></button><button className={cx(tab === "reputation" && "active")} onClick={() => setTab("reputation")}>Reputation <Badge>{reputation.length}</Badge></button><button className={cx(tab === "audit" && "active")} onClick={() => setTab("audit")}>Audit log <Badge>{audit.length}</Badge></button></section>
 
     {tab === "events" && <EventsPanel monitor={monitor} onBlock={event => onAddBlock({ indicator: event.source_ip!, reason: `${event.detector}: ${event.category}`, minutes: 60, source_event: event.event_id })}/>}
 

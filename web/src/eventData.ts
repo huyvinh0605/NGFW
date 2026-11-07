@@ -21,6 +21,17 @@ export function sequence(value: unknown): string {
 }
 export function sourceOf(event: SecurityEvent): EventFeed { return event.feed ?? (event.event_class === "security" ? "security" : "runtime"); }
 export function eventKey(event: SecurityEvent): string { return `${sourceOf(event)}:${event.stream_id ?? ""}:${event.event_id}`; }
+export function eventTitle(event: SecurityEvent): string {
+  if (sourceOf(event) !== "runtime") return event.category;
+  const names: Record<string, string> = {
+    SessionCreated: "Phiên mới được theo dõi", SessionUpdated: "Cập nhật trạng thái phiên", SessionClosed: "Bản ghi phiên đã đóng",
+    SessionInvalidated: "Quyết định phiên hết hiệu lực", DecisionChanged: "Quyết định policy thay đổi", ApplicationIdentified: "Đã nhận diện ứng dụng",
+    InspectionStateChanged: "Trạng thái kiểm tra phiên thay đổi", InspectionHealthChanged: "Trạng thái nguồn kiểm tra thay đổi",
+    SecurityAlert: "Có cảnh báo bảo mật (tham chiếu)", SecurityEventUpdated: "Cảnh báo bảo mật được bổ sung",
+    RequestGateDecision: "M4 quyết định request (tham chiếu)", RequestGateResult: "M4 cập nhật kết quả forward (tham chiếu)",
+  };
+  return names[text(event.metadata?.kind) || event.category] || event.category;
+}
 
 /** Separate bounded caches: a busy runtime stream cannot evict security evidence. */
 export function mergeEvents(previous: SecurityEvent[], incoming: SecurityEvent[], reset?: EventFeed): SecurityEvent[] {
