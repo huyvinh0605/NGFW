@@ -211,36 +211,36 @@ textarea { padding: 12px; }
 .table-panel { overflow: hidden; padding: 0; }
 .table-scroll { width: 100%; overflow-x: auto; }
 /* Event workflows use the existing panels, palette and drawer. */
+.events-viewer { font-size: 9px; }
 .event-source-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.event-source-status > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.event-source-status > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.event-source-status strong { font-size: 10px; font-weight: 650; }
 .event-source-status span { color: var(--muted); overflow-wrap: anywhere; }
 .event-source-status .event-warning { color: var(--amber); }
 .event-toolbar { flex-wrap: wrap; }
 .event-toolbar .search-box { min-width: 210px; }
 .event-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .event-actions input, .event-actions select { width: auto; max-width: 100%; min-width: 120px; }
-.event-controls > p, .event-filter-options p { margin-top: 10px; font-size: 12px; line-height: 1.6; }
-.events-viewer summary { cursor: pointer; font-size: 12px; color: #a8b9c8; padding: 8px 0; }
-.event-options { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px; }
-.event-options label { display: flex; align-items: center; gap: 5px; font-size: 12px; }
-.event-options input { width: auto; }
+.event-controls > p, .event-filter-options p { margin-top: 8px; font-size: 8px; line-height: 1.55; }
+.events-viewer summary { cursor: pointer; font-size: 9px; color: var(--muted); padding: 6px 0; }
+.event-options { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 0; }
+.event-options label { display: flex; flex-direction: row; align-items: center; gap: 7px; }
+.event-options input { width: 13px; height: 13px; accent-color: var(--cyan); }
 .event-filter-chips { margin-top: 10px; }
 .event-table-scroll { max-height: 62vh; overflow: auto; }
-.event-table th { position: sticky; top: 0; z-index: 1; background: #0d1c2d; font-size: 12px; }
-.event-table td, .event-table td strong { font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
-.event-table td small, .events-viewer .badge { font-size: 12px; white-space: normal; }
+.event-table th { position: sticky; top: 0; z-index: 1; background: #0d1c2d; }
+.event-table td, .event-table td strong { white-space: normal; overflow-wrap: anywhere; }
+.event-table td small { white-space: normal; }
 .event-table .event-reason { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .event-table td.event-tuple > span, .event-table td.event-tuple > small { white-space: nowrap; overflow-wrap: normal; }
-.event-table td:first-child { min-width: 160px; }
 .event-table td:nth-child(3) { min-width: 210px; max-width: 380px; }
 .event-table .mono { overflow-wrap: anywhere; }
 .event-table tr:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
-.event-pagination { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px; font-size: 12px; color: var(--muted); }
-.event-detail-drawer { width: min(550px, 94vw); }
+.event-pagination { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; color: var(--muted); }
 .event-detail-drawer .drawer-header h2 { overflow-wrap: anywhere; }
-.event-detail-drawer .drawer-body p { font-size: 12px; line-height: 1.6; }
+.event-detail-drawer .drawer-body p { line-height: 1.55; }
 .event-detail-drawer .detail-pair strong { overflow-wrap: anywhere; white-space: normal; }
-.event-retention { font-size: 12px; line-height: 1.6; }
+.event-retention { font-size: 8px; line-height: 1.55; }
 @media (max-width: 800px) { .event-source-status { grid-template-columns: 1fr; } .event-toolbar > select { width: 100%; } .events-subnav { flex-wrap: wrap; } }
 table { width: 100%; border-collapse: collapse; font-size: 9px; }
 th { height: 41px; padding: 0 13px; color: #637c91; border-bottom: 1px solid var(--line); background: rgba(5, 15, 26, .25); font-size: 8px; font-weight: 600; letter-spacing: .035em; text-align: left; text-transform: uppercase; white-space: nowrap; }
