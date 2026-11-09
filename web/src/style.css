@@ -241,6 +241,43 @@ textarea { padding: 12px; }
 .event-detail-drawer .drawer-body p { line-height: 1.55; }
 .event-detail-drawer .detail-pair strong { overflow-wrap: anywhere; white-space: normal; }
 .event-retention { font-size: 8px; line-height: 1.55; }
+.event-actions > details[open] { flex-basis: 100%; min-width: 0; }
+.event-column-picker { max-width: 760px; padding: 6px 0 10px; }
+.event-column-picker > input { width: min(100%, 330px); }
+.event-column-list { max-height: 330px; overflow: auto; margin: 8px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 18px; }
+.event-column-option { min-width: 0; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.event-column-option label { flex-direction: row; align-items: center; gap: 7px; }
+.event-column-option input[type="checkbox"] { width: 13px; min-width: 0; height: 13px; flex: 0 0 13px; accent-color: var(--cyan); }
+.event-column-option label > span { min-width: 0; }
+.event-column-option small { display: block; margin-top: 3px; font-size: 8px; font-weight: 400; color: var(--subtle); }
+.event-column-adjust { display: flex; align-items: center; gap: 4px; margin: 5px 0 0 20px; }
+.event-column-adjust .icon-button { width: 23px; height: 26px; font-size: 10px; }
+.event-column-adjust select { min-width: 0; height: 28px; width: auto; font-size: 9px; }
+.event-column-resize { position: absolute; top: 0; right: 0; bottom: 0; width: 8px; border-right: 1px solid var(--line); cursor: col-resize; touch-action: none; }
+.event-column-resize:hover, .event-column-resize:focus-visible { background: rgba(54, 214, 197, .18); outline: 1px solid var(--cyan); }
+.event-table .event-pinned { background: #0d1a2a; }
+.event-table th.event-pinned { background: #0d1c2d; }
+.event-table tr:hover td.event-pinned, .event-table .event-related-row td { background: #102539; }
+.event-table td[data-column="time"] time { white-space: normal; }
+.event-cell { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.event-cell-value { flex: 1; min-width: 0; }
+.event-cell-more { flex: 0 0 18px; width: 18px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: 4px; color: var(--muted); background: transparent; font-size: 12px; opacity: 0; }
+.event-cell:hover .event-cell-more, .event-cell:focus-within .event-cell-more { opacity: 1; }
+.event-cell-more:hover { border-color: var(--line); color: var(--cyan); }
+.event-cell-menu { position: fixed; z-index: 80; width: 250px; max-height: calc(100vh - 16px); overflow-y: auto; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); box-shadow: var(--shadow); color: var(--text); font-size: 9px; }
+.event-cell-menu > div + div { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
+.event-cell-menu span { display: block; padding: 5px 7px; color: var(--muted); overflow-wrap: anywhere; }
+.event-cell-menu button { display: block; width: 100%; padding: 6px 7px; border: 0; border-radius: 4px; background: transparent; text-align: left; font-size: 9px; }
+.event-cell-menu button:hover, .event-cell-menu button:focus-visible { background: var(--surface-3); color: var(--cyan); }
+.event-time-picker { padding: 8px 0; }
+.event-time-picker .event-actions { align-items: flex-end; }
+.event-time-picker input { min-width: 195px; font-size: 9px; }
+.event-related-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.event-related-list .button { display: block; text-align: left; white-space: normal; }
+.event-related-list span { display: block; color: var(--muted); font-size: 8px; font-weight: 400; }
+.event-related-list strong { display: block; margin-top: 4px; font-size: 9px; font-weight: 600; }
+@media (hover: none) { .event-cell-more { opacity: 1; } }
+@media (max-width: 800px) { .event-column-list { grid-template-columns: 1fr; } }
 @media (max-width: 800px) { .event-source-status { grid-template-columns: 1fr; } .event-toolbar > select { width: 100%; } .events-subnav { flex-wrap: wrap; } }
 table { width: 100%; border-collapse: collapse; font-size: 9px; }
 th { height: 41px; padding: 0 13px; color: #637c91; border-bottom: 1px solid var(--line); background: rgba(5, 15, 26, .25); font-size: 8px; font-weight: 600; letter-spacing: .035em; text-align: left; text-transform: uppercase; white-space: nowrap; }

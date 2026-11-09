@@ -102,7 +102,15 @@ export function requestPage(value: unknown) {
   return { items, next: sequence(input.next_sequence ?? 0), hasMore: input.has_more === true };
 }
 
-export type EventView = "alerts" | "security" | "request" | "runtime" | "all";
+export type EventView = "alerts" | "security" | "request" | "connection" | "runtime" | "all";
+export type EventType = "intrusion" | "request" | "connection" | "policy" | "system";
+export const eventTypeNames: Record<EventType, string> = { intrusion: "Xâm nhập", request: "Request web", connection: "Kết nối", policy: "Policy", system: "Hệ thống" };
+export function eventTypeOf(e: SecurityEvent): EventType {
+  if (sourceOf(e) === "security") return "intrusion";
+  if (sourceOf(e) === "request") return "request";
+  if (e.event_class === "policy") return "policy";
+  return ["SessionCreated", "SessionUpdated", "SessionClosed", "ApplicationIdentified", "InspectionStateChanged"].includes(text(e.metadata?.kind) || e.category) ? "connection" : "system";
+}
 export function needsAttention(e: SecurityEvent): boolean {
   if (sourceOf(e) === "security") return true;
   if (e.request) return Boolean(e.signature_id) || e.verdict !== "ALLOW" || !e.request.completed || Boolean(e.request.error_code) ||
@@ -111,21 +119,44 @@ export function needsAttention(e: SecurityEvent): boolean {
   return e.category === "InspectionHealthChanged" || e.enforcement?.status === "FAILED" ||
     ["ERROR", "FAILED", "DEGRADED", "UNAVAILABLE"].includes(text(e.metadata?.state).toUpperCase());
 }
-export type FilterField = "source_ip" | "destination_ip" | "session_id" | "signature_id" | "capture_mode" | "verdict" | "policy_id" | "detector";
-export const fieldNames: Record<FilterField, string> = { source_ip: "IP nguồn", destination_ip: "IP đích", session_id: "Session ID", signature_id: "Signature ID", capture_mode: "IDS / IPS", verdict: "Verdict", policy_id: "Policy ID", detector: "Nguồn phát" };
+export type FilterField = "event_type" | "source_ip" | "destination_ip" | "source_port" | "destination_port" | "session_id" | "request_id" | "signature_id" | "capture_mode" | "verdict" | "policy_id" | "detector" | "application";
+export const fieldNames: Record<FilterField, string> = { event_type: "Loại sự kiện", source_ip: "IP nguồn", destination_ip: "IP đích", source_port: "Cổng nguồn", destination_port: "Cổng đích", session_id: "Session ID", request_id: "Request ID", signature_id: "Signature ID", capture_mode: "IDS / IPS", verdict: "Verdict", policy_id: "Policy ID", detector: "Nguồn phát", application: "Ứng dụng" };
 export type EventFilter = { field: FilterField; value: string; exclude: boolean };
-export type ViewerQuery = { view: EventView; query: string; severity: string; minutes: string; filters: EventFilter[] };
+export type EventTimeWindow = { mode: "fixed" | "expanding"; start: string; end?: string };
+export type ViewerQuery = { view: EventView; query: string; severity: string; minutes: string; filters: EventFilter[]; time?: EventTimeWindow };
 export const defaultQuery: ViewerQuery = { view: "alerts", query: "", severity: "ALL", minutes: "ALL", filters: [] };
+export function filterValue(e: SecurityEvent, field: FilterField): string {
+  if (field === "event_type") return eventTypeOf(e);
+  if (field === "request_id") return e.request?.id ?? "";
+  return String(e[field] ?? "");
+}
+export function validTimeWindow(value: unknown): value is EventTimeWindow {
+  const w = record(value), start = Date.parse(text(w.start)), end = Date.parse(text(w.end));
+  return Number.isFinite(start) && (w.mode === "expanding" || w.mode === "fixed" && Number.isFinite(end) && end >= start);
+}
+/** Only explicit identifiers establish an association; a matching IP or timestamp does not. */
+export function relatedEvents(event: SecurityEvent, events: SecurityEvent[]): SecurityEvent[] {
+  const reference = text(event.metadata?.related_event_id);
+  return events.filter(other => eventKey(event) !== eventKey(other) && (
+    Boolean(event.session_id && event.session_id === other.session_id) ||
+    Boolean(event.request?.id && event.request.id === other.request?.id) ||
+    Boolean(reference && sourceOf(event) === "runtime" && sourceOf(other) !== "runtime" && reference === other.event_id) ||
+    Boolean(sourceOf(other) === "runtime" && sourceOf(event) !== "runtime" && text(other.metadata?.related_event_id) === event.event_id)
+  ));
+}
 export function filterEvents(events: SecurityEvent[], query: ViewerQuery, now: number): SecurityEvent[] {
   return events.filter(e => {
     const feed = sourceOf(e);
-    if (query.view === "alerts" ? !needsAttention(e) : query.view !== "all" && feed !== query.view) return false;
+    if (query.view === "alerts" ? !needsAttention(e) : query.view === "connection" ? eventTypeOf(e) !== "connection" : query.view !== "all" && feed !== query.view) return false;
     if (query.severity !== "ALL" && (feed === "runtime" || e.severity !== query.severity)) return false;
-    if (query.minutes !== "ALL" && (!Number.isFinite(Date.parse(e.timestamp)) || Date.parse(e.timestamp) < now - Number(query.minutes) * 60000)) return false;
-    const haystack = [e.category, e.detector, e.session_id, e.request?.id, e.source_ip, e.destination_ip, e.signature_id, e.policy_id, e.evidence].join(" ").toLowerCase();
+    const observed = Date.parse(e.timestamp);
+    if (query.time) {
+      if (!validTimeWindow(query.time) || !Number.isFinite(observed) || observed < Date.parse(query.time.start) || observed > (query.time.mode === "fixed" ? Date.parse(query.time.end!) : now)) return false;
+    } else if (query.minutes !== "ALL" && (!Number.isFinite(observed) || observed < now - Number(query.minutes) * 60000 || observed > now)) return false;
+    const haystack = [e.category, e.detector, e.session_id, e.request?.id, e.source_ip, e.destination_ip, e.source_port, e.destination_port, e.signature_id, e.policy_id, e.application, e.evidence].join(" ").toLowerCase();
     if (!haystack.includes(query.query.toLowerCase())) return false;
     return (Object.keys(fieldNames) as FilterField[]).every(field => {
-      const value = String(e[field] ?? "").toLowerCase(), choices = query.filters.filter(f => f.field === field);
+      const value = filterValue(e, field).toLowerCase(), choices = query.filters.filter(f => f.field === field);
       const includes = choices.filter(f => !f.exclude), excludes = choices.filter(f => f.exclude);
       // Exclusion requires an actual value: missing data must not silently match NOT IP.
       return (!choices.length || Boolean(value)) && (!includes.length || includes.some(f => f.value.toLowerCase() === value)) && !excludes.some(f => f.value.toLowerCase() === value);
