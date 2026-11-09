@@ -7,3 +7,5 @@ go.sum text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.rules text eol=lf
+*.nft text eol=lf
+*.service text eol=lf

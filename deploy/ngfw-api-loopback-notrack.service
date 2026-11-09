@@ -1,0 +1,24 @@
+[Unit]
+Description=Exclude IPv4 loopback management API transport from conntrack
+After=systemd-modules-load.service nftables.service
+Before=ngfw-engine.service ngfw-api.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=ngfw-api-loopback-notrack
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/lib/ngfw/api-loopback-notrack.sh apply
+ExecReload=/usr/local/lib/ngfw/api-loopback-notrack.sh apply
+ExecStop=/usr/local/lib/ngfw/api-loopback-notrack.sh remove
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

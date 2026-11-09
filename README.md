@@ -100,6 +100,11 @@ On a Linux VM with the web dependencies already installed, `bash start-web.sh`
 starts Vite in the background on port 5173 and can be called again safely.
 See [VM web startup](docs/SETUP.md#ubuntu-2404-appliance) for details.
 
+For appliances that do not need conntrack/RuntimeStore records for the local
+Vite-to-API transport, see the optional [API loopback conntrack exemption](docs/API_LOOPBACK_NOTRACK.md).
+It has a separate installer and does not change forwarded traffic or restart
+the NGFW backends.
+
 ## Ubuntu installation
 
 Copy the repository to an Ubuntu Server 24.04 VM. For M1/M2 only:

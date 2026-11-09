@@ -1,0 +1,9 @@
+# Optional management transport exemption. The engine owns other nft tables.
+table inet ngfw_api_loopback_notrack {
+    comment "owner=ngfw-api-loopback-notrack schema=1"
+    chain output {
+        type filter hook output priority raw; policy accept;
+        oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport 8080 counter notrack
+        oifname "lo" ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp sport 8080 counter notrack
+    }
+}
